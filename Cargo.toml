@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+authors = ["Kadra contributors"]
+publish = false
+
+[workspace.dependencies]
+kadra-core = { path = "crates/kadra-core" }
+
+anyhow = "1.0.104"
+directories = "6.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.21"
+toml = "1.2.1"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+tauri-build = { version = "2.7.4", features = [] }
+tauri-plugin-global-shortcut = "2.4.1"
+tauri-plugin-single-instance = "2.5.5"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# Optimise dependencies in debug builds: capture and encoding code is far too
+# slow unoptimised to be representative while developing.
+[profile.dev.package."*"]
+opt-level = 2
