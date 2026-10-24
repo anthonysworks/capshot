@@ -1,0 +1,80 @@
+:root {
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+  --bg: #f3f3f3;
+  --surface: #fbfbfb;
+  --control: #ffffff;
+  --border: #e0e0e0;
+  --text: #1b1b1b;
+  --text-muted: #5f5f5f;
+  --accent: #3b63e6;
+  --on-accent: #ffffff;
+  --danger: #c42b1c;
+  --success: #0f7b0f;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202020;
+    --surface: #2b2b2b;
+    --control: #2d2d2d;
+    --border: #3a3a3a;
+    --text: #f2f2f2;
+    --text-muted: #a8a8a8;
+    --accent: #7b9cff;
+    --on-accent: #101010;
+    --danger: #ff99a4;
+    --success: #6ccb5f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.4 var(--font);
+  background: var(--bg);
+  color: var(--text);
+  user-select: none;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--control);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 10px;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+input[type="checkbox"],
+input[type="range"] {
+  accent-color: var(--accent);
+  padding: 0;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
