@@ -2,6 +2,7 @@
 //! with Tauri. Capture and encoding live in the `kadra-*` crates.
 
 mod actions;
+mod capture;
 mod commands;
 mod hotkeys;
 mod state;
@@ -11,6 +12,8 @@ mod windows;
 use kadra_core::{Config, Paths, logging};
 use tauri::{Manager, RunEvent};
 
+use crate::actions::Action;
+use crate::capture::CaptureService;
 use crate::state::AppState;
 
 /// Entry point called from `main`.
@@ -30,20 +33,47 @@ pub fn run() {
         Config::default()
     });
 
+    // A second launch such as `kadra.exe --capture` was started by the user
+    // and may take the foreground; hand that right to the running instance
+    // so its overlay gets keyboard focus.
+    let args: Vec<String> = std::env::args().collect();
+    if Action::from_args(&args).is_some() {
+        // SAFETY: plain call, no pointers involved.
+        let _ = unsafe {
+            ::windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+                ::windows::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+            )
+        };
+    }
+
     let app = tauri::Builder::default()
         // Must be registered first so a second launch exits before doing any work.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            windows::show_settings(app);
-        }))
+        // `kadra.exe --capture` triggers a capture in the running instance,
+        // any other launch opens the settings.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, args, _cwd| match Action::from_args(&args) {
+                Some(action) => actions::trigger(app, action),
+                None => windows::show_settings(app),
+            },
+        ))
         .plugin(hotkeys::plugin())
         .manage(AppState::new(paths, config))
         .manage(hotkeys::Registered::default())
-        .setup(|app| {
+        .setup(move |app| {
             tray::create(app.handle())?;
             let state = app.state::<AppState>();
             let hotkeys = state.config().hotkeys.clone();
             if let Err(err) = hotkeys::apply(app.handle(), &hotkeys) {
                 tracing::warn!("{err}");
+            }
+            match CaptureService::start(app.handle()) {
+                Ok(service) => {
+                    app.manage(service);
+                }
+                Err(err) => tracing::error!("cannot start the capture overlay: {err}"),
+            }
+            if let Some(action) = Action::from_args(&args) {
+                actions::trigger(app.handle(), action);
             }
             Ok(())
         })

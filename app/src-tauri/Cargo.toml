@@ -17,6 +17,8 @@ tauri-build.workspace = true
 
 [dependencies]
 kadra-core.workspace = true
+kadra-encode.workspace = true
+kadra-overlay.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true
@@ -25,6 +27,7 @@ tauri.workspace = true
 tauri-plugin-global-shortcut.workspace = true
 tauri-plugin-single-instance.workspace = true
 tracing.workspace = true
+windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 
 [lints]
 workspace = true
