@@ -11,7 +11,10 @@ authors = ["Kadra contributors"]
 publish = false
 
 [workspace.dependencies]
+kadra-capture = { path = "crates/kadra-capture" }
 kadra-core = { path = "crates/kadra-core" }
+kadra-encode = { path = "crates/kadra-encode" }
+kadra-overlay = { path = "crates/kadra-overlay" }
 
 anyhow = "1.0.104"
 directories = "6.0.0"
@@ -22,6 +25,7 @@ toml = "1.2.1"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+windows = "0.62.2"
 
 tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-build = { version = "2.7.4", features = [] }
@@ -38,6 +42,8 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 must_use_candidate = "allow"
+# Passing `&mut local` to Win32 out-parameters is idiomatic with windows-rs.
+borrow_as_ptr = "allow"
 
 [profile.release]
 opt-level = 3
