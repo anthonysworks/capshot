@@ -1,0 +1,21 @@
+[package]
+name = "kadra-encode"
+description = "Image encoding and file output for Kadra."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+kadra-core.workspace = true
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
