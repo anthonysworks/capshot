@@ -7,10 +7,12 @@
 
 mod clipboard;
 pub mod layout;
+mod preview;
 pub mod render;
 pub mod selection;
 mod window;
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -24,6 +26,8 @@ pub use selection::Mode;
 pub struct CaptureRequest {
     pub mode: Mode,
     pub copy_to_clipboard: bool,
+    /// Show a thumbnail in the corner of the screen afterwards.
+    pub show_preview: bool,
     /// When the user asked for the capture, to measure latency.
     pub requested_at: Instant,
 }
@@ -31,6 +35,8 @@ pub struct CaptureRequest {
 #[derive(Debug)]
 pub enum CaptureResult {
     Captured {
+        /// Identifies the capture in [`Overlay::attach_file`].
+        id: u64,
         image: BgraImage,
         copied: bool,
     },
@@ -44,10 +50,17 @@ pub enum CaptureResult {
 /// work (encoding, saving) to another thread.
 pub type ResultHandler = Box<dyn FnMut(CaptureResult) + Send + 'static>;
 
+/// Messages sent to the overlay thread.
+#[derive(Debug)]
+enum Command {
+    Capture(CaptureRequest),
+    AttachFile { capture_id: u64, path: PathBuf },
+}
+
 /// Handle to the overlay thread.
 #[derive(Debug)]
 pub struct Overlay {
-    requests: mpsc::Sender<CaptureRequest>,
+    commands: mpsc::Sender<Command>,
     hwnd: isize,
 }
 
@@ -55,16 +68,16 @@ impl Overlay {
     /// Starts the overlay thread and waits until it is ready.
     pub fn spawn(handler: impl FnMut(CaptureResult) + Send + 'static) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let (requests, requests_rx) = mpsc::channel();
+        let (commands, commands_rx) = mpsc::channel();
         let handler: ResultHandler = Box::new(handler);
         std::thread::Builder::new()
             .name("kadra-overlay".into())
-            .spawn(move || window::run(ready_tx, requests_rx, handler))
+            .spawn(move || window::run(ready_tx, commands_rx, handler))
             .map_err(|e| e.to_string())?;
         let hwnd = ready_rx
             .recv()
             .map_err(|_| "overlay thread exited during start-up".to_owned())??;
-        Ok(Self { requests, hwnd })
+        Ok(Self { commands, hwnd })
     }
 
     fn post(&self, msg: u32) {
@@ -74,7 +87,17 @@ impl Overlay {
 
     /// Opens the overlay. Ignored while a capture is already in progress.
     pub fn capture(&self, request: CaptureRequest) {
-        if self.requests.send(request).is_ok() {
+        self.send(Command::Capture(request));
+    }
+
+    /// Tells the preview where capture `capture_id` was saved, so that it
+    /// can be opened or dragged into another application.
+    pub fn attach_file(&self, capture_id: u64, path: PathBuf) {
+        self.send(Command::AttachFile { capture_id, path });
+    }
+
+    fn send(&self, command: Command) {
+        if self.commands.send(command).is_ok() {
             self.post(window::WM_KADRA_REQUEST);
         }
     }

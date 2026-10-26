@@ -15,8 +15,9 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::time::Instant;
 
-use kadra_capture::{Capturer, Gpu, Snapshot};
+use kadra_capture::{Capturer, Gpu, GpuKind, Snapshot};
 use kadra_core::{BgraImage, Point, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, TRUE, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
@@ -33,8 +34,8 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Ole::OleInitialize;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
@@ -56,9 +57,10 @@ use windows::core::{BOOL, Interface, w};
 
 use crate::clipboard;
 use crate::layout::{Button, Magnifier, Toolbar};
+use crate::preview::{self, Preview};
 use crate::render::{Renderer, Scene, Screenshot};
 use crate::selection::{Outcome, Selection, Targets};
-use crate::{CaptureRequest, CaptureResult, ResultHandler};
+use crate::{CaptureRequest, CaptureResult, Command, ResultHandler};
 
 /// A capture request is waiting in the channel.
 pub const WM_KADRA_REQUEST: u32 = WM_APP + 1;
@@ -89,11 +91,26 @@ struct Engine {
 }
 
 impl Engine {
+    /// Screenshots run on WARP, the software Direct3D device: every pixel
+    /// ends up in system memory anyway, and it saves the ~50 MB and ~150 ms
+    /// a GPU driver costs, for the same end-to-end latency.
+    /// `KADRA_GPU=hardware` uses the graphics card instead.
     fn new() -> windows::core::Result<Self> {
-        let gpu = Gpu::new()?;
+        let kind = if std::env::var("KADRA_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("hardware")) {
+            GpuKind::Hardware
+        } else {
+            GpuKind::Software
+        };
+        let gpu = Gpu::with_kind(kind)?;
+        let renderer = Renderer::new(&gpu)?;
+        if let Err(err) = renderer.warm_up() {
+            tracing::warn!("overlay warm-up failed: {err}");
+        }
+        let capturer = Capturer::new(gpu);
+        capturer.warm_up();
         Ok(Self {
-            renderer: Renderer::new(&gpu)?,
-            capturer: Capturer::new(gpu),
+            renderer,
+            capturer,
             swap: None,
         })
     }
@@ -242,8 +259,10 @@ struct State {
     hwnd: HWND,
     engine: Option<Engine>,
     session: Option<Session>,
-    requests: Receiver<CaptureRequest>,
+    commands: Receiver<Command>,
     handler: ResultHandler,
+    preview: Preview,
+    next_capture_id: u64,
     cross: HCURSOR,
     arrow: HCURSOR,
 }
@@ -311,8 +330,17 @@ impl State {
     fn handle(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_KADRA_REQUEST => {
-                // Only the latest pending request matters.
-                if let Some(request) = self.requests.try_iter().last() {
+                // Only the latest pending capture request matters.
+                let mut capture = None;
+                for command in self.commands.try_iter().collect::<Vec<_>>() {
+                    match command {
+                        Command::Capture(request) => capture = Some(request),
+                        Command::AttachFile { capture_id, path } => {
+                            self.preview.attach_file(capture_id, path);
+                        }
+                    }
+                }
+                if let Some(request) = capture {
                     self.start(request);
                 }
             }
@@ -387,6 +415,7 @@ impl State {
         if self.session.is_some() {
             return;
         }
+        self.preview.hide();
         match self.try_start(request) {
             Ok(latency) => tracing::info!(latency_ms = latency, "capture overlay shown"),
             Err(err) => {
@@ -405,7 +434,9 @@ impl State {
         let hwnd = self.hwnd;
         let engine = self.engine.as_mut().ok_or("no engine")?;
 
+        let t0 = Instant::now();
         let snapshot = engine.capturer.snapshot(Some(hwnd))?;
+        let t_capture = t0.elapsed();
         let max = engine.renderer.max_bitmap_size();
         if snapshot.image.width() > max || snapshot.image.height() > max {
             return Err(format!(
@@ -416,6 +447,7 @@ impl State {
             .into());
         }
         let shot = engine.renderer.load_screenshot(&snapshot.image)?;
+        let t_upload = t0.elapsed();
 
         let mut cursor = windows::Win32::Foundation::POINT::default();
         // SAFETY: valid out pointer.
@@ -460,9 +492,20 @@ impl State {
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
+        let t_shown = t0.elapsed();
         self.render();
+        let t_rendered = t0.elapsed();
         cloak(hwnd, false);
         take_focus(hwnd);
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        tracing::debug!(
+            capture_ms = ms(t_capture),
+            upload_ms = ms(t_upload.saturating_sub(t_capture)),
+            window_ms = ms(t_shown.saturating_sub(t_upload)),
+            render_ms = ms(t_rendered.saturating_sub(t_shown)),
+            focus_ms = ms(t0.elapsed().saturating_sub(t_rendered)),
+            "overlay timings"
+        );
 
         let latency = self.session.as_ref().map_or(0.0, |s| {
             s.request.requested_at.elapsed().as_secs_f64() * 1000.0
@@ -661,7 +704,15 @@ impl State {
                                 false
                             }
                         };
-                    CaptureResult::Captured { image, copied }
+                    self.next_capture_id += 1;
+                    let id = self.next_capture_id;
+                    if session.request.show_preview {
+                        let monitor = session.snapshot.monitor_at(session.selection.cursor());
+                        let origin = session.snapshot.origin;
+                        let work = monitor.work.offset(origin.x, origin.y);
+                        self.preview.show(id, &image, work, monitor.scale());
+                    }
+                    CaptureResult::Captured { id, image, copied }
                 }
             }
         };
@@ -678,7 +729,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     // borrowed) get the default behaviour.
     let handled = STATE.with(|state| {
         let mut state = state.try_borrow_mut().ok()?;
-        state.as_mut()?.handle(msg, wparam, lparam)
+        let state = state.as_mut()?;
+        if hwnd == state.preview.hwnd() {
+            state.preview.handle(msg, wparam, lparam)
+        } else {
+            state.handle(msg, wparam, lparam)
+        }
     });
     // SAFETY: forwarding the original arguments.
     handled.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
@@ -689,14 +745,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(
     ready: SyncSender<Result<isize, String>>,
-    requests: Receiver<CaptureRequest>,
+    commands: Receiver<Command>,
     handler: ResultHandler,
 ) {
-    let init = || -> windows::core::Result<(HWND, Engine)> {
+    let init = || -> windows::core::Result<(HWND, HWND, Engine)> {
         // SAFETY: thread-level initialisation calls with valid arguments.
         unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            RoInitialize(RO_INIT_MULTITHREADED)?;
+            // A single-threaded apartment with OLE: required by drag and drop
+            // from the preview. The capture APIs used here are agile.
+            OleInitialize(None)?;
             let instance = GetModuleHandleW(None)?;
             let class = WNDCLASSEXW {
                 cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -729,11 +787,15 @@ pub fn run(
                 std::ptr::from_ref(&disabled).cast::<c_void>(),
                 size_of::<BOOL>() as u32,
             );
-            Ok((hwnd, Engine::new()?))
+            if !preview::register_class(instance.into(), Some(wndproc)) {
+                return Err(windows::core::Error::from_thread());
+            }
+            let preview = preview::create_window(instance.into())?;
+            Ok((hwnd, preview, Engine::new()?))
         }
     };
 
-    let (hwnd, engine) = match init() {
+    let (hwnd, preview_hwnd, engine) = match init() {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err.to_string()));
@@ -753,8 +815,10 @@ pub fn run(
             hwnd,
             engine: Some(engine),
             session: None,
-            requests,
+            commands,
             handler,
+            preview: Preview::new(preview_hwnd),
+            next_capture_id: 0,
             cross,
             arrow,
         });

@@ -36,7 +36,7 @@ use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::Vector2;
 
 use crate::layout::{Button, MAGNIFIER_CELLS, Magnifier, Toolbar, size_label};
-use crate::selection::{Mode, Selection};
+use crate::selection::{Mode, Selection, Targets};
 
 const fn rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -510,6 +510,53 @@ impl Renderer {
             info,
             WHITE,
         );
+        Ok(())
+    }
+
+    /// Draws every kind of element once off-screen so that shaders, fonts
+    /// and glyph caches are ready before the first real capture.
+    pub fn warm_up(&self) -> Result<()> {
+        struct Canvas(Rect);
+        impl Targets for Canvas {
+            fn window_at(&self, _: Point) -> Option<Rect> {
+                None
+            }
+            fn monitor_at(&self, _: Point) -> Rect {
+                self.0
+            }
+            fn bounds(&self) -> Rect {
+                self.0
+            }
+        }
+
+        let image = BgraImage::new(256, 256);
+        let canvas = Canvas(image.bounds());
+        let shot = self.load_screenshot(&image)?;
+        let toolbar = Toolbar::new(canvas.0, 1.0);
+
+        let mut drag = Selection::new(Mode::Region, Point::new(20, 20));
+        drag.press(Point::new(20, 20), &canvas);
+        drag.moved(Point::new(120, 120), &canvas);
+        let mut free = Selection::new(Mode::Freeform, Point::new(20, 20));
+        free.press(Point::new(20, 20), &canvas);
+        free.moved(Point::new(120, 30), &canvas);
+        free.moved(Point::new(60, 120), &canvas);
+        let idle = Selection::new(Mode::Region, Point::new(100, 100));
+
+        for selection in [&drag, &free, &idle] {
+            let scene = Scene {
+                selection,
+                hover: selection.hover_rect(&canvas),
+                toolbar: Some(&toolbar),
+                toolbar_hover: Some(Button::Close),
+                magnifier: Some(Magnifier::new(selection.cursor(), canvas.0, 1.0)),
+                pixel: Some([10, 20, 30, 255]),
+                scale: 1.0,
+                bounds: canvas.0,
+            };
+            self.render_to_image(&scene, &shot)?;
+        }
+        self.trim();
         Ok(())
     }
 
