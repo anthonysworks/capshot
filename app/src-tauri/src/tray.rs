@@ -1,28 +1,66 @@
 //! Notification area icon and its menu.
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use std::path::Path;
+
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Wry};
 
 use crate::actions::{self, Action};
 use crate::state::AppState;
 use crate::windows;
 
+const TRAY_ID: &str = "main";
 const CAPTURE: &str = "capture";
 const RECORD: &str = "record";
 const SCREENSHOTS: &str = "screenshots";
 const SETTINGS: &str = "settings";
 const QUIT: &str = "quit";
+/// Prefix of the "recent capture" items, followed by their index.
+const RECENT: &str = "recent:";
+/// Recent captures listed in the menu.
+const RECENT_IN_MENU: usize = 8;
 
-pub fn create(app: &AppHandle) -> tauri::Result<()> {
-    let hotkeys = app.state::<AppState>().config().hotkeys.clone();
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
 
-    let menu = Menu::with_items(
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    let state = app.state::<AppState>();
+    let hotkeys = state.config().hotkeys.clone();
+    let recent: Vec<String> = state
+        .history()
+        .recent()
+        .take(RECENT_IN_MENU)
+        .map(|e| file_name(&e.path))
+        .collect();
+
+    let recent_items = recent
+        .iter()
+        .enumerate()
+        .map(|(i, name)| MenuItem::with_id(app, format!("{RECENT}{i}"), name, true, None::<&str>))
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let empty = MenuItem::with_id(app, "recent-empty", "No captures yet", false, None::<&str>)?;
+    let recent_refs: Vec<&dyn IsMenuItem<Wry>> = if recent_items.is_empty() {
+        vec![&empty]
+    } else {
+        recent_items
+            .iter()
+            .map(|i| i as &dyn IsMenuItem<Wry>)
+            .collect()
+    };
+    let recent_menu = Submenu::with_items(app, "Recent captures", true, &recent_refs)?;
+
+    Menu::with_items(
         app,
         &[
             &MenuItem::with_id(app, CAPTURE, "Capture", true, Some(&hotkeys.capture))?,
             &MenuItem::with_id(app, RECORD, "Record video", true, Some(&hotkeys.record))?,
             &PredefinedMenuItem::separator(app)?,
+            &recent_menu,
             &MenuItem::with_id(
                 app,
                 SCREENSHOTS,
@@ -34,11 +72,38 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, QUIT, "Quit Kadra", true, None::<&str>)?,
         ],
-    )?;
+    )
+}
 
-    let mut builder = TrayIconBuilder::with_id("main")
+/// Rebuilds the menu, e.g. after a capture or a hotkey change.
+pub fn refresh(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    match build_menu(app) {
+        Ok(menu) => {
+            let _ = tray.set_menu(Some(menu));
+        }
+        Err(err) => tracing::warn!("cannot rebuild the tray menu: {err}"),
+    }
+}
+
+fn open_recent(app: &AppHandle, index: usize) {
+    let path = app
+        .state::<AppState>()
+        .history()
+        .recent()
+        .nth(index)
+        .map(|e| e.path.clone());
+    if let Some(path) = path {
+        windows::open_file(&path);
+    }
+}
+
+pub fn create(app: &AppHandle) -> tauri::Result<()> {
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("Kadra")
-        .menu(&menu)
+        .menu(&build_menu(app)?)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             CAPTURE => actions::trigger(app, Action::Capture),
@@ -49,7 +114,11 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
             }
             SETTINGS => windows::show_settings(app),
             QUIT => app.exit(0),
-            _ => {}
+            id => {
+                if let Some(index) = id.strip_prefix(RECENT).and_then(|i| i.parse().ok()) {
+                    open_recent(app, index);
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| {
             // Left click captures straight away, like the hotkey.

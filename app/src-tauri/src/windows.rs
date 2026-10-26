@@ -40,3 +40,15 @@ pub fn open_in_explorer(dir: &Path) {
         tracing::warn!("cannot open {}: {err}", dir.display());
     }
 }
+
+/// Opens a file with its default application.
+pub fn open_file(path: &Path) {
+    if !path.exists() {
+        tracing::warn!("{} no longer exists", path.display());
+        return;
+    }
+    // Explorer hands the file to its registered application.
+    if let Err(err) = std::process::Command::new("explorer").arg(path).spawn() {
+        tracing::warn!("cannot open {}: {err}", path.display());
+    }
+}

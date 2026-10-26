@@ -25,7 +25,9 @@ pub fn run() {
         std::process::exit(1);
     };
 
-    let _log_guard = logging::init(paths.log_dir());
+    // Tauri ends the process with `exit`, which skips destructors: the guard
+    // is dropped explicitly on `RunEvent::Exit` so buffered lines are written.
+    let mut log_guard = Some(logging::init(paths.log_dir()));
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Kadra");
 
     let config = Config::load_or_init(&paths.config_file()).unwrap_or_else(|err| {
@@ -93,13 +95,14 @@ pub fn run() {
         }
     };
 
-    app.run(|_app, event| {
+    app.run(move |_app, event| match event {
         // Kadra lives in the tray: closing the last window must not quit.
         // An explicit `exit` (tray "Quit") carries an exit code and goes through.
-        if let RunEvent::ExitRequested { api, code, .. } = event
-            && code.is_none()
-        {
-            api.prevent_exit();
+        RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
+        RunEvent::Exit => {
+            tracing::info!("exiting");
+            drop(log_guard.take());
         }
+        _ => {}
     });
 }

@@ -11,6 +11,7 @@ use tauri::{AppHandle, State};
 
 use crate::hotkeys;
 use crate::state::AppState;
+use crate::tray;
 use crate::windows;
 
 #[tauri::command]
@@ -44,6 +45,7 @@ pub fn save_config(
         .save(&state.paths().config_file())
         .map_err(|e| e.to_string())?;
     *state.config() = config;
+    tray::refresh(&app);
     tracing::info!("settings saved");
     Ok(())
 }

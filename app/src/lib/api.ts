@@ -12,6 +12,7 @@ export interface Config {
     format: ImageFormat;
     copy_to_clipboard: boolean;
     save_to_disk: boolean;
+    show_preview: boolean;
     delay_secs: number;
   };
   recording: {

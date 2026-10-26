@@ -108,6 +108,10 @@
         <input type="checkbox" bind:checked={config.capture.save_to_disk} />
         <span>Save to folder</span>
       </label>
+      <label class="row check">
+        <input type="checkbox" bind:checked={config.capture.show_preview} />
+        <span>Show a preview after capturing</span>
+      </label>
       <div class="row">
         <input class="path" bind:value={config.capture.output_dir} aria-label="Screenshots folder" />
         <button type="button" onclick={() => openFolder("screenshots")}>Open</button>
