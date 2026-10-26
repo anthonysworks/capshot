@@ -3,7 +3,7 @@
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
     D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
@@ -23,8 +23,25 @@ pub struct Gpu {
     winrt_device: IDirect3DDevice,
 }
 
+/// Which Direct3D implementation backs a [`Gpu`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuKind {
+    /// The graphics card. Required for hardware video encoding, but the
+    /// driver alone commits ~50 MB and takes ~150 ms to initialise.
+    Hardware,
+    /// WARP, the CPU implementation shipped with Windows: under 1 MB and a
+    /// few milliseconds to create. Ideal for still screenshots, where every
+    /// pixel ends up in system memory anyway.
+    Software,
+}
+
 impl Gpu {
+    /// Creates a hardware device.
     pub fn new() -> Result<Self> {
+        Self::with_kind(GpuKind::Hardware)
+    }
+
+    pub fn with_kind(kind: GpuKind) -> Result<Self> {
         let levels = [
             D3D_FEATURE_LEVEL_11_1,
             D3D_FEATURE_LEVEL_11_0,
@@ -37,7 +54,10 @@ impl Gpu {
         unsafe {
             D3D11CreateDevice(
                 None,
-                D3D_DRIVER_TYPE_HARDWARE,
+                match kind {
+                    GpuKind::Hardware => D3D_DRIVER_TYPE_HARDWARE,
+                    GpuKind::Software => D3D_DRIVER_TYPE_WARP,
+                },
                 HMODULE::default(),
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 Some(&levels),

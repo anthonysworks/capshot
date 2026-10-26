@@ -23,6 +23,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::core::{IInspectable, Interface};
 
 use crate::gpu::Gpu;
@@ -39,11 +40,19 @@ pub fn is_supported() -> bool {
 
 /// Asks once for permission to hide the yellow capture border. Unpackaged
 /// desktop apps are granted it silently on Windows 11.
+///
+/// Runs on a short-lived multithreaded-apartment thread: blocking on an
+/// asynchronous operation from a single-threaded apartment could deadlock.
 pub fn request_borderless_access() {
-    let result = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
-        .and_then(|op| op.join());
-    if let Err(err) = result {
-        tracing::debug!("borderless capture not granted: {err}");
+    let worker = std::thread::spawn(|| {
+        // SAFETY: initialises the Windows Runtime for this new thread only.
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }?;
+        GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)?.join()
+    });
+    match worker.join() {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => tracing::debug!("borderless capture not granted: {err}"),
+        Err(_) => tracing::debug!("borderless capture request panicked"),
     }
 }
 

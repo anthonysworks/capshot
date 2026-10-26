@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use kadra_capture::{Capturer, Gpu};
+use kadra_capture::{Capturer, Gpu, GpuKind};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -20,7 +20,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let start = Instant::now();
-    let capturer = Capturer::new(Gpu::new()?);
+    // `snapshot warp` uses the software device.
+    let kind = if std::env::args().any(|a| a == "warp") {
+        GpuKind::Software
+    } else {
+        GpuKind::Hardware
+    };
+    let capturer = Capturer::new(Gpu::with_kind(kind)?);
     println!("init: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
 
     for i in 0..5 {

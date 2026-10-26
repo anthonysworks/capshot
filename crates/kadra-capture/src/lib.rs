@@ -22,7 +22,7 @@ use std::time::Instant;
 use kadra_core::{BgraImage, Point, Rect};
 use windows::Win32::Foundation::HWND;
 
-pub use gpu::Gpu;
+pub use gpu::{Gpu, GpuKind};
 pub use monitors::Monitor;
 pub use windows_list::WindowInfo;
 
@@ -123,6 +123,17 @@ impl Capturer {
 
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// Takes and discards one capture: the very first capture of a process
+    /// is noticeably slower (system components load lazily). Call it once at
+    /// start-up so the user never sees that cost.
+    pub fn warm_up(&self) {
+        match self.snapshot(None) {
+            Ok(_) => self.prepare(),
+            Err(err) => tracing::warn!("capture warm-up failed: {err}"),
+        }
+        self.gpu.trim();
     }
 
     /// Captures every monitor. `exclude` is left out of the window list
