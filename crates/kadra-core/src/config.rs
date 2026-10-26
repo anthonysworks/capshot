@@ -67,6 +67,8 @@ pub struct CaptureSettings {
     pub format: ImageFormat,
     pub copy_to_clipboard: bool,
     pub save_to_disk: bool,
+    /// Shows a thumbnail in the corner of the screen after each capture.
+    pub show_preview: bool,
     /// Delay in seconds before the capture is taken.
     pub delay_secs: u32,
 }
@@ -80,6 +82,7 @@ impl Default for CaptureSettings {
             format: ImageFormat::Png,
             copy_to_clipboard: true,
             save_to_disk: true,
+            show_preview: true,
             delay_secs: 0,
         }
     }

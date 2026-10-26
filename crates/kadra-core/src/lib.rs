@@ -5,11 +5,13 @@
 
 pub mod config;
 pub mod geometry;
+pub mod history;
 pub mod image;
 pub mod logging;
 pub mod paths;
 
 pub use config::{Config, ConfigError, ImageFormat, VideoCodec};
 pub use geometry::{Point, Rect};
+pub use history::History;
 pub use image::BgraImage;
 pub use paths::Paths;

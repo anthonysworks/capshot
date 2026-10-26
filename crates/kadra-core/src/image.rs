@@ -140,6 +140,56 @@ impl BgraImage {
         Self::from_raw(w, h, data)
     }
 
+    /// Shrinks the image to fit in `max_width` × `max_height`, keeping its
+    /// aspect ratio and never enlarging it. Each output pixel is the average
+    /// of the source pixels it covers, which keeps text and thin lines
+    /// legible.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    pub fn thumbnail(&self, max_width: u32, max_height: u32) -> Self {
+        if self.width == 0 || self.height == 0 {
+            return Self::zeroed(0, 0);
+        }
+        let scale = (f64::from(max_width) / f64::from(self.width))
+            .min(f64::from(max_height) / f64::from(self.height))
+            .min(1.0);
+        let tw = ((f64::from(self.width) * scale).round() as u32).max(1);
+        let th = ((f64::from(self.height) * scale).round() as u32).max(1);
+        if (tw, th) == (self.width, self.height) {
+            return self.clone();
+        }
+
+        let span = |d: u32, src: u32, dst: u32| {
+            let start = (u64::from(d) * u64::from(src) / u64::from(dst)) as usize;
+            let end = (u64::from(d + 1) * u64::from(src) / u64::from(dst)) as usize;
+            start..end.max(start + 1)
+        };
+        let stride = self.stride();
+        let mut data = Vec::with_capacity(tw as usize * th as usize * 4);
+        for dy in 0..th {
+            let rows = span(dy, self.height, th);
+            for dx in 0..tw {
+                let cols = span(dx, self.width, tw);
+                let mut sum = [0u32; 4];
+                for y in rows.clone() {
+                    let row = &self.data[y * stride..];
+                    for x in cols.clone() {
+                        for (s, &v) in sum.iter_mut().zip(&row[x * 4..x * 4 + 4]) {
+                            *s += u32::from(v);
+                        }
+                    }
+                }
+                let n = (rows.len() * cols.len()) as u32;
+                data.extend(sum.map(|s| ((s + n / 2) / n) as u8));
+            }
+        }
+        Self::from_raw(tw, th, data)
+    }
+
     /// Makes every pixel outside `polygon` fully transparent.
     ///
     /// The polygon is given in image coordinates and filled with the even-odd
@@ -246,6 +296,33 @@ mod tests {
         assert_eq!(img.pixel(Point::new(1, 5)).unwrap()[3], 0);
         assert_eq!(img.pixel(Point::new(9, 9)).unwrap()[3], 0);
         assert_eq!(img.pixel(Point::new(8, 5)).unwrap()[3], 0);
+    }
+
+    #[test]
+    fn thumbnail_fits_and_averages() {
+        // 4x2 image: left half black, right half white.
+        let mut img = BgraImage::new(4, 2);
+        for y in 0..2 {
+            for x in 2..4 {
+                let i = (y * 4 + x) * 4;
+                img.data[i..i + 3].fill(255);
+            }
+        }
+        let t = img.thumbnail(2, 2);
+        assert_eq!((t.width(), t.height()), (2, 1));
+        assert_eq!(t.pixel(Point::new(0, 0)), Some([0, 0, 0, 255]));
+        assert_eq!(t.pixel(Point::new(1, 0)), Some([255, 255, 255, 255]));
+        let mixed = img.thumbnail(1, 1);
+        assert_eq!(mixed.pixel(Point::new(0, 0)), Some([128, 128, 128, 255]));
+    }
+
+    #[test]
+    fn thumbnail_never_enlarges() {
+        let img = BgraImage::new(10, 5);
+        let t = img.thumbnail(100, 100);
+        assert_eq!((t.width(), t.height()), (10, 5));
+        let tall = BgraImage::new(10, 1000).thumbnail(50, 50);
+        assert_eq!((tall.width(), tall.height()), (1, 50));
     }
 
     #[test]

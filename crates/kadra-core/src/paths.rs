@@ -59,6 +59,10 @@ impl Paths {
         self.config_dir.join("config.toml")
     }
 
+    pub fn history_file(&self) -> PathBuf {
+        self.config_dir.join("history.toml")
+    }
+
     pub fn log_dir(&self) -> &Path {
         &self.log_dir
     }
