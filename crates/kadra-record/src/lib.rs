@@ -9,6 +9,7 @@
 //! (repeating the last one when the screen does not change) so the result is
 //! a constant-frame-rate video that every editor handles well.
 
+mod audio;
 mod convert;
 mod encoder;
 mod pacer;
@@ -52,6 +53,9 @@ pub struct RecordOptions {
     /// 0 (best) to 51 (smallest).
     pub quality: u8,
     pub capture_cursor: bool,
+    /// Record what the computer plays (WASAPI loopback).
+    pub system_audio: bool,
+    pub microphone: bool,
     pub output: PathBuf,
 }
 
@@ -209,7 +213,8 @@ fn open_encoder(
             codec,
             quality: options.quality,
         };
-        match encoder::Encoder::new(gpu, &options.output, &settings) {
+        let audio = options.system_audio || options.microphone;
+        match encoder::Encoder::new(gpu, &options.output, &settings, audio) {
             Ok(encoder) => return Ok((encoder, settings)),
             Err(err) => {
                 tracing::warn!(?codec, "no usable encoder: {err}");
@@ -270,7 +275,19 @@ fn run(
         std::thread::sleep(Duration::from_millis(2));
     }
 
+    let encoder = Arc::new(encoder);
+    // Audio and video share the same time origin.
+    let origin = audio::now_ticks();
     let pace = pacer::Pacer::new(fps)?;
+    let audio = (options.system_audio || options.microphone).then(|| {
+        let encoder = Arc::clone(&encoder);
+        audio::AudioCapture::start(
+            options.system_audio,
+            options.microphone,
+            origin,
+            Box::new(move |pcm, time, duration| encoder.write_audio(pcm, time, duration)),
+        )
+    });
     let frame_ticks = encoder::TICKS_PER_SECOND / i64::from(fps);
     let mut frames = 0u64;
     let started = Instant::now();
@@ -297,6 +314,10 @@ fn run(
         frames += 1;
     }
 
+    // Flush the audio up to the stop time before closing the file.
+    if let Some(audio) = audio {
+        audio.stop();
+    }
     let finished = encoder.finish();
     let stats = RecordingStats {
         path: options.output.clone(),

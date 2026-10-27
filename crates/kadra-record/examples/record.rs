@@ -8,7 +8,8 @@
 #![allow(
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
-    clippy::unchecked_time_subtraction
+    clippy::unchecked_time_subtraction,
+    clippy::cast_ptr_alignment
 )]
 
 use std::path::{Path, PathBuf};
@@ -18,9 +19,10 @@ use kadra_core::{Rect, VideoCodec};
 use kadra_record::{RecordOptions, Recording};
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Media::MediaFoundation::{
-    IMFSourceReader, MF_PD_DURATION, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION,
-    MFCreateSourceReaderFromURL, MFSTARTUP_FULL, MFStartup,
+    IMFSourceReader, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
+    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFAudioFormat_PCM,
+    MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFSTARTUP_FULL, MFStartup,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows::Win32::UI::HiDpi::{
@@ -72,6 +74,51 @@ fn probe(path: &Path) -> windows::core::Result<(f64, u64)> {
     }
 }
 
+/// Decodes the audio track and returns its length and the time of the first
+/// sample louder than -30 dBFS, to check audio/video synchronisation.
+fn probe_audio(path: &Path) -> windows::core::Result<(f64, Option<f64>)> {
+    // SAFETY: Media Foundation calls with valid arguments; buffers are
+    // read while locked.
+    unsafe {
+        let reader: IMFSourceReader =
+            MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)?;
+        let pcm = MFCreateMediaType()?;
+        pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        let stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+        reader.SetCurrentMediaType(stream, None, &pcm)?;
+        let (mut end, mut onset) = (0.0, None);
+        loop {
+            let (mut flags, mut time) = (0, 0i64);
+            let mut sample = None;
+            reader.ReadSample(
+                stream,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut time),
+                Some(&mut sample),
+            )?;
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                break;
+            }
+            let Some(sample) = sample else { continue };
+            let buffer = sample.ConvertToContiguousBuffer()?;
+            let (mut data, mut len) = (std::ptr::null_mut(), 0u32);
+            buffer.Lock(&mut data, None, Some(&mut len))?;
+            let samples = std::slice::from_raw_parts(data.cast::<i16>(), len as usize / 2);
+            if onset.is_none()
+                && let Some(i) = samples.iter().position(|s| s.unsigned_abs() > 1036)
+            {
+                onset = Some(time as f64 / 1e7 + (i / 2) as f64 / 48_000.0);
+            }
+            buffer.Unlock()?;
+            end = (time + sample.GetSampleDuration().unwrap_or(0)) as f64 / 1e7;
+        }
+        Ok((end, onset))
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let output = PathBuf::from(
@@ -99,6 +146,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         codec,
         quality: 23,
         capture_cursor: true,
+        system_audio: true,
+        microphone: std::env::var("KADRA_MIC").is_ok(),
         output: output.clone(),
     })?;
     println!(
@@ -129,5 +178,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let (duration, frames) = probe(&output)?;
     println!("file: {duration:.2} s, {frames} video frames");
+    match probe_audio(&output) {
+        Ok((length, onset)) => println!("audio: {length:.2} s, first sound at {onset:?} s"),
+        Err(err) => println!("audio: none ({err})"),
+    }
     Ok(())
 }

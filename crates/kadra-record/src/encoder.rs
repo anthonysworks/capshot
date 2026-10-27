@@ -5,21 +5,25 @@
 //! Quick Sync) without ever being copied to system memory.
 
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 
 use kadra_capture::Gpu;
 use kadra_core::VideoCodec;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFAttributes, IMFDXGIDeviceManager, IMFMediaType, IMFSinkWriter,
-    MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION,
-    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX,
-    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_D3D_MANAGER, MF_VERSION,
+    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
+    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE,
+    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+    MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_SINK_WRITER_D3D_MANAGER, MF_VERSION, MFAudioFormat_AAC, MFAudioFormat_PCM,
     MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-    MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video, MFNominalRange_16_235,
-    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoFormat_AV1, MFVideoFormat_H264,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
-    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncH264VProfile_High,
+    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
+    MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown, MFStartup,
+    MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
+    MFVideoTransferMatrix_BT709, eAVEncH264VProfile_High,
 };
 use windows::core::{GUID, HSTRING, Interface, Result};
 
@@ -94,14 +98,41 @@ fn video_type(settings: &VideoSettings, subtype: &GUID) -> Result<IMFMediaType> 
     }
 }
 
+/// AAC bitrate: 192 kbit/s, transparent for screen recordings.
+const AAC_BYTES_PER_SECOND: u32 = 24_000;
+
+fn audio_type(subtype: &GUID) -> Result<IMFMediaType> {
+    use crate::audio::{CHANNELS, SAMPLE_RATE};
+    // SAFETY: attribute setters on a freshly created media type.
+    unsafe {
+        let t = MFCreateMediaType()?;
+        t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        t.SetGUID(&MF_MT_SUBTYPE, subtype)?;
+        t.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE)?;
+        #[allow(clippy::cast_possible_truncation)]
+        t.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, CHANNELS as u32)?;
+        t.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        Ok(t)
+    }
+}
+
 pub struct Encoder {
     writer: IMFSinkWriter,
     video: u32,
+    audio: Option<u32>,
+    /// Video and audio are written from different threads.
+    lock: Mutex<()>,
     _manager: IMFDXGIDeviceManager,
 }
 
+// SAFETY: the sink writer lives in the multithreaded apartment and every
+// call is serialised by `lock`.
+unsafe impl Send for Encoder {}
+// SAFETY: see above.
+unsafe impl Sync for Encoder {}
+
 impl Encoder {
-    pub fn new(gpu: &Gpu, path: &Path, settings: &VideoSettings) -> Result<Self> {
+    pub fn new(gpu: &Gpu, path: &Path, settings: &VideoSettings, audio: bool) -> Result<Self> {
         // SAFETY: Media Foundation calls with valid arguments; MFStartup is
         // reference counted and balanced in `Drop`.
         unsafe {
@@ -131,11 +162,31 @@ impl Encoder {
             let video = writer.AddStream(&output)?;
             let input = video_type(settings, &MFVideoFormat_NV12)?;
             writer.SetInputMediaType(video, &input, None)?;
+
+            let audio = if audio {
+                let output = audio_type(&MFAudioFormat_AAC)?;
+                output.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BYTES_PER_SECOND)?;
+                let stream = writer.AddStream(&output)?;
+                let input = audio_type(&MFAudioFormat_PCM)?;
+                #[allow(clippy::cast_possible_truncation)]
+                let block = (crate::audio::CHANNELS * 2) as u32;
+                input.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block)?;
+                input.SetUINT32(
+                    &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                    crate::audio::SAMPLE_RATE * block,
+                )?;
+                writer.SetInputMediaType(stream, &input, None)?;
+                Some(stream)
+            } else {
+                None
+            };
             writer.BeginWriting()?;
 
             Ok(Self {
                 writer,
                 video,
+                audio,
+                lock: Mutex::new(()),
                 _manager: manager,
             })
         }
@@ -152,13 +203,43 @@ impl Encoder {
             sample.AddBuffer(&buffer)?;
             sample.SetSampleTime(time)?;
             sample.SetSampleDuration(duration)?;
+            let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
             self.writer.WriteSample(self.video, &sample)
+        }
+    }
+
+    /// Queues interleaved 16-bit PCM. Ignored if the file has no audio track.
+    pub fn write_audio(&self, pcm: &[i16], time: i64, duration: i64) -> Result<()> {
+        let Some(stream) = self.audio else {
+            return Ok(());
+        };
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        let bytes = std::mem::size_of_val(pcm);
+        // SAFETY: the buffer is locked while `bytes` bytes are copied into it.
+        unsafe {
+            #[allow(clippy::cast_possible_truncation)]
+            let buffer = MFCreateMemoryBuffer(bytes as u32)?;
+            let mut data = std::ptr::null_mut();
+            buffer.Lock(&mut data, None, None)?;
+            std::ptr::copy_nonoverlapping(pcm.as_ptr().cast::<u8>(), data, bytes);
+            buffer.Unlock()?;
+            #[allow(clippy::cast_possible_truncation)]
+            buffer.SetCurrentLength(bytes as u32)?;
+            let sample = MFCreateSample()?;
+            sample.AddBuffer(&buffer)?;
+            sample.SetSampleTime(time)?;
+            sample.SetSampleDuration(duration)?;
+            let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+            self.writer.WriteSample(stream, &sample)
         }
     }
 
     /// Flushes the encoder and writes the MP4 index.
     pub fn finish(&self) -> Result<()> {
-        // SAFETY: plain call; the writer is not used afterwards.
+        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: plain call; nothing is written afterwards.
         unsafe { self.writer.Finalize() }
     }
 }
