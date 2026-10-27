@@ -3,9 +3,15 @@
 //! Windows.Graphics.Capture only delivers a frame when the screen changes.
 //! Each new frame is copied (on the GPU) into `latest`, which the pacer reads
 //! at a constant rate: an unchanged screen simply repeats the last frame.
+//!
+//! No extra lock is needed: the copy and the conversion are both commands
+//! on the immediate context, which `ID3D11Multithread` protection
+//! serialises, so the converter always reads a complete frame. Holding a
+//! lock of our own across D3D calls on two threads could deadlock with
+//! that internal lock.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 
 use kadra_capture::Gpu;
 use windows::Foundation::{TimeSpan, TypedEventHandler};
@@ -37,13 +43,11 @@ pub struct Source {
 
 struct Shared {
     latest: ID3D11Texture2D,
-    /// Serialises copies into `latest` with reads by the pacer.
-    lock: Mutex<()>,
     frames: AtomicU64,
 }
 
 // SAFETY: D3D11 textures are free-threaded objects; access to the device
-// context is serialised by `ID3D11Multithread` protection and `lock`.
+// context is serialised by `ID3D11Multithread` protection.
 unsafe impl Send for Shared {}
 // SAFETY: see above.
 unsafe impl Sync for Shared {}
@@ -81,7 +85,6 @@ impl Source {
         }
         let shared = Arc::new(Shared {
             latest: latest.ok_or_else(windows::core::Error::empty)?,
-            lock: Mutex::new(()),
             frames: AtomicU64::new(0),
         });
 
@@ -105,7 +108,6 @@ impl Source {
                 // is serialised with the pacer's reads.
                 unsafe {
                     let texture: ID3D11Texture2D = access.GetInterface()?;
-                    let _guard = target.lock.lock().unwrap_or_else(PoisonError::into_inner);
                     context.CopyResource(&target.latest, &texture);
                 }
                 target.frames.fetch_add(1, Ordering::Relaxed);
@@ -142,14 +144,9 @@ impl Source {
         self.shared.frames.load(Ordering::Relaxed)
     }
 
-    /// Runs `f` with the latest frame, preventing concurrent updates.
-    pub fn with_latest<T>(&self, f: impl FnOnce(&ID3D11Texture2D) -> T) -> T {
-        let _guard = self
-            .shared
-            .lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        f(&self.shared.latest)
+    /// The texture holding the most recent frame.
+    pub fn latest(&self) -> &ID3D11Texture2D {
+        &self.shared.latest
     }
 }
 

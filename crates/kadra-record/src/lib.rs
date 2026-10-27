@@ -82,6 +82,7 @@ pub struct Recording {
     thread: Option<JoinHandle<Result<RecordingStats>>>,
     started: Instant,
     size: (u32, u32),
+    region: Rect,
 }
 
 /// Monitor containing the centre of `region`, with its desktop rectangle.
@@ -145,6 +146,7 @@ impl Recording {
                 thread: Some(thread),
                 started: Instant::now(),
                 size,
+                region: area.offset(monitor_rect.left, monitor_rect.top),
             }),
             Ok(Err(err)) => {
                 let _ = thread.join();
@@ -159,6 +161,12 @@ impl Recording {
 
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// Area actually recorded, in desktop coordinates (clipped to one
+    /// monitor, even-sized).
+    pub fn region(&self) -> Rect {
+        self.region
     }
 
     /// Encoded frame size.
@@ -243,9 +251,8 @@ fn run(
         let gpu = Gpu::with_kind(GpuKind::Hardware)?;
         let fps = options.fps.clamp(1, 240);
         let source = source::Source::start(&gpu, monitor, fps, options.capture_cursor)?;
-        let converter = source.with_latest(|latest| {
-            convert::Converter::new(&gpu, latest, source.size(), area, size, fps)
-        })?;
+        let converter =
+            convert::Converter::new(&gpu, source.latest(), source.size(), area, size, fps)?;
         let (encoder, settings) = open_encoder(&gpu, options, size, fps)?;
         tracing::info!(
             width = size.0,
@@ -301,12 +308,10 @@ fn run(
                 index
             }
         };
-        let frame = source
-            .with_latest(|_| converter.convert())
-            .and_then(|texture| {
-                #[allow(clippy::cast_possible_wrap)]
-                encoder.write_video(&texture, index as i64 * frame_ticks, frame_ticks)
-            });
+        let frame = converter.convert().and_then(|texture| {
+            #[allow(clippy::cast_possible_wrap)]
+            encoder.write_video(&texture, index as i64 * frame_ticks, frame_ticks)
+        });
         if let Err(err) = frame {
             result = Err(err);
             break;
