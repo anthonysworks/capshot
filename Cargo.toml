@@ -15,6 +15,7 @@ kadra-capture = { path = "crates/kadra-capture" }
 kadra-core = { path = "crates/kadra-core" }
 kadra-encode = { path = "crates/kadra-encode" }
 kadra-overlay = { path = "crates/kadra-overlay" }
+kadra-record = { path = "crates/kadra-record" }
 
 anyhow = "1.0.104"
 directories = "6.0.0"

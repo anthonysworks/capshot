@@ -7,8 +7,8 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext, ID3D11Multithread,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
@@ -59,7 +59,14 @@ impl Gpu {
                     GpuKind::Software => D3D_DRIVER_TYPE_WARP,
                 },
                 HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                // Video support enables the hardware video processor used to
+                // convert frames for the encoder.
+                match kind {
+                    GpuKind::Hardware => {
+                        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT
+                    }
+                    GpuKind::Software => D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                },
                 Some(&levels),
                 D3D11_SDK_VERSION,
                 Some(&mut device),
