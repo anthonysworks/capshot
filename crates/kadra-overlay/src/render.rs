@@ -48,6 +48,7 @@ const fn rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
 }
 
 const ACCENT: D2D1_COLOR_F = rgba(0x4f, 0x7c, 0xff, 1.0);
+const RECORD: D2D1_COLOR_F = rgba(0xe5, 0x48, 0x4d, 1.0);
 const DIM: D2D1_COLOR_F = rgba(0, 0, 0, 0.5);
 const WHITE: D2D1_COLOR_F = rgba(255, 255, 255, 1.0);
 const BLACK: D2D1_COLOR_F = rgba(0, 0, 0, 1.0);
@@ -94,6 +95,8 @@ pub struct Scene<'a> {
     /// UI scale of the monitor under the cursor.
     pub scale: f32,
     pub bounds: Rect,
+    /// Selecting an area to record: drawn in red instead of blue.
+    pub recording: bool,
 }
 
 /// The frozen desktop, uploaded to the GPU once per capture.
@@ -352,23 +355,24 @@ impl Renderer {
             dc.FillRectangle(&full, &self.color(DIM));
 
             let border = (2.0 * scene.scale).max(1.0);
+            let accent = if scene.recording { RECORD } else { ACCENT };
             let selection = scene.selection;
             if let Some(path) = selection.drawn_path() {
                 if path.len() >= 3 {
                     dc.FillGeometry(&self.path(path, true)?, &shot.brush, None);
                 }
-                dc.DrawGeometry(&self.path(path, false)?, &self.color(ACCENT), border, None);
+                dc.DrawGeometry(&self.path(path, false)?, &self.color(accent), border, None);
             } else if let Some(rect) = selection.dragged_rect() {
                 dc.FillRectangle(&rect_f(rect), &shot.brush);
-                dc.DrawRectangle(&outline(rect, border), &self.color(ACCENT), border, None);
+                dc.DrawRectangle(&outline(rect, border), &self.color(accent), border, None);
                 self.draw_size_label(rect, scene)?;
             } else if let Some(rect) = scene.hover {
                 dc.FillRectangle(&rect_f(rect), &shot.brush);
-                dc.DrawRectangle(&outline(rect, border), &self.color(ACCENT), border, None);
+                dc.DrawRectangle(&outline(rect, border), &self.color(accent), border, None);
             }
 
             if let Some(toolbar) = scene.toolbar {
-                self.draw_toolbar(toolbar, selection.mode(), scene.toolbar_hover)?;
+                self.draw_toolbar(toolbar, selection.mode(), scene.toolbar_hover, accent)?;
             }
             if let Some(m) = scene.magnifier {
                 self.draw_magnifier(&m, scene, shot)?;
@@ -403,7 +407,13 @@ impl Renderer {
         unsafe { self.dc.FillRoundedRectangle(&rounded, &self.color(color)) };
     }
 
-    fn draw_toolbar(&self, bar: &Toolbar, mode: Mode, hover: Option<Button>) -> Result<()> {
+    fn draw_toolbar(
+        &self,
+        bar: &Toolbar,
+        mode: Mode,
+        hover: Option<Button>,
+        accent: D2D1_COLOR_F,
+    ) -> Result<()> {
         let s = bar.scale;
         let rounded = D2D1_ROUNDED_RECT {
             rect: rect_f(bar.frame),
@@ -420,7 +430,7 @@ impl Renderer {
         for (button, rect) in bar.buttons {
             let active = button == Button::Mode(mode);
             if active {
-                self.pill(rect, ACCENT, 4.0 * s);
+                self.pill(rect, accent, 4.0 * s);
             } else if hover == Some(button) {
                 self.pill(rect, BUTTON_HOVER, 4.0 * s);
             }
@@ -553,6 +563,7 @@ impl Renderer {
                 pixel: Some([10, 20, 30, 255]),
                 scale: 1.0,
                 bounds: canvas.0,
+                recording: selection.mode() == Mode::Freeform,
             };
             self.render_to_image(&scene, &shot)?;
         }

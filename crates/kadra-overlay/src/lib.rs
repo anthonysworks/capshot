@@ -6,6 +6,7 @@
 //! delivered to the handler given to [`Overlay::spawn`].
 
 mod clipboard;
+mod indicator;
 pub mod layout;
 mod preview;
 pub mod render;
@@ -16,14 +17,25 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
-use kadra_core::BgraImage;
+use kadra_core::{BgraImage, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 pub use selection::Mode;
 
+/// What the selection is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Purpose {
+    /// Copy/save the selected pixels.
+    #[default]
+    Screenshot,
+    /// Return the selected area to record it.
+    Recording,
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureRequest {
+    pub purpose: Purpose,
     pub mode: Mode,
     pub copy_to_clipboard: bool,
     /// Show a thumbnail in the corner of the screen afterwards.
@@ -40,6 +52,10 @@ pub enum CaptureResult {
         image: BgraImage,
         copied: bool,
     },
+    /// An area to record was selected (desktop coordinates).
+    RegionSelected(Rect),
+    /// The stop button of the recording indicator was clicked.
+    StopRecording,
     /// The colour under the cursor was copied as `#RRGGBB`.
     ColorCopied(String),
     Cancelled,
@@ -55,6 +71,8 @@ pub type ResultHandler = Box<dyn FnMut(CaptureResult) + Send + 'static>;
 enum Command {
     Capture(CaptureRequest),
     AttachFile { capture_id: u64, path: PathBuf },
+    ShowIndicator(Rect),
+    HideIndicator,
 }
 
 /// Handle to the overlay thread.
@@ -94,6 +112,16 @@ impl Overlay {
     /// can be opened or dragged into another application.
     pub fn attach_file(&self, capture_id: u64, path: PathBuf) {
         self.send(Command::AttachFile { capture_id, path });
+    }
+
+    /// Shows the recording frame and timer around `region` (desktop
+    /// coordinates). They are excluded from capture.
+    pub fn show_recording_indicator(&self, region: Rect) {
+        self.send(Command::ShowIndicator(region));
+    }
+
+    pub fn hide_recording_indicator(&self) {
+        self.send(Command::HideIndicator);
     }
 
     fn send(&self, command: Command) {

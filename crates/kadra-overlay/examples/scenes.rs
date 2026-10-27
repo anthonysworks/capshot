@@ -34,6 +34,7 @@ fn scene<'a>(
         pixel: snap.image.pixel(cursor),
         scale: monitor.scale(),
         bounds: snap.bounds(),
+        recording: false,
     }
 }
 

@@ -92,6 +92,11 @@ fn to_rgb(image: &BgraImage) -> Vec<u8> {
     out
 }
 
+/// Current local time, as used in file names.
+pub fn now() -> DateTime<Local> {
+    Local::now()
+}
+
 /// Base file name for a capture taken at `time`, e.g. `Kadra 2026-11-11 19-41-59`.
 pub fn file_stem(time: DateTime<Local>) -> String {
     time.format("Kadra %Y-%m-%d %H-%M-%S").to_string()

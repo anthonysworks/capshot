@@ -56,11 +56,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, Interface, w};
 
 use crate::clipboard;
+use crate::indicator::{self, Indicator};
 use crate::layout::{Button, Magnifier, Toolbar};
 use crate::preview::{self, Preview};
 use crate::render::{Renderer, Scene, Screenshot};
 use crate::selection::{Outcome, Selection, Targets};
-use crate::{CaptureRequest, CaptureResult, Command, ResultHandler};
+use crate::{CaptureRequest, CaptureResult, Command, Purpose, ResultHandler};
 
 /// A capture request is waiting in the channel.
 pub const WM_KADRA_REQUEST: u32 = WM_APP + 1;
@@ -233,6 +234,7 @@ impl Session {
             pixel: self.snapshot.image.pixel(cursor),
             scale: monitor.scale(),
             bounds: self.snapshot.bounds(),
+            recording: self.request.purpose == Purpose::Recording,
         }
     }
 
@@ -262,6 +264,7 @@ struct State {
     commands: Receiver<Command>,
     handler: ResultHandler,
     preview: Preview,
+    indicator: Indicator,
     next_capture_id: u64,
     cross: HCURSOR,
     arrow: HCURSOR,
@@ -321,6 +324,34 @@ fn take_focus(hwnd: HWND) {
     }
 }
 
+/// Monitor containing the centre of `region` (desktop coordinates) and
+/// its UI scale.
+fn monitor_of(region: Rect) -> (Rect, f32) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    };
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    let centre = windows::Win32::Foundation::POINT {
+        x: region.left + region.width() / 2,
+        y: region.top + region.height() / 2,
+    };
+    // SAFETY: plain queries with correctly sized structures.
+    unsafe {
+        let monitor = MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let _ = GetMonitorInfoW(monitor, &mut info);
+        let (mut dpi, mut unused) = (96, 96);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
+        let r = info.rcMonitor;
+        #[allow(clippy::cast_precision_loss)]
+        let scale = dpi as f32 / 96.0;
+        (Rect::new(r.left, r.top, r.right, r.bottom), scale)
+    }
+}
+
 fn shift_down() -> bool {
     // SAFETY: plain query.
     unsafe { GetKeyState(i32::from(VK_SHIFT.0)) < 0 }
@@ -338,6 +369,11 @@ impl State {
                         Command::AttachFile { capture_id, path } => {
                             self.preview.attach_file(capture_id, path);
                         }
+                        Command::ShowIndicator(region) => {
+                            let (monitor, scale) = monitor_of(region);
+                            self.indicator.show(region, monitor, scale);
+                        }
+                        Command::HideIndicator => self.indicator.hide(),
                     }
                 }
                 if let Some(request) = capture {
@@ -691,6 +727,18 @@ impl State {
         };
         let result = match outcome {
             None => CaptureResult::Cancelled,
+            // Recording: hand the area over, in desktop coordinates.
+            Some(outcome) if session.request.purpose == Purpose::Recording => {
+                let origin = session.snapshot.origin;
+                let area = match outcome {
+                    Outcome::Region(rect) => Some(rect),
+                    Outcome::Freeform(points) => Rect::bounding(&points),
+                };
+                area.filter(|r| !r.is_empty())
+                    .map_or(CaptureResult::Cancelled, |r| {
+                        CaptureResult::RegionSelected(r.offset(origin.x, origin.y))
+                    })
+            }
             Some(outcome) => {
                 let image = session.crop(outcome);
                 if image.width() == 0 || image.height() == 0 {
@@ -732,6 +780,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let state = state.as_mut()?;
         if hwnd == state.preview.hwnd() {
             state.preview.handle(msg, wparam, lparam)
+        } else if state.indicator.owns(hwnd) {
+            let (result, request) = state.indicator.handle(hwnd, msg, lparam)?;
+            if request == Some(indicator::Request::Stop) {
+                (state.handler)(CaptureResult::StopRecording);
+            }
+            Some(result)
         } else {
             state.handle(msg, wparam, lparam)
         }
@@ -748,7 +802,7 @@ pub fn run(
     commands: Receiver<Command>,
     handler: ResultHandler,
 ) {
-    let init = || -> windows::core::Result<(HWND, HWND, Engine)> {
+    let init = || -> windows::core::Result<(HWND, HWND, Indicator, Engine)> {
         // SAFETY: thread-level initialisation calls with valid arguments.
         unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -791,11 +845,15 @@ pub fn run(
                 return Err(windows::core::Error::from_thread());
             }
             let preview = preview::create_window(instance.into())?;
-            Ok((hwnd, preview, Engine::new()?))
+            if !indicator::register_classes(instance.into(), Some(wndproc)) {
+                return Err(windows::core::Error::from_thread());
+            }
+            let indicator = Indicator::new(instance.into())?;
+            Ok((hwnd, preview, indicator, Engine::new()?))
         }
     };
 
-    let (hwnd, preview_hwnd, engine) = match init() {
+    let (hwnd, preview_hwnd, indicator, engine) = match init() {
         Ok(v) => v,
         Err(err) => {
             let _ = ready.send(Err(err.to_string()));
@@ -818,6 +876,7 @@ pub fn run(
             commands,
             handler,
             preview: Preview::new(preview_hwnd),
+            indicator,
             next_capture_id: 0,
             cross,
             arrow,
