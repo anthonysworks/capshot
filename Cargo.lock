@@ -1957,6 +1957,7 @@ dependencies = [
  "kadra-core",
  "kadra-encode",
  "kadra-overlay",
+ "kadra-record",
  "serde",
  "serde_json",
  "tauri",

@@ -5,6 +5,7 @@ mod actions;
 mod capture;
 mod commands;
 mod hotkeys;
+mod recording;
 mod state;
 mod tray;
 mod windows;
@@ -61,6 +62,7 @@ pub fn run() {
         .plugin(hotkeys::plugin())
         .manage(AppState::new(paths, config))
         .manage(hotkeys::Registered::default())
+        .manage(recording::RecorderState::default())
         .setup(move |app| {
             tray::create(app.handle())?;
             let state = app.state::<AppState>();

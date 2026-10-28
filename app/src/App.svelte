@@ -147,7 +147,7 @@
         <select bind:value={config.recording.codec}>
           <option value="h264">H.264 (best compatibility)</option>
           <option value="hevc">HEVC (smaller files)</option>
-          <option value="av1">AV1 (smallest, recent GPUs)</option>
+          <option value="av1">AV1 (smallest; RTX 40, RX 7000, Arc — otherwise HEVC)</option>
         </select>
       </label>
       <label class="row">

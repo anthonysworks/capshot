@@ -1,11 +1,13 @@
-//! Screenshot workflow: overlay, clipboard and saving to disk.
+//! Screenshot workflow: overlay, clipboard and saving to disk. The overlay
+//! also selects the area to record and shows the recording indicator.
 
 use std::time::{Duration, Instant};
 
-use kadra_core::BgraImage;
-use kadra_overlay::{CaptureRequest, CaptureResult, Mode, Overlay};
+use kadra_core::{BgraImage, Rect};
+use kadra_overlay::{CaptureRequest, CaptureResult, Mode, Overlay, Purpose};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::recording;
 use crate::state::AppState;
 use crate::tray;
 
@@ -29,11 +31,31 @@ impl CaptureService {
 
     pub fn capture(&self, mode: Mode, options: Options) {
         self.overlay.capture(CaptureRequest {
+            purpose: Purpose::Screenshot,
             mode,
             copy_to_clipboard: options.copy_to_clipboard,
             show_preview: options.show_preview,
             requested_at: Instant::now(),
         });
+    }
+
+    /// Opens the overlay to pick the area to record.
+    pub fn select_recording_area(&self) {
+        self.overlay.capture(CaptureRequest {
+            purpose: Purpose::Recording,
+            mode: Mode::Region,
+            copy_to_clipboard: false,
+            show_preview: false,
+            requested_at: Instant::now(),
+        });
+    }
+
+    pub fn show_recording_indicator(&self, region: Rect) {
+        self.overlay.show_recording_indicator(region);
+    }
+
+    pub fn hide_recording_indicator(&self) {
+        self.overlay.hide_recording_indicator();
     }
 }
 
@@ -87,6 +109,8 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
             let app = app.clone();
             std::thread::spawn(move || save(&app, id, &image));
         }
+        CaptureResult::RegionSelected(region) => recording::start(app, region),
+        CaptureResult::StopRecording => recording::stop(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),
         CaptureResult::Cancelled => tracing::debug!("capture cancelled"),
         CaptureResult::Failed(err) => tracing::error!("capture failed: {err}"),
@@ -117,15 +141,15 @@ fn save(app: &AppHandle, id: u64, image: &BgraImage) {
             if let Some(service) = app.try_state::<CaptureService>() {
                 service.overlay.attach_file(id, path.clone());
             }
-            remember(app, &path, image);
+            remember(app, &path, image.width(), image.height());
             let _ = app.emit(SAVED_EVENT, path.display().to_string());
         }
         Err(err) => tracing::error!("cannot save the screenshot: {err}"),
     }
 }
 
-/// Adds a saved capture to the history and the tray menu.
-fn remember(app: &AppHandle, path: &std::path::Path, image: &BgraImage) {
+/// Adds a saved capture (image or video) to the history and the tray menu.
+pub fn remember(app: &AppHandle, path: &std::path::Path, width: u32, height: u32) {
     let state = app.state::<AppState>();
     let taken_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -135,8 +159,8 @@ fn remember(app: &AppHandle, path: &std::path::Path, image: &BgraImage) {
         history.push(kadra_core::history::Entry {
             path: path.to_path_buf(),
             taken_at,
-            width: image.width(),
-            height: image.height(),
+            width,
+            height,
         });
         if let Err(err) = history.save(&state.paths().history_file()) {
             tracing::warn!("cannot save the capture history: {err}");

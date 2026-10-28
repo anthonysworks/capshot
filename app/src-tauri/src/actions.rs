@@ -2,7 +2,7 @@
 
 use tauri::AppHandle;
 
-use crate::capture;
+use crate::{capture, recording};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -24,8 +24,8 @@ impl Action {
 pub fn trigger(app: &AppHandle, action: Action) {
     match action {
         Action::Capture => capture::start(app),
-        // Screen recording is milestone M2.
-        Action::Record => tracing::info!("screen recording is not available yet"),
+        // Starts selecting an area, or stops the current recording.
+        Action::Record => recording::toggle(app),
     }
 }
 

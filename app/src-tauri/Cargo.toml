@@ -19,6 +19,7 @@ tauri-build.workspace = true
 kadra-core.workspace = true
 kadra-encode.workspace = true
 kadra-overlay.workspace = true
+kadra-record.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true

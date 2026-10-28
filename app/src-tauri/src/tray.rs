@@ -31,6 +31,14 @@ fn file_name(path: &Path) -> String {
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let state = app.state::<AppState>();
     let hotkeys = state.config().hotkeys.clone();
+    let recording = app
+        .state::<crate::recording::RecorderState>()
+        .is_recording();
+    let record_label = if recording {
+        "Stop recording"
+    } else {
+        "Record video"
+    };
     let recent: Vec<String> = state
         .history()
         .recent()
@@ -58,7 +66,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         app,
         &[
             &MenuItem::with_id(app, CAPTURE, "Capture", true, Some(&hotkeys.capture))?,
-            &MenuItem::with_id(app, RECORD, "Record video", true, Some(&hotkeys.record))?,
+            &MenuItem::with_id(app, RECORD, record_label, true, Some(&hotkeys.record))?,
             &PredefinedMenuItem::separator(app)?,
             &recent_menu,
             &MenuItem::with_id(
