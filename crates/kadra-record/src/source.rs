@@ -20,8 +20,9 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
+    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Gdi::HMONITOR;
@@ -142,6 +143,68 @@ impl Source {
     /// Frames delivered by the system so far.
     pub fn frames(&self) -> u64 {
         self.shared.frames.load(Ordering::Relaxed)
+    }
+
+    /// Copies `area` of the latest frame to system memory.
+    pub fn read_area(&self, gpu: &Gpu, area: kadra_core::Rect) -> Result<kadra_core::BgraImage> {
+        #[allow(clippy::cast_sign_loss)]
+        let (w, h) = (area.width() as u32, area.height() as u32);
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            #[allow(clippy::cast_sign_loss)]
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        #[allow(clippy::cast_sign_loss)]
+        let region = D3D11_BOX {
+            left: area.left as u32,
+            top: area.top as u32,
+            front: 0,
+            right: area.right as u32,
+            bottom: area.bottom as u32,
+            back: 1,
+        };
+        // SAFETY: the staging texture matches the copied box; the mapping
+        // is released before returning.
+        unsafe {
+            let mut staging = None;
+            gpu.device()
+                .CreateTexture2D(&desc, None, Some(&mut staging))?;
+            let staging = staging.ok_or_else(windows::core::Error::empty)?;
+            let context = gpu.context();
+            context.CopySubresourceRegion(
+                &staging,
+                0,
+                0,
+                0,
+                0,
+                &self.shared.latest,
+                0,
+                Some(&region),
+            );
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            let pitch = mapped.RowPitch as usize;
+            let data = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * h as usize);
+            let mut image = kadra_core::BgraImage::new(w, h);
+            image.blit(data, pitch, w, h, kadra_core::Point::new(0, 0));
+            context.Unmap(&staging, 0);
+            // Captured frames carry no meaningful alpha.
+            for px in image.as_bytes_mut().as_chunks_mut::<4>().0 {
+                px[3] = 255;
+            }
+            Ok(image)
+        }
     }
 
     /// The texture holding the most recent frame.

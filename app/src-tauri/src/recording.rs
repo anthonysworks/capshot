@@ -80,6 +80,7 @@ pub fn start(app: &AppHandle, region: Rect) {
             system_audio: config.recording.system_audio,
             microphone: config.recording.microphone,
             output: kadra_encode::unique_path(&dir, &stem, "mp4"),
+            start_paused: false,
         }
     };
 

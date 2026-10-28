@@ -10,6 +10,7 @@
 //! a constant-frame-rate video that every editor handles well.
 
 mod audio;
+mod clock;
 mod convert;
 mod encoder;
 mod pacer;
@@ -23,7 +24,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kadra_capture::{Gpu, GpuKind};
-use kadra_core::{Point, Rect, VideoCodec};
+use kadra_core::{BgraImage, Point, Rect, VideoCodec};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
@@ -43,6 +44,8 @@ pub enum RecordError {
 
 pub type Result<T> = std::result::Result<T, RecordError>;
 
+// Independent on/off options, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct RecordOptions {
     /// Area to record, in desktop coordinates. It is clipped to the monitor
@@ -57,6 +60,9 @@ pub struct RecordOptions {
     pub system_audio: bool,
     pub microphone: bool,
     pub output: PathBuf,
+    /// Start paused (e.g. during a countdown): everything is ready, nothing
+    /// is recorded until [`Recording::resume`].
+    pub start_paused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +78,10 @@ pub struct RecordingStats {
     pub dropped: u64,
     /// Distinct frames delivered by the system (screen changes).
     pub captured: u64,
+    /// Recorded time, pauses excluded.
     pub duration: Duration,
+    /// The last frame, at most 320 × 200, for a preview.
+    pub thumbnail: Option<BgraImage>,
 }
 
 /// A recording in progress. Dropping it stops the recording.
@@ -80,7 +89,7 @@ pub struct RecordingStats {
 pub struct Recording {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<Result<RecordingStats>>>,
-    started: Instant,
+    clock: Arc<clock::Clock>,
     size: (u32, u32),
     region: Rect,
 }
@@ -131,12 +140,21 @@ impl Recording {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread_stop = Arc::clone(&stop);
+        let clock = Arc::new(clock::Clock::new(options.start_paused));
+        let thread_clock = Arc::clone(&clock);
         let monitor_raw = monitor.0 as isize;
         let thread = std::thread::Builder::new()
             .name("kadra-recorder".into())
             .spawn(move || {
                 let monitor = HMONITOR(monitor_raw as *mut _);
-                run(&options, monitor, area, &thread_stop, &ready_tx)
+                run(
+                    &options,
+                    monitor,
+                    area,
+                    &thread_stop,
+                    &thread_clock,
+                    &ready_tx,
+                )
             })
             .map_err(|_| RecordError::ThreadLost)?;
 
@@ -144,7 +162,7 @@ impl Recording {
             Ok(Ok(size)) => Ok(Self {
                 stop,
                 thread: Some(thread),
-                started: Instant::now(),
+                clock,
                 size,
                 region: area.offset(monitor_rect.left, monitor_rect.top),
             }),
@@ -159,8 +177,21 @@ impl Recording {
         }
     }
 
+    /// Recorded time so far, pauses excluded.
     pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
+        ticks_to_duration(self.clock.elapsed(audio::now_ticks()))
+    }
+
+    pub fn pause(&self) {
+        self.clock.pause(audio::now_ticks());
+    }
+
+    pub fn resume(&self) {
+        self.clock.resume(audio::now_ticks());
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.clock.is_paused()
     }
 
     /// Area actually recorded, in desktop coordinates (clipped to one
@@ -235,12 +266,18 @@ fn open_encoder(
     Err(last_error.map_or(RecordError::ThreadLost, RecordError::Windows))
 }
 
+#[allow(clippy::cast_sign_loss)]
+fn ticks_to_duration(ticks: i64) -> Duration {
+    Duration::from_nanos(ticks.max(0) as u64 * 100)
+}
+
 /// Recording thread body.
 fn run(
     options: &RecordOptions,
     monitor: HMONITOR,
     area: Rect,
     stop: &AtomicBool,
+    clock: &Arc<clock::Clock>,
     ready: &mpsc::SyncSender<Result<(u32, u32)>>,
 ) -> Result<RecordingStats> {
     #[allow(clippy::cast_sign_loss)]
@@ -265,7 +302,7 @@ fn run(
         Ok((gpu, source, converter, encoder, fps, settings.codec))
     };
 
-    let (_gpu, source, converter, encoder, fps, codec) = match setup() {
+    let (gpu, source, converter, encoder, fps, codec) = match setup() {
         Ok(parts) => parts,
         Err(err) => {
             // The caller receives the actual error through `ready`.
@@ -283,21 +320,20 @@ fn run(
     }
 
     let encoder = Arc::new(encoder);
-    // Audio and video share the same time origin.
-    let origin = audio::now_ticks();
-    let pace = pacer::Pacer::new(fps)?;
+    // Audio and video follow the same clock, which also handles pauses.
+    clock.begin(audio::now_ticks());
+    let pace = pacer::Pacer::new(fps, Arc::clone(clock))?;
     let audio = (options.system_audio || options.microphone).then(|| {
         let encoder = Arc::clone(&encoder);
         audio::AudioCapture::start(
             options.system_audio,
             options.microphone,
-            origin,
+            Arc::clone(clock),
             Box::new(move |pcm, time, duration| encoder.write_audio(pcm, time, duration)),
         )
     });
     let frame_ticks = encoder::TICKS_PER_SECOND / i64::from(fps);
     let mut frames = 0u64;
-    let started = Instant::now();
     let mut result = Ok(());
 
     while !stop.load(Ordering::Relaxed) {
@@ -307,6 +343,7 @@ fn run(
                 tracing::debug!(skipped, "recording fell behind");
                 index
             }
+            pacer::Tick::Paused => continue,
         };
         let frame = converter.convert().and_then(|texture| {
             #[allow(clippy::cast_possible_wrap)]
@@ -324,6 +361,11 @@ fn run(
         audio.stop();
     }
     let finished = encoder.finish();
+    let thumbnail = source
+        .read_area(&gpu, area)
+        .map(|image| image.thumbnail(320, 200))
+        .inspect_err(|err| tracing::debug!("no thumbnail: {err}"))
+        .ok();
     let stats = RecordingStats {
         path: options.output.clone(),
         width: size.0,
@@ -332,7 +374,8 @@ fn run(
         frames,
         dropped: pace.skipped(),
         captured: source.frames(),
-        duration: started.elapsed(),
+        duration: ticks_to_duration(clock.elapsed(audio::now_ticks())),
+        thumbnail,
     };
     tracing::info!(
         frames = stats.frames,

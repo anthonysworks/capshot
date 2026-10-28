@@ -1,7 +1,7 @@
 //! Records the primary monitor, then checks the file and prints statistics.
 //!
 //! ```text
-//! cargo run --release -p kadra-record --example record -- <out.mp4> [seconds] [fps] [h264|hevc|av1]
+//! cargo run --release -p kadra-record --example record -- <out.mp4> [seconds] [fps] [h264|hevc|av1] [pause]
 //! ```
 
 // A measurement tool: lossy numeric conversions are fine here.
@@ -148,6 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         capture_cursor: true,
         system_audio: true,
         microphone: std::env::var("KADRA_MIC").is_ok(),
+        start_paused: false,
         output: output.clone(),
     })?;
     println!(
@@ -155,7 +156,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         start.elapsed().as_secs_f64() * 1e3,
         recording.size()
     );
-    std::thread::sleep(Duration::from_secs(seconds));
+    if args.get(5).is_some_and(|a| a == "pause") {
+        // Record half, pause for as long, record the other half.
+        let half = Duration::from_secs(seconds) / 2;
+        std::thread::sleep(half);
+        recording.pause();
+        std::thread::sleep(half);
+        recording.resume();
+        std::thread::sleep(half);
+    } else {
+        std::thread::sleep(Duration::from_secs(seconds));
+    }
     let stats = recording.stop()?;
     let wall = start.elapsed();
     let cpu = cpu_time() - cpu_before;
@@ -164,6 +175,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[allow(clippy::cast_precision_loss)]
     let mbit = size as f64 * 8.0 / 1e6 / stats.duration.as_secs_f64();
     println!("codec: {:?}", stats.codec);
+    if let Some(thumb) = &stats.thumbnail {
+        println!("thumbnail: {}x{}", thumb.width(), thumb.height());
+    }
     println!(
         "{} frames ({} dropped, {} screen updates) in {:.2} s, {:.1} MB, {mbit:.1} Mbit/s",
         stats.frames,

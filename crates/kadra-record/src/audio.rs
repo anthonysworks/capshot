@@ -28,6 +28,8 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::core::Result;
 
+use crate::clock::Clock;
+
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 /// `WAVE_FORMAT_IEEE_FLOAT`.
@@ -152,7 +154,7 @@ impl Source {
     }
 
     /// Moves every pending packet into the track.
-    fn drain(&mut self, origin: i64) -> Result<()> {
+    fn drain(&mut self, clock: &Clock) -> Result<()> {
         // SAFETY: buffers returned by GetBuffer are read before ReleaseBuffer.
         unsafe {
             while self.capture.GetNextPacketSize()? > 0 {
@@ -165,9 +167,12 @@ impl Source {
                     None,
                     Some(&mut ticks),
                 )?;
+                // Packets captured while paused have no place on the timeline.
                 #[allow(clippy::cast_possible_wrap)]
-                let relative = ticks as i64 - origin;
-                if relative >= 0 && frames > 0 {
+                let relative = clock.map(ticks as i64);
+                if let Some(relative) = relative
+                    && frames > 0
+                {
                     #[allow(clippy::cast_sign_loss)]
                     let at = (relative as u128 * u128::from(SAMPLE_RATE) / 10_000_000) as u64;
                     let len = frames as usize * CHANNELS;
@@ -217,9 +222,9 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
-    /// Starts capturing. `origin` is the timeline zero (see [`now_ticks`]).
+    /// Starts capturing on the recording `clock`.
     /// Missing devices are skipped with a warning.
-    pub fn start(system: bool, microphone: bool, origin: i64, mut sink: AudioSink) -> Self {
+    pub fn start(system: bool, microphone: bool, clock: Arc<Clock>, mut sink: AudioSink) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
@@ -227,7 +232,7 @@ impl AudioCapture {
             .spawn(move || {
                 // SAFETY: balanced with CoUninitialize below.
                 let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-                run(system, microphone, origin, &thread_stop, &mut sink);
+                run(system, microphone, &clock, &thread_stop, &mut sink);
                 // SAFETY: matches CoInitializeEx above.
                 unsafe { CoUninitialize() };
             })
@@ -284,7 +289,7 @@ fn open_sources(system: bool, microphone: bool) -> Vec<Source> {
         .collect()
 }
 
-fn run(system: bool, microphone: bool, origin: i64, stop: &AtomicBool, sink: &mut AudioSink) {
+fn run(system: bool, microphone: bool, clock: &Clock, stop: &AtomicBool, sink: &mut AudioSink) {
     let mut sources = open_sources(system, microphone);
     if sources.is_empty() {
         return;
@@ -303,7 +308,7 @@ fn run(system: bool, microphone: bool, origin: i64, stop: &AtomicBool, sink: &mu
             std::thread::sleep(MIX_PERIOD);
         }
         for source in &mut sources {
-            if let Err(err) = source.drain(origin) {
+            if let Err(err) = source.drain(clock) {
                 tracing::warn!("{} capture failed: {err}", source.name);
             }
         }
@@ -311,8 +316,8 @@ fn run(system: bool, microphone: bool, origin: i64, stop: &AtomicBool, sink: &mu
         // While running, stay behind real time so late packets still fit;
         // when stopping, mix everything up to now.
         #[allow(clippy::cast_sign_loss)]
-        let now =
-            ((now_ticks() - origin).max(0) as u128 * u128::from(SAMPLE_RATE) / 10_000_000) as u64;
+        let now = (clock.elapsed(now_ticks()).max(0) as u128 * u128::from(SAMPLE_RATE) / 10_000_000)
+            as u64;
         let target = if stopping {
             now
         } else {
