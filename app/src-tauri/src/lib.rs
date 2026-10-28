@@ -5,6 +5,7 @@ mod actions;
 mod capture;
 mod commands;
 mod hotkeys;
+mod recorder_host;
 mod recording;
 mod state;
 mod tray;
@@ -28,6 +29,15 @@ pub fn run() {
 
     // Tauri ends the process with `exit`, which skips destructors: the guard
     // is dropped explicitly on `RunEvent::Exit` so buffered lines are written.
+    // Recorder child process: no Tauri, no window, just the recorder.
+    if std::env::args().any(|a| a == recorder_host::FLAG) {
+        let code = {
+            let _log_guard = logging::init(paths.log_dir());
+            recorder_host::run()
+        };
+        std::process::exit(code);
+    }
+
     let mut log_guard = Some(logging::init(paths.log_dir()));
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Kadra");
 

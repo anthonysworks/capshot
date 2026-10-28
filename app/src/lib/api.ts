@@ -23,6 +23,7 @@ export interface Config {
     capture_cursor: boolean;
     system_audio: boolean;
     microphone: boolean;
+    countdown_secs: number;
   };
 }
 

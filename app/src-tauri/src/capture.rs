@@ -50,8 +50,20 @@ impl CaptureService {
         });
     }
 
-    pub fn show_recording_indicator(&self, region: Rect) {
-        self.overlay.show_recording_indicator(region);
+    pub fn show_recording_indicator(&self, region: Rect, countdown: Duration) {
+        self.overlay.show_recording_indicator(region, countdown);
+    }
+
+    pub fn recording_started(&self) {
+        self.overlay.recording_started();
+    }
+
+    pub fn recording_paused(&self, paused: bool) {
+        self.overlay.recording_paused(paused);
+    }
+
+    pub fn show_file_preview(&self, image: BgraImage, path: std::path::PathBuf, region: Rect) {
+        self.overlay.show_file_preview(image, path, region);
     }
 
     pub fn hide_recording_indicator(&self) {
@@ -111,6 +123,7 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
         }
         CaptureResult::RegionSelected(region) => recording::start(app, region),
         CaptureResult::StopRecording => recording::stop(app),
+        CaptureResult::TogglePause => recording::toggle_pause(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),
         CaptureResult::Cancelled => tracing::debug!("capture cancelled"),
         CaptureResult::Failed(err) => tracing::error!("capture failed: {err}"),

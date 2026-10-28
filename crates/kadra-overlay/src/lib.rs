@@ -15,7 +15,7 @@ mod window;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kadra_core::{BgraImage, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -56,6 +56,8 @@ pub enum CaptureResult {
     RegionSelected(Rect),
     /// The stop button of the recording indicator was clicked.
     StopRecording,
+    /// The pause/resume button of the recording indicator was clicked.
+    TogglePause,
     /// The colour under the cursor was copied as `#RRGGBB`.
     ColorCopied(String),
     Cancelled,
@@ -70,9 +72,22 @@ pub type ResultHandler = Box<dyn FnMut(CaptureResult) + Send + 'static>;
 #[derive(Debug)]
 enum Command {
     Capture(CaptureRequest),
-    AttachFile { capture_id: u64, path: PathBuf },
-    ShowIndicator(Rect),
+    AttachFile {
+        capture_id: u64,
+        path: PathBuf,
+    },
+    ShowIndicator {
+        region: Rect,
+        countdown: Duration,
+    },
+    IndicatorRunning,
+    IndicatorPaused(bool),
     HideIndicator,
+    ShowFile {
+        image: BgraImage,
+        path: PathBuf,
+        region: Rect,
+    },
 }
 
 /// Handle to the overlay thread.
@@ -114,10 +129,30 @@ impl Overlay {
         self.send(Command::AttachFile { capture_id, path });
     }
 
-    /// Shows the recording frame and timer around `region` (desktop
-    /// coordinates). They are excluded from capture.
-    pub fn show_recording_indicator(&self, region: Rect) {
-        self.send(Command::ShowIndicator(region));
+    /// Shows the recording frame and pill around `region` (desktop
+    /// coordinates), counting down for `countdown` first. They are
+    /// excluded from capture.
+    pub fn show_recording_indicator(&self, region: Rect, countdown: Duration) {
+        self.send(Command::ShowIndicator { region, countdown });
+    }
+
+    /// The recording has actually started: the pill shows the timer.
+    pub fn recording_started(&self) {
+        self.send(Command::IndicatorRunning);
+    }
+
+    pub fn recording_paused(&self, paused: bool) {
+        self.send(Command::IndicatorPaused(paused));
+    }
+
+    /// Shows the preview for a saved file (e.g. a video and its last
+    /// frame) on the monitor of `region`.
+    pub fn show_file_preview(&self, image: BgraImage, path: PathBuf, region: Rect) {
+        self.send(Command::ShowFile {
+            image,
+            path,
+            region,
+        });
     }
 
     pub fn hide_recording_indicator(&self) {

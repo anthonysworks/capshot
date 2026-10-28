@@ -13,6 +13,7 @@ use crate::windows;
 const TRAY_ID: &str = "main";
 const CAPTURE: &str = "capture";
 const RECORD: &str = "record";
+const PAUSE: &str = "pause";
 const SCREENSHOTS: &str = "screenshots";
 const SETTINGS: &str = "settings";
 const QUIT: &str = "quit";
@@ -31,13 +32,21 @@ fn file_name(path: &Path) -> String {
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let state = app.state::<AppState>();
     let hotkeys = state.config().hotkeys.clone();
-    let recording = app
-        .state::<crate::recording::RecorderState>()
-        .is_recording();
-    let record_label = if recording {
+    let recorder = app.state::<crate::recording::RecorderState>();
+    let (active, recording, paused) = (
+        recorder.is_active(),
+        recorder.is_recording(),
+        recorder.is_paused(),
+    );
+    let record_label = if active {
         "Stop recording"
     } else {
         "Record video"
+    };
+    let pause_label = if paused {
+        "Resume recording"
+    } else {
+        "Pause recording"
     };
     let recent: Vec<String> = state
         .history()
@@ -67,6 +76,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         &[
             &MenuItem::with_id(app, CAPTURE, "Capture", true, Some(&hotkeys.capture))?,
             &MenuItem::with_id(app, RECORD, record_label, true, Some(&hotkeys.record))?,
+            &MenuItem::with_id(app, PAUSE, pause_label, recording, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &recent_menu,
             &MenuItem::with_id(
@@ -116,6 +126,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             CAPTURE => actions::trigger(app, Action::Capture),
             RECORD => actions::trigger(app, Action::Record),
+            PAUSE => crate::recording::toggle_pause(app),
             SCREENSHOTS => {
                 let dir = app.state::<AppState>().config().capture.output_dir.clone();
                 windows::open_in_explorer(&dir);

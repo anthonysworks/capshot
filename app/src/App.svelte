@@ -143,6 +143,14 @@
         </div>
       </div>
       <label class="row">
+        <span>Countdown</span>
+        <select bind:value={config.recording.countdown_secs}>
+          {#each [0, 3, 5, 10] as s (s)}
+            <option value={s}>{s === 0 ? "None" : `${s} s`}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="row">
         <span>Codec</span>
         <select bind:value={config.recording.codec}>
           <option value="h264">H.264 (best compatibility)</option>

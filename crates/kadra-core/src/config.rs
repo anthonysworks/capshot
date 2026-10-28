@@ -107,6 +107,8 @@ pub struct RecordingSettings {
     pub capture_cursor: bool,
     pub system_audio: bool,
     pub microphone: bool,
+    /// Seconds counted down on screen before recording starts (0 = none).
+    pub countdown_secs: u32,
 }
 
 impl Default for RecordingSettings {
@@ -121,6 +123,7 @@ impl Default for RecordingSettings {
             capture_cursor: true,
             system_audio: true,
             microphone: false,
+            countdown_secs: 3,
         }
     }
 }
@@ -142,6 +145,12 @@ impl Config {
                 FPS_RANGE.start(),
                 FPS_RANGE.end(),
                 self.recording.fps
+            )));
+        }
+        if self.recording.countdown_secs > 10 {
+            return Err(ConfigError::Invalid(format!(
+                "countdown must be at most 10 seconds (got {})",
+                self.recording.countdown_secs
             )));
         }
         if self.recording.quality > 51 {

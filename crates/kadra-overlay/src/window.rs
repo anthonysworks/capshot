@@ -324,9 +324,9 @@ fn take_focus(hwnd: HWND) {
     }
 }
 
-/// Monitor containing the centre of `region` (desktop coordinates) and
-/// its UI scale.
-fn monitor_of(region: Rect) -> (Rect, f32) {
+/// Monitor containing the centre of `region` (desktop coordinates): its
+/// area, its work area (without the taskbar) and its UI scale.
+fn monitor_of(region: Rect) -> (Rect, Rect, f32) {
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     };
@@ -345,10 +345,11 @@ fn monitor_of(region: Rect) -> (Rect, f32) {
         let _ = GetMonitorInfoW(monitor, &mut info);
         let (mut dpi, mut unused) = (96, 96);
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut unused);
-        let r = info.rcMonitor;
+        let to_rect =
+            |r: windows::Win32::Foundation::RECT| Rect::new(r.left, r.top, r.right, r.bottom);
         #[allow(clippy::cast_precision_loss)]
         let scale = dpi as f32 / 96.0;
-        (Rect::new(r.left, r.top, r.right, r.bottom), scale)
+        (to_rect(info.rcMonitor), to_rect(info.rcWork), scale)
     }
 }
 
@@ -369,9 +370,22 @@ impl State {
                         Command::AttachFile { capture_id, path } => {
                             self.preview.attach_file(capture_id, path);
                         }
-                        Command::ShowIndicator(region) => {
-                            let (monitor, scale) = monitor_of(region);
-                            self.indicator.show(region, monitor, scale);
+                        Command::ShowIndicator { region, countdown } => {
+                            let (monitor, _, scale) = monitor_of(region);
+                            self.indicator.show(region, monitor, scale, countdown);
+                        }
+                        Command::IndicatorRunning => self.indicator.running(),
+                        Command::IndicatorPaused(paused) => self.indicator.set_paused(paused),
+                        Command::ShowFile {
+                            image,
+                            path,
+                            region,
+                        } => {
+                            let (_, work, scale) = monitor_of(region);
+                            self.next_capture_id += 1;
+                            let id = self.next_capture_id;
+                            self.preview.show(id, &image, work, scale);
+                            self.preview.attach_file(id, path);
                         }
                         Command::HideIndicator => self.indicator.hide(),
                     }
@@ -782,8 +796,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             state.preview.handle(msg, wparam, lparam)
         } else if state.indicator.owns(hwnd) {
             let (result, request) = state.indicator.handle(hwnd, msg, lparam)?;
-            if request == Some(indicator::Request::Stop) {
-                (state.handler)(CaptureResult::StopRecording);
+            match request {
+                Some(indicator::Request::Stop) => (state.handler)(CaptureResult::StopRecording),
+                Some(indicator::Request::TogglePause) => {
+                    (state.handler)(CaptureResult::TogglePause);
+                }
+                None => {}
             }
             Some(result)
         } else {
