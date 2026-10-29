@@ -7,6 +7,7 @@
     FPS_PRESETS,
     appInfo,
     getConfig,
+    onConfigChanged,
     openFolder,
     saveConfig,
   } from "./lib/api";
@@ -57,6 +58,18 @@
   }
 
   load();
+
+  // The overlay toolbar remembers the audio toggles: apply them without
+  // touching unsaved edits.
+  onConfigChanged((next) => {
+    if (!config) return;
+    const base = JSON.parse(saved) as Config;
+    for (const key of ["system_audio", "microphone"] as const) {
+      base.recording[key] = next.recording[key];
+      config.recording[key] = next.recording[key];
+    }
+    saved = JSON.stringify(base);
+  });
 </script>
 
 {#if config}

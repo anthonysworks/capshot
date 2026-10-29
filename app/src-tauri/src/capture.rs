@@ -29,23 +29,16 @@ impl CaptureService {
         Ok(Self { overlay })
     }
 
-    pub fn capture(&self, mode: Mode, options: Options) {
+    /// Opens the overlay; the toolbar can still switch between taking a
+    /// screenshot and recording.
+    pub fn open(&self, purpose: Purpose, options: Options) {
         self.overlay.capture(CaptureRequest {
-            purpose: Purpose::Screenshot,
-            mode,
+            purpose,
+            mode: Mode::Region,
             copy_to_clipboard: options.copy_to_clipboard,
             show_preview: options.show_preview,
-            requested_at: Instant::now(),
-        });
-    }
-
-    /// Opens the overlay to pick the area to record.
-    pub fn select_recording_area(&self) {
-        self.overlay.capture(CaptureRequest {
-            purpose: Purpose::Recording,
-            mode: Mode::Region,
-            copy_to_clipboard: false,
-            show_preview: false,
+            system_audio: options.system_audio,
+            microphone: options.microphone,
             requested_at: Instant::now(),
         });
     }
@@ -71,15 +64,19 @@ impl CaptureService {
     }
 }
 
-/// Capture settings read when the capture is requested.
+/// Settings read when the overlay is requested.
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     copy_to_clipboard: bool,
     show_preview: bool,
+    system_audio: bool,
+    microphone: bool,
 }
 
-/// Opens the overlay, after the configured delay.
-pub fn start(app: &AppHandle) {
+/// Opens the overlay for `purpose` (after the configured delay for a
+/// screenshot; recordings have their own countdown).
+pub fn start(app: &AppHandle, purpose: Purpose) {
     let Some(service) = app.try_state::<CaptureService>() else {
         tracing::error!("capture is unavailable (overlay failed to start)");
         return;
@@ -92,18 +89,20 @@ pub fn start(app: &AppHandle) {
             Options {
                 copy_to_clipboard: config.capture.copy_to_clipboard,
                 show_preview: config.capture.show_preview,
+                system_audio: config.recording.system_audio,
+                microphone: config.recording.microphone,
             },
         )
     };
-    if delay == 0 {
-        service.capture(Mode::Region, options);
+    if delay == 0 || purpose == Purpose::Recording {
+        service.open(purpose, options);
         return;
     }
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(u64::from(delay)));
         if let Some(service) = app.try_state::<CaptureService>() {
-            service.capture(Mode::Region, options);
+            service.open(purpose, options);
         }
     });
 }
@@ -121,7 +120,11 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
             let app = app.clone();
             std::thread::spawn(move || save(&app, id, &image));
         }
-        CaptureResult::RegionSelected(region) => recording::start(app, region),
+        CaptureResult::RegionSelected {
+            region,
+            system_audio,
+            microphone,
+        } => recording::start(app, region, system_audio, microphone),
         CaptureResult::StopRecording => recording::stop(app),
         CaptureResult::TogglePause => recording::toggle_pause(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),

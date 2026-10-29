@@ -62,13 +62,14 @@ fn service(app: &AppHandle) -> Option<tauri::State<'_, CaptureService>> {
 pub fn toggle(app: &AppHandle) {
     if app.state::<RecorderState>().is_active() {
         stop(app);
-    } else if let Some(service) = service(app) {
-        service.select_recording_area();
+    } else {
+        crate::capture::start(app, kadra_overlay::Purpose::Recording);
     }
 }
 
-/// Called once the user has picked the area (desktop coordinates).
-pub fn start(app: &AppHandle, region: Rect) {
+/// Called once the user has picked the area (desktop coordinates) and the
+/// audio sources, which are remembered for next time.
+pub fn start(app: &AppHandle, region: Rect, system_audio: bool, microphone: bool) {
     tracing::info!(?region, "recording area selected");
     {
         let state = app.state::<RecorderState>();
@@ -79,6 +80,7 @@ pub fn start(app: &AppHandle, region: Rect) {
         *phase = Phase::Starting { cancelled: false };
     }
 
+    remember_audio(app, system_audio, microphone);
     let (options, countdown) = {
         let app_state = app.state::<AppState>();
         let config = app_state.config();
@@ -94,8 +96,8 @@ pub fn start(app: &AppHandle, region: Rect) {
             codec: config.recording.codec,
             quality: config.recording.quality,
             capture_cursor: config.recording.capture_cursor,
-            system_audio: config.recording.system_audio,
-            microphone: config.recording.microphone,
+            system_audio,
+            microphone,
             output: kadra_encode::unique_path(&dir, &stem, "mp4"),
             // Everything is prepared during the countdown, so recording
             // starts exactly when it reaches zero.
@@ -114,6 +116,25 @@ pub fn start(app: &AppHandle, region: Rect) {
     let app = app.clone();
     std::thread::spawn(move || begin(&app, &options, countdown));
 }
+
+/// Saves the audio toggles chosen on the toolbar as the new defaults.
+fn remember_audio(app: &AppHandle, system_audio: bool, microphone: bool) {
+    let app_state = app.state::<AppState>();
+    let mut config = app_state.config();
+    if config.recording.system_audio == system_audio && config.recording.microphone == microphone {
+        return;
+    }
+    config.recording.system_audio = system_audio;
+    config.recording.microphone = microphone;
+    if let Err(err) = config.save(&app_state.paths().config_file()) {
+        tracing::warn!("cannot save the audio settings: {err}");
+    }
+    // Keep an open settings window in sync.
+    let _ = tauri::Emitter::emit(app, CONFIG_EVENT, &*config);
+}
+
+/// Sent to the web UI when the configuration changes outside of it.
+pub const CONFIG_EVENT: &str = "config-changed";
 
 /// Recorder start-up, countdown and hand-over to the recording phase.
 fn begin(app: &AppHandle, options: &HostOptions, countdown: Duration) {

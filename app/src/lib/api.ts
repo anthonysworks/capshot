@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export type ImageFormat = "png" | "jpeg" | "webp";
 export type VideoCodec = "h264" | "hevc" | "av1";
@@ -41,3 +42,7 @@ export const getConfig = () => invoke<Config>("get_config");
 export const saveConfig = (config: Config) => invoke<void>("save_config", { config });
 export const appInfo = () => invoke<AppInfo>("app_info");
 export const openFolder = (folder: Folder) => invoke<void>("open_folder", { folder });
+
+/** Configuration changed outside the settings window (e.g. the overlay). */
+export const onConfigChanged = (handler: (config: Config) => void) =>
+  listen<Config>("config-changed", (event) => handler(event.payload));

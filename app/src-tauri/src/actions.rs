@@ -23,7 +23,7 @@ impl Action {
 
 pub fn trigger(app: &AppHandle, action: Action) {
     match action {
-        Action::Capture => capture::start(app),
+        Action::Capture => capture::start(app, kadra_overlay::Purpose::Screenshot),
         // Starts selecting an area, or stops the current recording.
         Action::Record => recording::toggle(app),
     }
