@@ -14,6 +14,7 @@ publish = false
 kadra-capture = { path = "crates/kadra-capture" }
 kadra-core = { path = "crates/kadra-core" }
 kadra-encode = { path = "crates/kadra-encode" }
+kadra-gif = { path = "crates/kadra-gif" }
 kadra-overlay = { path = "crates/kadra-overlay" }
 kadra-record = { path = "crates/kadra-record" }
 
