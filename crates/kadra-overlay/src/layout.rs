@@ -3,7 +3,7 @@
 
 use kadra_core::{Point, Rect};
 
-use crate::selection::Mode;
+use crate::selection::{Mode, Purpose};
 
 #[allow(clippy::cast_possible_truncation)]
 fn px(value: f32, scale: f32) -> i32 {
@@ -12,48 +12,76 @@ fn px(value: f32, scale: f32) -> i32 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
+    /// Switch between taking a screenshot and recording.
+    Purpose(Purpose),
     Mode(Mode),
+    /// Record the system audio (recording only).
+    SystemAudio,
+    /// Record the microphone (recording only).
+    Microphone,
     Close,
 }
 
-pub const BUTTONS: [Button; 4] = [
-    Button::Mode(Mode::Region),
-    Button::Mode(Mode::Freeform),
-    Button::Mode(Mode::Screen),
-    Button::Close,
-];
+/// Toolbar buttons for `purpose`, in groups separated by a thin line.
+pub fn groups(purpose: Purpose) -> Vec<Vec<Button>> {
+    let mut groups = vec![
+        vec![
+            Button::Purpose(Purpose::Screenshot),
+            Button::Purpose(Purpose::Recording),
+        ],
+        purpose.modes().iter().map(|&m| Button::Mode(m)).collect(),
+    ];
+    if purpose == Purpose::Recording {
+        groups.push(vec![Button::SystemAudio, Button::Microphone]);
+    }
+    groups.push(vec![Button::Close]);
+    groups
+}
 
 /// Floating toolbar centred at the top of a monitor.
 #[derive(Debug, Clone)]
 pub struct Toolbar {
     pub frame: Rect,
-    pub buttons: [(Button, Rect); 4],
+    pub buttons: Vec<(Button, Rect)>,
+    /// Horizontal positions of the lines between groups.
+    pub separators: Vec<i32>,
     pub scale: f32,
 }
 
 impl Toolbar {
-    pub fn new(monitor: Rect, scale: f32) -> Self {
+    pub fn new(monitor: Rect, scale: f32, purpose: Purpose) -> Self {
+        let groups = groups(purpose);
         let button = px(40.0, scale);
         let pad = px(4.0, scale);
         let separator = px(12.0, scale);
-        let width = pad * 2 + button * 4 + pad * 2 + separator;
+        let count = i32::try_from(groups.iter().map(Vec::len).sum::<usize>()).unwrap_or(0);
+        let gaps = i32::try_from(groups.len().saturating_sub(1)).unwrap_or(0);
+        // Inside a group buttons are `pad` apart; between groups the gap is
+        // `separator` wide instead.
+        let width = pad + count * (button + pad) + gaps * (separator - pad);
         let height = button + pad * 2;
         let left = monitor.left + (monitor.width() - width) / 2;
         let top = monitor.top + px(16.0, scale);
         let frame = Rect::from_size(left, top, width, height);
 
         let mut x = left + pad;
-        let buttons = BUTTONS.map(|b| {
-            if b == Button::Close {
+        let mut buttons = Vec::new();
+        let mut separators = Vec::new();
+        for (i, group) in groups.into_iter().enumerate() {
+            if i > 0 {
+                // The line sits in the middle of the gap between groups.
+                separators.push(x - pad + separator / 2);
                 x += separator - pad;
             }
-            let r = Rect::from_size(x, top + pad, button, button);
-            x += button + pad;
-            (b, r)
-        });
+            for b in group {
+                buttons.push((b, Rect::from_size(x, top + pad, button, button)));
+                x += button + pad;
+            }
+        }
         Self {
             frame,
             buttons,
+            separators,
             scale,
         }
     }
@@ -152,10 +180,12 @@ mod tests {
 
     #[test]
     fn toolbar_is_centred_and_hit_tested() {
-        let bar = Toolbar::new(MONITOR, 1.0);
-        assert_eq!(bar.frame.left + bar.frame.width() / 2, 960);
+        let bar = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot);
+        assert!((bar.frame.left + bar.frame.width() / 2 - 960).abs() <= 1);
         assert_eq!(bar.frame.top, 16);
-        for (button, rect) in bar.buttons {
+        // Last button flush with the frame padding.
+        assert_eq!(bar.buttons.last().unwrap().1.right + 4, bar.frame.right);
+        for &(button, rect) in &bar.buttons {
             let centre = Point::new(rect.left + rect.width() / 2, rect.top + rect.height() / 2);
             assert_eq!(bar.hit(centre), Some(button));
             assert!(bar.frame.contains(Point::new(rect.left, rect.top)));
@@ -169,9 +199,28 @@ mod tests {
 
     #[test]
     fn toolbar_scales_with_dpi() {
-        let normal = Toolbar::new(MONITOR, 1.0);
-        let large = Toolbar::new(MONITOR, 1.5);
+        let normal = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot);
+        let large = Toolbar::new(MONITOR, 1.5, Purpose::Screenshot);
         assert_eq!(large.frame.height(), normal.frame.height() * 3 / 2);
+    }
+
+    #[test]
+    fn recording_toolbar_has_audio_toggles() {
+        let shot = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot);
+        let rec = Toolbar::new(MONITOR, 1.0, Purpose::Recording);
+        let has = |bar: &Toolbar, b| bar.buttons.iter().any(|&(x, _)| x == b);
+        assert!(has(&shot, Button::Mode(Mode::Picker)));
+        assert!(!has(&shot, Button::Microphone));
+        assert!(has(&rec, Button::SystemAudio) && has(&rec, Button::Microphone));
+        assert!(!has(&rec, Button::Mode(Mode::Freeform)));
+        assert_eq!(shot.separators.len(), 2);
+        assert_eq!(rec.separators.len(), 3);
+        // Separators never overlap a button.
+        for bar in [&shot, &rec] {
+            for &x in &bar.separators {
+                assert!(bar.buttons.iter().all(|(_, r)| x < r.left || x >= r.right));
+            }
+        }
     }
 
     #[test]

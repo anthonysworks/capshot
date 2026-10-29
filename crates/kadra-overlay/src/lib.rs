@@ -21,25 +21,20 @@ use kadra_core::{BgraImage, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-pub use selection::Mode;
-
-/// What the selection is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Purpose {
-    /// Copy/save the selected pixels.
-    #[default]
-    Screenshot,
-    /// Return the selected area to record it.
-    Recording,
-}
+pub use selection::{Mode, Purpose};
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CaptureRequest {
+    /// Initial purpose; the toolbar can switch it.
     pub purpose: Purpose,
     pub mode: Mode,
     pub copy_to_clipboard: bool,
     /// Show a thumbnail in the corner of the screen afterwards.
     pub show_preview: bool,
+    /// Initial state of the audio toggles shown when recording.
+    pub system_audio: bool,
+    pub microphone: bool,
     /// When the user asked for the capture, to measure latency.
     pub requested_at: Instant,
 }
@@ -52,8 +47,13 @@ pub enum CaptureResult {
         image: BgraImage,
         copied: bool,
     },
-    /// An area to record was selected (desktop coordinates).
-    RegionSelected(Rect),
+    /// An area to record was selected (desktop coordinates), with the
+    /// audio sources chosen on the toolbar.
+    RegionSelected {
+        region: Rect,
+        system_audio: bool,
+        microphone: bool,
+    },
     /// The stop button of the recording indicator was clicked.
     StopRecording,
     /// The pause/resume button of the recording indicator was clicked.

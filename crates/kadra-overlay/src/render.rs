@@ -36,7 +36,7 @@ use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::Vector2;
 
 use crate::layout::{Button, MAGNIFIER_CELLS, Magnifier, Toolbar, size_label};
-use crate::selection::{Mode, Selection, Targets};
+use crate::selection::{Mode, Purpose, Selection, Targets};
 
 const fn rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -55,17 +55,29 @@ const BLACK: D2D1_COLOR_F = rgba(0, 0, 0, 1.0);
 const PANEL: D2D1_COLOR_F = rgba(0x20, 0x20, 0x20, 0.94);
 const PANEL_BORDER: D2D1_COLOR_F = rgba(255, 255, 255, 0.12);
 const BUTTON_HOVER: D2D1_COLOR_F = rgba(255, 255, 255, 0.1);
+/// Background of a toggle that is on.
+const TOGGLE_ON: D2D1_COLOR_F = rgba(255, 255, 255, 0.16);
+/// Glyph of a toggle that is off.
+const MUTED: D2D1_COLOR_F = rgba(0xe5, 0x48, 0x4d, 1.0);
+const SEPARATOR: D2D1_COLOR_F = rgba(255, 255, 255, 0.16);
 const LABEL: D2D1_COLOR_F = rgba(0x14, 0x14, 0x14, 0.86);
 
 const TEXT_FONT: &str = "Segoe UI Variable Text";
 const ICON_FONT: &str = "Segoe Fluent Icons";
 
-/// Toolbar glyphs (Segoe Fluent Icons).
-pub fn icon(button: Button) -> char {
+/// Toolbar glyphs (Segoe Fluent Icons); `on` is the state of a toggle.
+pub fn icon(button: Button, on: bool) -> char {
     match button {
+        Button::Purpose(Purpose::Screenshot) => '\u{E722}',
+        Button::Purpose(Purpose::Recording) => '\u{E714}',
         Button::Mode(Mode::Region) => '\u{F407}',
         Button::Mode(Mode::Freeform) => '\u{F408}',
         Button::Mode(Mode::Screen) => '\u{E7F4}',
+        Button::Mode(Mode::Picker) => '\u{EF3C}',
+        Button::SystemAudio if on => '\u{E767}',
+        Button::SystemAudio => '\u{E74F}',
+        Button::Microphone if on => '\u{E720}',
+        Button::Microphone => '\u{EC54}',
         Button::Close => '\u{E711}',
     }
 }
@@ -95,8 +107,11 @@ pub struct Scene<'a> {
     /// UI scale of the monitor under the cursor.
     pub scale: f32,
     pub bounds: Rect,
-    /// Selecting an area to record: drawn in red instead of blue.
-    pub recording: bool,
+    /// Recording is drawn in red instead of blue.
+    pub purpose: Purpose,
+    /// Audio toggles shown when recording.
+    pub system_audio: bool,
+    pub microphone: bool,
 }
 
 /// The frozen desktop, uploaded to the GPU once per capture.
@@ -355,7 +370,11 @@ impl Renderer {
             dc.FillRectangle(&full, &self.color(DIM));
 
             let border = (2.0 * scene.scale).max(1.0);
-            let accent = if scene.recording { RECORD } else { ACCENT };
+            let accent = if scene.purpose == Purpose::Recording {
+                RECORD
+            } else {
+                ACCENT
+            };
             let selection = scene.selection;
             if let Some(path) = selection.drawn_path() {
                 if path.len() >= 3 {
@@ -372,7 +391,7 @@ impl Renderer {
             }
 
             if let Some(toolbar) = scene.toolbar {
-                self.draw_toolbar(toolbar, selection.mode(), scene.toolbar_hover, accent)?;
+                self.draw_toolbar(toolbar, scene, accent)?;
             }
             if let Some(m) = scene.magnifier {
                 self.draw_magnifier(&m, scene, shot)?;
@@ -407,13 +426,7 @@ impl Renderer {
         unsafe { self.dc.FillRoundedRectangle(&rounded, &self.color(color)) };
     }
 
-    fn draw_toolbar(
-        &self,
-        bar: &Toolbar,
-        mode: Mode,
-        hover: Option<Button>,
-        accent: D2D1_COLOR_F,
-    ) -> Result<()> {
+    fn draw_toolbar(&self, bar: &Toolbar, scene: &Scene<'_>, accent: D2D1_COLOR_F) -> Result<()> {
         let s = bar.scale;
         let rounded = D2D1_ROUNDED_RECT {
             rect: rect_f(bar.frame),
@@ -426,21 +439,53 @@ impl Renderer {
             self.dc
                 .DrawRoundedRectangle(&rounded, &self.color(PANEL_BORDER), 1.0, None);
         }
+        #[allow(clippy::cast_precision_loss)]
+        for &x in &bar.separators {
+            let x = x as f32 + 0.5;
+            let inset = 10.0 * s;
+            // SAFETY: drawing inside BeginDraw/EndDraw.
+            unsafe {
+                self.dc.DrawLine(
+                    Vector2 {
+                        X: x,
+                        Y: bar.frame.top as f32 + inset,
+                    },
+                    Vector2 {
+                        X: x,
+                        Y: bar.frame.bottom as f32 - inset,
+                    },
+                    &self.color(SEPARATOR),
+                    1.0,
+                    None,
+                );
+            }
+        }
         let format = self.format(Font::Icon, 16.0 * s)?;
-        for (button, rect) in bar.buttons {
-            let active = button == Button::Mode(mode);
+        for &(button, rect) in &bar.buttons {
+            let toggle = match button {
+                Button::SystemAudio => Some(scene.system_audio),
+                Button::Microphone => Some(scene.microphone),
+                _ => None,
+            };
+            let active = match button {
+                Button::Mode(mode) => mode == scene.selection.mode(),
+                Button::Purpose(purpose) => purpose == scene.purpose,
+                _ => false,
+            };
             if active {
                 self.pill(rect, accent, 4.0 * s);
-            } else if hover == Some(button) {
+            } else if scene.toolbar_hover == Some(button) {
                 self.pill(rect, BUTTON_HOVER, 4.0 * s);
+            } else if toggle == Some(true) {
+                self.pill(rect, TOGGLE_ON, 4.0 * s);
             }
-            let glyph = icon(button).to_string();
-            self.text(
-                &glyph,
-                &format,
-                rect_f(rect),
-                if active { BLACK } else { WHITE },
-            );
+            let colour = match (active, toggle) {
+                (true, _) => BLACK,
+                (_, Some(false)) => MUTED,
+                _ => WHITE,
+            };
+            let glyph = icon(button, toggle.unwrap_or(true)).to_string();
+            self.text(&glyph, &format, rect_f(rect), colour);
         }
         Ok(())
     }
@@ -542,7 +587,7 @@ impl Renderer {
         let image = BgraImage::new(256, 256);
         let canvas = Canvas(image.bounds());
         let shot = self.load_screenshot(&image)?;
-        let toolbar = Toolbar::new(canvas.0, 1.0);
+        let toolbar = Toolbar::new(canvas.0, 1.0, Purpose::Recording);
 
         let mut drag = Selection::new(Mode::Region, Point::new(20, 20));
         drag.press(Point::new(20, 20), &canvas);
@@ -563,7 +608,13 @@ impl Renderer {
                 pixel: Some([10, 20, 30, 255]),
                 scale: 1.0,
                 bounds: canvas.0,
-                recording: selection.mode() == Mode::Freeform,
+                purpose: if selection.mode() == Mode::Freeform {
+                    Purpose::Screenshot
+                } else {
+                    Purpose::Recording
+                },
+                system_audio: true,
+                microphone: false,
             };
             self.render_to_image(&scene, &shot)?;
         }

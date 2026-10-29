@@ -11,7 +11,7 @@ use kadra_capture::{Capturer, Gpu, Snapshot};
 use kadra_core::{ImageFormat, Point};
 use kadra_overlay::layout::{Button, Magnifier, Toolbar};
 use kadra_overlay::render::{Renderer, Scene};
-use kadra_overlay::selection::{Mode, Selection};
+use kadra_overlay::selection::{Mode, Purpose, Selection};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -22,6 +22,7 @@ fn scene<'a>(
     selection: &'a Selection,
     toolbar: &'a Toolbar,
     hover: Option<Button>,
+    purpose: Purpose,
 ) -> Scene<'a> {
     let cursor = selection.cursor();
     let monitor = snap.monitor_at(cursor);
@@ -34,7 +35,9 @@ fn scene<'a>(
         pixel: snap.image.pixel(cursor),
         scale: monitor.scale(),
         bounds: snap.bounds(),
-        recording: false,
+        purpose,
+        system_audio: true,
+        microphone: false,
     }
 }
 
@@ -56,7 +59,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|m| m.primary)
         .unwrap_or(&snap.monitors[0]);
     let m = monitor.rect;
-    let toolbar = Toolbar::new(m, monitor.scale());
+    let toolbar = Toolbar::new(m, monitor.scale(), Purpose::Screenshot);
+    let record_bar = Toolbar::new(m, monitor.scale(), Purpose::Recording);
+    let still = Purpose::Screenshot;
     let at = |fx: f32, fy: f32| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
         Point::new(
@@ -77,14 +82,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hover = Selection::new(Mode::Region, at(0.5, 0.5));
     save(
         "1-hover",
-        &scene(&snap, &hover, &toolbar, Some(Button::Mode(Mode::Freeform))),
+        &scene(
+            &snap,
+            &hover,
+            &toolbar,
+            Some(Button::Mode(Mode::Freeform)),
+            still,
+        ),
     )?;
 
     // 2. Dragging a rectangle.
     let mut drag = Selection::new(Mode::Region, at(0.2, 0.25));
     drag.press(at(0.2, 0.25), &snap);
     drag.moved(at(0.55, 0.6), &snap);
-    save("2-drag", &scene(&snap, &drag, &toolbar, None))?;
+    save("2-drag", &scene(&snap, &drag, &toolbar, None, still))?;
 
     // 3. Drawing a freeform shape (a rough circle).
     let mut free = Selection::new(Mode::Freeform, at(0.5, 0.3));
@@ -93,18 +104,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t = f32::from(u8::try_from(i).unwrap_or(0)) / 48.0 * std::f32::consts::TAU * 0.9;
         free.moved(at(0.5 + 0.15 * t.sin(), 0.5 - 0.2 * t.cos()), &snap);
     }
-    save("3-freeform", &scene(&snap, &free, &toolbar, None))?;
+    save("3-freeform", &scene(&snap, &free, &toolbar, None, still))?;
 
     // 4. Screen mode.
     let screen = Selection::new(Mode::Screen, at(0.7, 0.7));
     save(
         "4-screen",
-        &scene(&snap, &screen, &toolbar, Some(Button::Close)),
+        &scene(&snap, &screen, &toolbar, Some(Button::Close), still),
     )?;
 
     // 5. Magnifier close to the bottom-right corner.
     let corner = Selection::new(Mode::Region, Point::new(m.right - 5, m.bottom - 5));
-    save("5-corner", &scene(&snap, &corner, &toolbar, None))?;
+    save("5-corner", &scene(&snap, &corner, &toolbar, None, still))?;
+
+    // 6. Colour picker.
+    let picker = Selection::new(Mode::Picker, at(0.4, 0.4));
+    save("6-picker", &scene(&snap, &picker, &toolbar, None, still))?;
+
+    // 7. Recording: rectangular modes and audio toggles (microphone off).
+    let record = Selection::new(Mode::Region, at(0.5, 0.5));
+    save(
+        "7-record",
+        &scene(
+            &snap,
+            &record,
+            &record_bar,
+            Some(Button::Purpose(Purpose::Screenshot)),
+            Purpose::Recording,
+        ),
+    )?;
 
     Ok(())
 }

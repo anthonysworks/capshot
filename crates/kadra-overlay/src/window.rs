@@ -41,7 +41,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_UP,
+    VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -214,6 +214,12 @@ struct Session {
     selection: Selection,
     toolbar: Toolbar,
     toolbar_hover: Option<Button>,
+    /// Monitor the toolbar sits on and its scale, to rebuild it.
+    toolbar_monitor: (Rect, f32),
+    /// Switchable from the toolbar, unlike the rest of the request.
+    purpose: Purpose,
+    system_audio: bool,
+    microphone: bool,
     request: CaptureRequest,
 }
 
@@ -234,13 +240,37 @@ impl Session {
             pixel: self.snapshot.image.pixel(cursor),
             scale: monitor.scale(),
             bounds: self.snapshot.bounds(),
-            recording: self.request.purpose == Purpose::Recording,
+            purpose: self.purpose,
+            system_audio: self.system_audio,
+            microphone: self.microphone,
         }
+    }
+
+    fn set_purpose(&mut self, purpose: Purpose) {
+        if self.purpose == purpose {
+            return;
+        }
+        self.purpose = purpose;
+        let (monitor, scale) = self.toolbar_monitor;
+        self.toolbar = Toolbar::new(monitor, scale, purpose);
+        self.toolbar_hover = None;
+        let mode = purpose.sanitize(self.selection.mode());
+        self.selection.set_mode(mode);
+    }
+
+    /// Switches to `mode`, and to taking a screenshot if recording does
+    /// not offer it (e.g. the colour picker).
+    fn set_mode(&mut self, mode: crate::Mode) {
+        if !self.purpose.modes().contains(&mode) {
+            self.set_purpose(Purpose::Screenshot);
+        }
+        self.selection.set_mode(mode);
     }
 
     fn crop(&self, outcome: Outcome) -> BgraImage {
         match outcome {
             Outcome::Region(rect) => self.snapshot.image.crop(rect),
+            Outcome::Pick(_) => BgraImage::zeroed(0, 0),
             Outcome::Freeform(points) => {
                 let Some(bounds) = Rect::bounding(&points) else {
                     return BgraImage::zeroed(0, 0);
@@ -504,7 +534,9 @@ impl State {
         unsafe { GetCursorPos(&mut cursor)? };
         let cursor = Point::new(cursor.x - snapshot.origin.x, cursor.y - snapshot.origin.y);
         let monitor = snapshot.monitor_at(cursor);
-        let toolbar = Toolbar::new(monitor.rect, monitor.scale());
+        let purpose = request.purpose;
+        let toolbar = Toolbar::new(monitor.rect, monitor.scale(), purpose);
+        let toolbar_monitor = (monitor.rect, monitor.scale());
         let size = (snapshot.image.width(), snapshot.image.height());
         let origin = snapshot.origin;
 
@@ -530,11 +562,15 @@ impl State {
         }
 
         self.session = Some(Session {
-            selection: Selection::new(request.mode, cursor),
+            selection: Selection::new(purpose.sanitize(request.mode), cursor),
             snapshot,
             shot,
             toolbar,
             toolbar_hover: None,
+            toolbar_monitor,
+            purpose,
+            system_audio: request.system_audio,
+            microphone: request.microphone,
             request,
         });
 
@@ -605,7 +641,10 @@ impl State {
         };
         if !session.selection.is_active() && session.toolbar.contains(p) {
             match session.toolbar.hit(p) {
-                Some(Button::Mode(mode)) => session.selection.set_mode(mode),
+                Some(Button::Purpose(purpose)) => session.set_purpose(purpose),
+                Some(Button::Mode(mode)) => session.set_mode(mode),
+                Some(Button::SystemAudio) => session.system_audio = !session.system_audio,
+                Some(Button::Microphone) => session.microphone = !session.microphone,
                 Some(Button::Close) => return self.finish(None),
                 None => {}
             }
@@ -658,7 +697,24 @@ impl State {
             0x52 /* R */ => self.set_mode(crate::Mode::Region),
             0x46 /* F */ => self.set_mode(crate::Mode::Freeform),
             0x53 /* S */ => self.set_mode(crate::Mode::Screen),
-            0x43 /* C */ => self.copy_colour(),
+            0x49 /* I */ => self.set_mode(crate::Mode::Picker),
+            0x43 /* C */ => {
+                let cursor = session.selection.cursor();
+                self.finish(Some(Outcome::Pick(cursor)));
+            }
+            k if k == 0x56 /* V */ || k == VK_TAB.0 => {
+                let purpose = session.purpose.toggled();
+                session.set_purpose(purpose);
+                self.invalidate();
+            }
+            0x41 /* A */ => {
+                session.system_audio = !session.system_audio;
+                self.invalidate();
+            }
+            0x4D /* M */ => {
+                session.microphone = !session.microphone;
+                self.invalidate();
+            }
             k if [VK_LEFT.0, VK_RIGHT.0, VK_UP.0, VK_DOWN.0].contains(&k) => {
                 // Pixel-precise positioning: 1 px, or 10 px with Shift.
                 let step = if shift_down() { 10 } else { 1 };
@@ -683,30 +739,32 @@ impl State {
 
     fn set_mode(&mut self, mode: crate::Mode) {
         if let Some(session) = self.session.as_mut() {
-            session.selection.set_mode(mode);
+            session.set_mode(mode);
             self.invalidate();
         }
     }
 
-    fn copy_colour(&mut self) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let Some([b, g, r, a]) = session.snapshot.image.pixel(session.selection.cursor()) else {
-            return;
+    /// Copies the colour of pixel `at` as `#RRGGBB` and confirms it with a
+    /// swatch in the corner of the screen.
+    fn copy_colour(&mut self, session: &Session, at: Point) -> CaptureResult {
+        let Some([b, g, r, a]) = session.snapshot.image.pixel(at) else {
+            return CaptureResult::Cancelled;
         };
         if a == 0 {
-            return;
+            return CaptureResult::Cancelled;
         }
         let hex = format!("#{r:02X}{g:02X}{b:02X}");
-        let session = self.close();
-        drop(session);
-        self.trim();
-        match clipboard::set_text(self.hwnd, &hex) {
-            Ok(()) => (self.handler)(CaptureResult::ColorCopied(hex)),
-            Err(err) => (self.handler)(CaptureResult::Failed(err.to_string())),
+        if let Err(err) = clipboard::set_text(self.hwnd, &hex) {
+            return CaptureResult::Failed(err.to_string());
         }
-        let _ = self.post(WM_KADRA_PREPARE);
+        if session.request.show_preview {
+            let monitor = session.snapshot.monitor_at(at);
+            let origin = session.snapshot.origin;
+            let work = monitor.work.offset(origin.x, origin.y);
+            self.preview
+                .show_colour(&hex, [r, g, b], work, monitor.scale());
+        }
+        CaptureResult::ColorCopied(hex)
     }
 
     /// Returns idle GPU memory to the system once a capture is over.
@@ -741,16 +799,22 @@ impl State {
         };
         let result = match outcome {
             None => CaptureResult::Cancelled,
+            Some(Outcome::Pick(p)) => self.copy_colour(&session, p),
             // Recording: hand the area over, in desktop coordinates.
-            Some(outcome) if session.request.purpose == Purpose::Recording => {
+            Some(outcome) if session.purpose == Purpose::Recording => {
                 let origin = session.snapshot.origin;
                 let area = match outcome {
                     Outcome::Region(rect) => Some(rect),
                     Outcome::Freeform(points) => Rect::bounding(&points),
+                    Outcome::Pick(_) => None,
                 };
                 area.filter(|r| !r.is_empty())
                     .map_or(CaptureResult::Cancelled, |r| {
-                        CaptureResult::RegionSelected(r.offset(origin.x, origin.y))
+                        CaptureResult::RegionSelected {
+                            region: r.offset(origin.x, origin.y),
+                            system_audio: session.system_audio,
+                            microphone: session.microphone,
+                        }
                     })
             }
             Some(outcome) => {

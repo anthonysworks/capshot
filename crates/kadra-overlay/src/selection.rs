@@ -14,6 +14,46 @@ pub enum Mode {
     Freeform,
     /// Click a monitor.
     Screen,
+    /// Click a pixel to copy its colour.
+    Picker,
+}
+
+/// What the selection is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Purpose {
+    /// Copy/save the selected pixels.
+    #[default]
+    Screenshot,
+    /// Return the selected area to record it.
+    Recording,
+}
+
+impl Purpose {
+    /// Selection modes offered for this purpose. A video is always a
+    /// rectangle, and picking a colour only makes sense on a still image.
+    pub fn modes(self) -> &'static [Mode] {
+        match self {
+            Self::Screenshot => &[Mode::Region, Mode::Freeform, Mode::Screen, Mode::Picker],
+            Self::Recording => &[Mode::Region, Mode::Screen],
+        }
+    }
+
+    /// `mode` if this purpose offers it, otherwise the default one.
+    pub fn sanitize(self, mode: Mode) -> Mode {
+        if self.modes().contains(&mode) {
+            mode
+        } else {
+            Mode::Region
+        }
+    }
+
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Screenshot => Self::Recording,
+            Self::Recording => Self::Screenshot,
+        }
+    }
 }
 
 /// What the user picked.
@@ -21,6 +61,8 @@ pub enum Mode {
 pub enum Outcome {
     Region(Rect),
     Freeform(Vec<Point>),
+    /// A pixel whose colour should be copied.
+    Pick(Point),
 }
 
 /// Answers "what is under this point" for click-to-select.
@@ -86,7 +128,7 @@ impl Selection {
         let p = targets.bounds().clamp(p);
         self.cursor = p;
         self.state = match self.mode {
-            Mode::Region | Mode::Screen => State::Dragging { anchor: p },
+            Mode::Region | Mode::Screen | Mode::Picker => State::Dragging { anchor: p },
             Mode::Freeform => State::Drawing { points: vec![p] },
         };
     }
@@ -116,6 +158,7 @@ impl Selection {
                 }
             }
             (Mode::Screen, State::Dragging { .. }) => Some(Outcome::Region(targets.monitor_at(p))),
+            (Mode::Picker, State::Dragging { .. }) => Some(Outcome::Pick(p)),
             (Mode::Freeform, State::Drawing { points }) => {
                 let bounds = Rect::bounding(&points)?;
                 let big_enough = points.len() >= 3
@@ -132,6 +175,7 @@ impl Selection {
         match self.mode {
             Mode::Region => Some(Outcome::Region(Self::target_at(self.cursor, targets))),
             Mode::Screen => Some(Outcome::Region(targets.monitor_at(self.cursor))),
+            Mode::Picker => Some(Outcome::Pick(self.cursor)),
             Mode::Freeform => None,
         }
     }
@@ -314,5 +358,32 @@ mod tests {
         assert_eq!(sel.confirm_hover(&Fake), Some(Outcome::Region(WINDOW)));
         sel.set_mode(Mode::Screen);
         assert_eq!(sel.confirm_hover(&Fake), Some(Outcome::Region(LEFT)));
+    }
+
+    #[test]
+    fn picker_returns_the_clicked_point() {
+        let mut sel = Selection::new(Mode::Picker, Point::new(5, 5));
+        assert_eq!(sel.hover_rect(&Fake), None);
+        assert_eq!(
+            sel.confirm_hover(&Fake),
+            Some(Outcome::Pick(Point::new(5, 5)))
+        );
+        sel.press(Point::new(20, 20), &Fake);
+        assert_eq!(sel.dragged_rect(), None);
+        assert_eq!(
+            sel.release(Point::new(30, 25), &Fake),
+            Some(Outcome::Pick(Point::new(30, 25)))
+        );
+    }
+
+    #[test]
+    fn recording_offers_rectangular_modes_only() {
+        let rec = Purpose::Recording;
+        assert!(!rec.modes().contains(&Mode::Freeform));
+        assert!(!rec.modes().contains(&Mode::Picker));
+        assert_eq!(rec.sanitize(Mode::Picker), Mode::Region);
+        assert_eq!(rec.sanitize(Mode::Screen), Mode::Screen);
+        assert_eq!(Purpose::Screenshot.sanitize(Mode::Picker), Mode::Picker);
+        assert_eq!(rec.toggled(), Purpose::Screenshot);
     }
 }

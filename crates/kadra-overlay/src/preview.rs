@@ -3,6 +3,9 @@
 //! A small GDI-painted popup in the corner of the screen: clicking opens the
 //! saved file, dragging drops it into any application, right click dismisses
 //! it. It never takes the keyboard focus and is excluded from captures.
+//!
+//! The same popup confirms a colour copied with the picker: a swatch and its
+//! code.
 
 // Win32 message parameters and structure sizes are packed integers.
 #![allow(
@@ -20,8 +23,11 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateSolidBrush, DIB_RGB_COLORS,
-    DeleteObject, EndPaint, FillRect, HGDIOBJ, PAINTSTRUCT, SetDIBitsToDevice,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_LEFT, DT_SINGLELINE,
+    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_SEMIBOLD, FillRect, HGDIOBJ,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetDIBitsToDevice, SetTextColor,
+    TRANSPARENT,
 };
 use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::Ole::DROPEFFECT_COPY;
@@ -46,6 +52,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const VISIBLE_MS: u32 = 6000;
 /// Remaining time once the mouse leaves it.
 const AFTER_HOVER_MS: u32 = 2500;
+/// A colour confirmation only needs a glance.
+const COLOUR_VISIBLE_MS: u32 = 2500;
 const HIDE_TIMER: usize = 1;
 
 const BACKGROUND: COLORREF = COLORREF(0x0020_2020);
@@ -132,6 +140,9 @@ pub struct Preview {
     hovered: bool,
     pressed_at: Option<Point>,
     padding: i32,
+    /// Text shown right of the image (colour confirmation).
+    caption: Option<Vec<u16>>,
+    font_height: i32,
 }
 
 fn lparam_point(lparam: LPARAM) -> Point {
@@ -151,6 +162,8 @@ impl Preview {
             hovered: false,
             pressed_at: None,
             padding: 6,
+            caption: None,
+            font_height: 15,
         }
     }
 
@@ -164,11 +177,54 @@ impl Preview {
         let px = |v: f32| (v * scale).round() as i32;
         let mut thumbnail = image.thumbnail(px(300.0) as u32, px(190.0) as u32);
         flatten(&mut thumbnail);
-
         self.padding = px(6.0);
         let width = thumbnail.width() as i32 + 2 * self.padding;
         let height = thumbnail.height() as i32 + 2 * self.padding;
-        let margin = px(16.0);
+        self.caption = None;
+        self.place(
+            capture_id,
+            thumbnail,
+            (width, height),
+            work_area,
+            scale,
+            VISIBLE_MS,
+        );
+    }
+
+    /// Confirms that `hex` (`#RRGGBB`) was copied: a swatch of the colour
+    /// and its code.
+    pub fn show_colour(&mut self, hex: &str, [r, g, b]: [u8; 3], work_area: Rect, scale: f32) {
+        let px = |v: f32| (v * scale).round() as i32;
+        let side = px(28.0) as u32;
+        let mut swatch = BgraImage::new(side, side);
+        for pixel in swatch.as_bytes_mut().as_chunks_mut::<4>().0 {
+            *pixel = [b, g, r, 255];
+        }
+        self.padding = px(8.0);
+        self.font_height = px(15.0);
+        let width = px(190.0);
+        let height = side as i32 + 2 * self.padding;
+        self.caption = Some(format!("{hex}   copied").encode_utf16().collect());
+        self.place(
+            0,
+            swatch,
+            (width, height),
+            work_area,
+            scale,
+            COLOUR_VISIBLE_MS,
+        );
+    }
+
+    fn place(
+        &mut self,
+        capture_id: u64,
+        thumbnail: BgraImage,
+        (width, height): (i32, i32),
+        work_area: Rect,
+        scale: f32,
+        visible_ms: u32,
+    ) {
+        let margin = (16.0 * scale).round() as i32;
         let x = work_area.right - margin - width;
         let y = work_area.bottom - margin - height;
 
@@ -189,7 +245,9 @@ impl Preview {
                 height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
-            SetTimer(Some(self.hwnd), HIDE_TIMER, VISIBLE_MS, None);
+            // Repaint even if the size did not change.
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.hwnd), None, true);
+            SetTimer(Some(self.hwnd), HIDE_TIMER, visible_ms, None);
         }
     }
 
@@ -307,8 +365,59 @@ impl Preview {
                     &info,
                     DIB_RGB_COLORS,
                 );
+                if let Some(caption) = &self.caption {
+                    self.paint_caption(hdc, caption, thumb.width() as i32);
+                }
             }
             let _ = EndPaint(self.hwnd, &ps);
+        }
+    }
+}
+
+impl Preview {
+    /// SAFETY: `hdc` must be the paint DC of this window.
+    unsafe fn paint_caption(
+        &self,
+        hdc: windows::Win32::Graphics::Gdi::HDC,
+        caption: &[u16],
+        image_width: i32,
+    ) {
+        let mut client = windows::Win32::Foundation::RECT::default();
+        // SAFETY: valid DC and out pointer; the font is deselected and
+        // deleted before returning.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd, &mut client);
+            let font = CreateFontW(
+                -self.font_height,
+                0,
+                0,
+                0,
+                FW_SEMIBOLD.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                w!("Segoe UI Variable Text"),
+            );
+            let previous = SelectObject(hdc, HGDIOBJ(font.0));
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+            let mut rect = client;
+            rect.left = self.padding * 2 + image_width;
+            rect.right -= self.padding;
+            let mut text = caption.to_vec();
+            DrawTextW(
+                hdc,
+                &mut text,
+                &mut rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            SelectObject(hdc, previous);
+            let _ = DeleteObject(HGDIOBJ(font.0));
         }
     }
 }
