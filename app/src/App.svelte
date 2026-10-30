@@ -5,6 +5,9 @@
     FPS_MAX,
     FPS_MIN,
     FPS_PRESETS,
+    GIF_FPS_MAX,
+    GIF_FPS_PRESETS,
+    GIF_WIDTHS,
     appInfo,
     getConfig,
     onConfigChanged,
@@ -24,7 +27,10 @@
     config !== null &&
       Number.isInteger(config.recording.fps) &&
       config.recording.fps >= FPS_MIN &&
-      config.recording.fps <= FPS_MAX,
+      config.recording.fps <= FPS_MAX &&
+      Number.isInteger(config.gif.fps) &&
+      config.gif.fps >= 1 &&
+      config.gif.fps <= GIF_FPS_MAX,
   );
 
   async function load() {
@@ -64,6 +70,8 @@
   onConfigChanged((next) => {
     if (!config) return;
     const base = JSON.parse(saved) as Config;
+    base.recording.format = next.recording.format;
+    config.recording.format = next.recording.format;
     for (const key of ["system_audio", "microphone"] as const) {
       base.recording[key] = next.recording[key];
       config.recording[key] = next.recording[key];
@@ -192,6 +200,45 @@
         <input class="path" bind:value={config.recording.output_dir} aria-label="Recordings folder" />
         <button type="button" onclick={() => openFolder("recordings")}>Open</button>
       </div>
+    </section>
+
+    <section>
+      <h2>GIF</h2>
+      <p class="hint">Turn on <strong>GIF</strong> in the recording toolbar (or press G) to record an animated GIF.</p>
+      <div class="row">
+        <span>Frame rate</span>
+        <div class="fps">
+          {#each GIF_FPS_PRESETS as fps (fps)}
+            <button
+              type="button"
+              class="chip"
+              class:active={config.gif.fps === fps}
+              onclick={() => config && (config.gif.fps = fps)}>{fps}</button
+            >
+          {/each}
+        </div>
+      </div>
+      <label class="row">
+        <span>Maximum width</span>
+        <select bind:value={config.gif.max_width}>
+          {#each GIF_WIDTHS as w (w)}
+            <option value={w}>{w === 0 ? "Original size" : `${w} px`}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="row">
+        <span>Quality</span>
+        <input type="range" min="40" max="100" bind:value={config.gif.quality} />
+        <span class="value">{config.gif.quality >= 85 ? "High" : config.gif.quality >= 65 ? "Balanced" : "Small"}</span>
+      </label>
+      <label class="row check">
+        <input type="checkbox" bind:checked={config.gif.dither} />
+        <span>Dithering (smoother gradients, larger files)</span>
+      </label>
+      <label class="row check">
+        <input type="checkbox" bind:checked={config.gif.repeat} />
+        <span>Loop forever</span>
+      </label>
     </section>
 
     <footer>

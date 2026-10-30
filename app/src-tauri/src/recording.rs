@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use kadra_core::Rect;
+use kadra_core::{RecordingFormat, Rect};
 use tauri::{AppHandle, Manager};
 
 use crate::capture::CaptureService;
@@ -67,9 +67,16 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
-/// Called once the user has picked the area (desktop coordinates) and the
-/// audio sources, which are remembered for next time.
-pub fn start(app: &AppHandle, region: Rect, system_audio: bool, microphone: bool) {
+/// What the user chose on the toolbar, remembered for next time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Choices {
+    pub format: RecordingFormat,
+    pub system_audio: bool,
+    pub microphone: bool,
+}
+
+/// Called once the user has picked the area (desktop coordinates).
+pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
     tracing::info!(?region, "recording area selected");
     {
         let state = app.state::<RecorderState>();
@@ -80,7 +87,8 @@ pub fn start(app: &AppHandle, region: Rect, system_audio: bool, microphone: bool
         *phase = Phase::Starting { cancelled: false };
     }
 
-    remember_audio(app, system_audio, microphone);
+    remember(app, choices);
+    let gif = choices.format == RecordingFormat::Gif;
     let (options, countdown) = {
         let app_state = app.state::<AppState>();
         let config = app_state.config();
@@ -90,18 +98,25 @@ pub fn start(app: &AppHandle, region: Rect, system_audio: bool, microphone: bool
         }
         let stem = kadra_encode::file_stem(kadra_encode::now());
         let countdown = Duration::from_secs(u64::from(config.recording.countdown_secs));
+        let extension = if gif { "gif" } else { "mp4" };
         let options = HostOptions {
             region: [region.left, region.top, region.right, region.bottom],
-            fps: config.recording.fps,
+            fps: if gif {
+                config.gif.fps
+            } else {
+                config.recording.fps
+            },
             codec: config.recording.codec,
             quality: config.recording.quality,
             capture_cursor: config.recording.capture_cursor,
-            system_audio,
-            microphone,
-            output: kadra_encode::unique_path(&dir, &stem, "mp4"),
+            // A GIF has no sound.
+            system_audio: choices.system_audio && !gif,
+            microphone: choices.microphone && !gif,
+            output: kadra_encode::unique_path(&dir, &stem, extension),
             // Everything is prepared during the countdown, so recording
             // starts exactly when it reaches zero.
             start_paused: !countdown.is_zero(),
+            gif: gif.then(|| config.gif.clone()),
         };
         (options, countdown)
     };
@@ -117,17 +132,23 @@ pub fn start(app: &AppHandle, region: Rect, system_audio: bool, microphone: bool
     std::thread::spawn(move || begin(&app, &options, countdown));
 }
 
-/// Saves the audio toggles chosen on the toolbar as the new defaults.
-fn remember_audio(app: &AppHandle, system_audio: bool, microphone: bool) {
+/// Saves the toggles chosen on the toolbar as the new defaults.
+fn remember(app: &AppHandle, choices: Choices) {
     let app_state = app.state::<AppState>();
     let mut config = app_state.config();
-    if config.recording.system_audio == system_audio && config.recording.microphone == microphone {
+    let current = Choices {
+        format: config.recording.format,
+        system_audio: config.recording.system_audio,
+        microphone: config.recording.microphone,
+    };
+    if current == choices {
         return;
     }
-    config.recording.system_audio = system_audio;
-    config.recording.microphone = microphone;
+    config.recording.format = choices.format;
+    config.recording.system_audio = choices.system_audio;
+    config.recording.microphone = choices.microphone;
     if let Err(err) = config.save(&app_state.paths().config_file()) {
-        tracing::warn!("cannot save the audio settings: {err}");
+        tracing::warn!("cannot save the recording choices: {err}");
     }
     // Keep an open settings window in sync.
     let _ = tauri::Emitter::emit(app, CONFIG_EVENT, &*config);

@@ -16,8 +16,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use kadra_core::{BgraImage, Rect, VideoCodec};
-use kadra_record::{RecordOptions, Recording};
+use kadra_core::{BgraImage, GifSettings, Rect, VideoCodec};
+use kadra_record::{GifOptions, RecordOptions, Recording};
 use serde::{Deserialize, Serialize};
 
 /// Command-line flag selecting host mode.
@@ -43,6 +43,8 @@ pub struct HostOptions {
     pub microphone: bool,
     pub output: PathBuf,
     pub start_paused: bool,
+    /// Record a GIF with these settings instead of a video.
+    pub gif: Option<GifSettings>,
 }
 
 /// Events sent back by the host.
@@ -129,6 +131,12 @@ pub fn run() -> i32 {
         microphone: options.microphone,
         output: options.output.clone(),
         start_paused: options.start_paused,
+        gif: options.gif.as_ref().map(|gif| GifOptions {
+            max_width: gif.max_width,
+            quality: gif.quality,
+            dither: gif.dither,
+            repeat: gif.repeat,
+        }),
     }) {
         Ok(recording) => recording,
         Err(err) => {

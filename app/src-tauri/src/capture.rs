@@ -37,6 +37,7 @@ impl CaptureService {
             mode: Mode::Region,
             copy_to_clipboard: options.copy_to_clipboard,
             show_preview: options.show_preview,
+            format: options.format,
             system_audio: options.system_audio,
             microphone: options.microphone,
             requested_at: Instant::now(),
@@ -70,6 +71,7 @@ impl CaptureService {
 pub struct Options {
     copy_to_clipboard: bool,
     show_preview: bool,
+    format: kadra_core::RecordingFormat,
     system_audio: bool,
     microphone: bool,
 }
@@ -89,6 +91,7 @@ pub fn start(app: &AppHandle, purpose: Purpose) {
             Options {
                 copy_to_clipboard: config.capture.copy_to_clipboard,
                 show_preview: config.capture.show_preview,
+                format: config.recording.format,
                 system_audio: config.recording.system_audio,
                 microphone: config.recording.microphone,
             },
@@ -122,9 +125,18 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
         }
         CaptureResult::RegionSelected {
             region,
+            format,
             system_audio,
             microphone,
-        } => recording::start(app, region, system_audio, microphone),
+        } => recording::start(
+            app,
+            region,
+            recording::Choices {
+                format,
+                system_audio,
+                microphone,
+            },
+        ),
         CaptureResult::StopRecording => recording::stop(app),
         CaptureResult::TogglePause => recording::toggle_pause(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),
