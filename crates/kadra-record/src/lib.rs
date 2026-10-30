@@ -8,6 +8,9 @@
 //! Frames never leave the GPU. The pacer emits frames at a constant rate
 //! (repeating the last one when the screen does not change) so the result is
 //! a constant-frame-rate video that every editor handles well.
+//!
+//! GIF recordings read the area back to system memory instead, only when
+//! the screen changed, and stream it to [`kadra_gif::GifWriter`].
 
 mod audio;
 mod clock;
@@ -31,6 +34,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 
 pub use encoder::VideoSettings;
+pub use kadra_gif::GifOptions;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecordError {
@@ -38,6 +42,8 @@ pub enum RecordError {
     Windows(#[from] windows::core::Error),
     #[error("the area to record is empty")]
     EmptyRegion,
+    #[error(transparent)]
+    Gif(#[from] kadra_gif::GifError),
     #[error("the recording thread stopped unexpectedly")]
     ThreadLost,
 }
@@ -63,6 +69,9 @@ pub struct RecordOptions {
     /// Start paused (e.g. during a countdown): everything is ready, nothing
     /// is recorded until [`Recording::resume`].
     pub start_paused: bool,
+    /// Record an animated GIF instead of a video (no audio; the frame rate
+    /// is capped at [`kadra_gif::MAX_FPS`]).
+    pub gif: Option<GifOptions>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +289,9 @@ fn run(
     clock: &Arc<clock::Clock>,
     ready: &mpsc::SyncSender<Result<(u32, u32)>>,
 ) -> Result<RecordingStats> {
+    if let Some(gif) = options.gif {
+        return run_gif(options, gif, monitor, area, stop, clock, ready);
+    }
     #[allow(clippy::cast_sign_loss)]
     let size = (area.width() as u32, area.height() as u32);
     let setup = || -> Result<_> {
@@ -385,6 +397,107 @@ fn run(
         "recording finished"
     );
     result.and(finished)?;
+    Ok(stats)
+}
+
+/// GIF recording thread body: reads the area back only when the screen
+/// changed and lets the GIF writer merge identical frames.
+fn run_gif(
+    options: &RecordOptions,
+    gif_options: GifOptions,
+    monitor: HMONITOR,
+    area: Rect,
+    stop: &AtomicBool,
+    clock: &Arc<clock::Clock>,
+    ready: &mpsc::SyncSender<Result<(u32, u32)>>,
+) -> Result<RecordingStats> {
+    #[allow(clippy::cast_sign_loss)]
+    let size = (area.width() as u32, area.height() as u32);
+    let fps = options.fps.clamp(1, kadra_gif::MAX_FPS);
+    let setup = || -> Result<_> {
+        // SAFETY: initialises the Windows Runtime for this thread.
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
+        let gpu = Gpu::with_kind(GpuKind::Hardware)?;
+        let source = source::Source::start(&gpu, monitor, fps, options.capture_cursor)?;
+        let reader = source::AreaReader::new(&gpu, area)?;
+        let writer = kadra_gif::GifWriter::create(&options.output, size.0, size.1, gif_options)?;
+        Ok((gpu, source, reader, writer))
+    };
+    let (gpu, source, reader, mut writer) = match setup() {
+        Ok(parts) => parts,
+        Err(err) => {
+            let _ = std::fs::remove_file(&options.output);
+            let _ = ready.send(Err(err));
+            return Err(RecordError::ThreadLost);
+        }
+    };
+    let (width, height) = writer.size();
+    tracing::info!(width, height, fps, "GIF recording started");
+    let _ = ready.send(Ok(size));
+
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while source.frames() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    clock.begin(audio::now_ticks());
+    let pace = pacer::Pacer::new(fps, Arc::clone(clock))?;
+    let mut frames = 0u64;
+    let mut seen = None;
+    let mut last = None;
+    let mut result = Ok(());
+    while !stop.load(Ordering::Relaxed) {
+        let index = match pace.wait_next() {
+            pacer::Tick::Frame(index) | pacer::Tick::Late { index, .. } => index,
+            pacer::Tick::Paused => continue,
+        };
+        frames += 1;
+        // Nothing new on screen: the current GIF frame just lasts longer.
+        let delivered = source.frames();
+        if seen == Some(delivered) {
+            continue;
+        }
+        seen = Some(delivered);
+        let time = Duration::from_secs(index) / fps;
+        let pushed = reader
+            .read(&source, &gpu)
+            .map_err(RecordError::from)
+            .and_then(|image| {
+                writer.push(&image, time)?;
+                last = Some(image);
+                Ok(())
+            });
+        if let Err(err) = pushed {
+            result = Err(err);
+            break;
+        }
+    }
+
+    let duration = ticks_to_duration(clock.elapsed(audio::now_ticks()));
+    let summary = writer.finish(duration);
+    let stats = RecordingStats {
+        path: options.output.clone(),
+        width,
+        height,
+        codec: options.codec,
+        frames,
+        dropped: pace.skipped(),
+        captured: source.frames(),
+        duration,
+        thumbnail: last.map(|image| image.thumbnail(320, 200)),
+    };
+    match &summary {
+        Ok(summary) => tracing::info!(
+            frames = summary.frames,
+            bytes = summary.bytes,
+            seconds = duration.as_secs_f64(),
+            dropped = stats.dropped,
+            "GIF recording finished"
+        ),
+        Err(err) => tracing::error!("GIF recording failed: {err}"),
+    }
+    result?;
+    summary?;
     Ok(stats)
 }
 

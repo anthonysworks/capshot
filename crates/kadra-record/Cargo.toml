@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 kadra-capture.workspace = true
 kadra-core.workspace = true
+kadra-gif.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 windows = { workspace = true, features = [

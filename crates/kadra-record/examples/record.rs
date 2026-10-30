@@ -3,6 +3,9 @@
 //! ```text
 //! cargo run --release -p kadra-record --example record -- <out.mp4> [seconds] [fps] [h264|hevc|av1] [pause]
 //! ```
+//!
+//! An output ending in `.gif` records a GIF (`KADRA_GIF_WIDTH` limits its
+//! width).
 
 // A measurement tool: lossy numeric conversions are fine here.
 #![allow(
@@ -16,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use kadra_core::{Rect, VideoCodec};
-use kadra_record::{RecordOptions, Recording};
+use kadra_record::{GifOptions, RecordOptions, Recording};
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Media::MediaFoundation::{
     IMFSourceReader, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
@@ -138,6 +141,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: plain metrics queries.
     let (w, h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
 
+    let gif = output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+        .then(|| GifOptions {
+            max_width: std::env::var("KADRA_GIF_WIDTH")
+                .ok()
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(0),
+            ..GifOptions::default()
+        });
     let cpu_before = cpu_time();
     let start = Instant::now();
     let recording = Recording::start(RecordOptions {
@@ -146,10 +159,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         codec,
         quality: 23,
         capture_cursor: true,
-        system_audio: true,
+        system_audio: gif.is_none(),
         microphone: std::env::var("KADRA_MIC").is_ok(),
         start_paused: false,
         output: output.clone(),
+        gif,
     })?;
     println!(
         "started in {:.0} ms, {:?}",
@@ -190,6 +204,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CPU: {:.1} % of one core",
         cpu.as_secs_f64() / wall.as_secs_f64() * 100.0
     );
+    if gif.is_some() {
+        return Ok(());
+    }
     let (duration, frames) = probe(&output)?;
     println!("file: {duration:.2} s, {frames} video frames");
     match probe_audio(&output) {
