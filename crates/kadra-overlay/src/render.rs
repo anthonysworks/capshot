@@ -37,6 +37,7 @@ use windows_numerics::Vector2;
 
 use crate::layout::{Button, MAGNIFIER_CELLS, Magnifier, Toolbar, size_label};
 use crate::selection::{Mode, Purpose, Selection, Targets};
+use kadra_core::RecordingFormat;
 
 const fn rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -60,6 +61,8 @@ const TOGGLE_ON: D2D1_COLOR_F = rgba(255, 255, 255, 0.16);
 /// Glyph of a toggle that is off.
 const MUTED: D2D1_COLOR_F = rgba(0xe5, 0x48, 0x4d, 1.0);
 const SEPARATOR: D2D1_COLOR_F = rgba(255, 255, 255, 0.16);
+/// Label of a text toggle that is off.
+const DIMMED: D2D1_COLOR_F = rgba(255, 255, 255, 0.5);
 const LABEL: D2D1_COLOR_F = rgba(0x14, 0x14, 0x14, 0.86);
 
 const TEXT_FONT: &str = "Segoe UI Variable Text";
@@ -74,6 +77,8 @@ pub fn icon(button: Button, on: bool) -> char {
         Button::Mode(Mode::Freeform) => '\u{F408}',
         Button::Mode(Mode::Screen) => '\u{E7F4}',
         Button::Mode(Mode::Picker) => '\u{EF3C}',
+        // Drawn as text instead.
+        Button::Gif => ' ',
         Button::SystemAudio if on => '\u{E767}',
         Button::SystemAudio => '\u{E74F}',
         Button::Microphone if on => '\u{E720}',
@@ -109,7 +114,8 @@ pub struct Scene<'a> {
     pub bounds: Rect,
     /// Recording is drawn in red instead of blue.
     pub purpose: Purpose,
-    /// Audio toggles shown when recording.
+    /// Recording toggles.
+    pub format: RecordingFormat,
     pub system_audio: bool,
     pub microphone: bool,
 }
@@ -463,6 +469,7 @@ impl Renderer {
         let format = self.format(Font::Icon, 16.0 * s)?;
         for &(button, rect) in &bar.buttons {
             let toggle = match button {
+                Button::Gif => Some(scene.format == RecordingFormat::Gif),
                 Button::SystemAudio => Some(scene.system_audio),
                 Button::Microphone => Some(scene.microphone),
                 _ => None,
@@ -478,6 +485,12 @@ impl Renderer {
                 self.pill(rect, BUTTON_HOVER, 4.0 * s);
             } else if toggle == Some(true) {
                 self.pill(rect, TOGGLE_ON, 4.0 * s);
+            }
+            if button == Button::Gif {
+                let label = self.format(Font::Label, 11.0 * s)?;
+                let colour = if toggle == Some(true) { WHITE } else { DIMMED };
+                self.text("GIF", &label, rect_f(rect), colour);
+                continue;
             }
             let colour = match (active, toggle) {
                 (true, _) => BLACK,
@@ -587,7 +600,7 @@ impl Renderer {
         let image = BgraImage::new(256, 256);
         let canvas = Canvas(image.bounds());
         let shot = self.load_screenshot(&image)?;
-        let toolbar = Toolbar::new(canvas.0, 1.0, Purpose::Recording);
+        let toolbar = Toolbar::new(canvas.0, 1.0, Purpose::Recording, RecordingFormat::Mp4);
 
         let mut drag = Selection::new(Mode::Region, Point::new(20, 20));
         drag.press(Point::new(20, 20), &canvas);
@@ -613,6 +626,7 @@ impl Renderer {
                 } else {
                     Purpose::Recording
                 },
+                format: RecordingFormat::Mp4,
                 system_audio: true,
                 microphone: false,
             };

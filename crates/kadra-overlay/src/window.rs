@@ -18,7 +18,7 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::Instant;
 
 use kadra_capture::{Capturer, Gpu, GpuKind, Snapshot};
-use kadra_core::{BgraImage, Point, Rect};
+use kadra_core::{BgraImage, Point, RecordingFormat, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, TRUE, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use windows::Win32::Graphics::Dwm::{
@@ -218,6 +218,7 @@ struct Session {
     toolbar_monitor: (Rect, f32),
     /// Switchable from the toolbar, unlike the rest of the request.
     purpose: Purpose,
+    format: RecordingFormat,
     system_audio: bool,
     microphone: bool,
     request: CaptureRequest,
@@ -241,6 +242,7 @@ impl Session {
             scale: monitor.scale(),
             bounds: self.snapshot.bounds(),
             purpose: self.purpose,
+            format: self.format,
             system_audio: self.system_audio,
             microphone: self.microphone,
         }
@@ -251,11 +253,23 @@ impl Session {
             return;
         }
         self.purpose = purpose;
-        let (monitor, scale) = self.toolbar_monitor;
-        self.toolbar = Toolbar::new(monitor, scale, purpose);
-        self.toolbar_hover = None;
+        self.rebuild_toolbar();
         let mode = purpose.sanitize(self.selection.mode());
         self.selection.set_mode(mode);
+    }
+
+    fn toggle_gif(&mut self) {
+        self.format = match self.format {
+            RecordingFormat::Mp4 => RecordingFormat::Gif,
+            RecordingFormat::Gif => RecordingFormat::Mp4,
+        };
+        self.rebuild_toolbar();
+    }
+
+    fn rebuild_toolbar(&mut self) {
+        let (monitor, scale) = self.toolbar_monitor;
+        self.toolbar = Toolbar::new(monitor, scale, self.purpose, self.format);
+        self.toolbar_hover = None;
     }
 
     /// Switches to `mode`, and to taking a screenshot if recording does
@@ -535,7 +549,7 @@ impl State {
         let cursor = Point::new(cursor.x - snapshot.origin.x, cursor.y - snapshot.origin.y);
         let monitor = snapshot.monitor_at(cursor);
         let purpose = request.purpose;
-        let toolbar = Toolbar::new(monitor.rect, monitor.scale(), purpose);
+        let toolbar = Toolbar::new(monitor.rect, monitor.scale(), purpose, request.format);
         let toolbar_monitor = (monitor.rect, monitor.scale());
         let size = (snapshot.image.width(), snapshot.image.height());
         let origin = snapshot.origin;
@@ -569,6 +583,7 @@ impl State {
             toolbar_hover: None,
             toolbar_monitor,
             purpose,
+            format: request.format,
             system_audio: request.system_audio,
             microphone: request.microphone,
             request,
@@ -643,6 +658,7 @@ impl State {
             match session.toolbar.hit(p) {
                 Some(Button::Purpose(purpose)) => session.set_purpose(purpose),
                 Some(Button::Mode(mode)) => session.set_mode(mode),
+                Some(Button::Gif) => session.toggle_gif(),
                 Some(Button::SystemAudio) => session.system_audio = !session.system_audio,
                 Some(Button::Microphone) => session.microphone = !session.microphone,
                 Some(Button::Close) => return self.finish(None),
@@ -706,6 +722,12 @@ impl State {
                 let purpose = session.purpose.toggled();
                 session.set_purpose(purpose);
                 self.invalidate();
+            }
+            0x47 /* G */ => {
+                if session.purpose == Purpose::Recording {
+                    session.toggle_gif();
+                    self.invalidate();
+                }
             }
             0x41 /* A */ => {
                 session.system_audio = !session.system_audio;
@@ -812,6 +834,7 @@ impl State {
                     .map_or(CaptureResult::Cancelled, |r| {
                         CaptureResult::RegionSelected {
                             region: r.offset(origin.x, origin.y),
+                            format: session.format,
                             system_audio: session.system_audio,
                             microphone: session.microphone,
                         }

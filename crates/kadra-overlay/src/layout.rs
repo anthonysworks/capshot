@@ -1,7 +1,7 @@
 //! Placement of the overlay widgets (toolbar, magnifier, size label), in
 //! physical pixels relative to the capture.
 
-use kadra_core::{Point, Rect};
+use kadra_core::{Point, RecordingFormat, Rect};
 
 use crate::selection::{Mode, Purpose};
 
@@ -15,6 +15,8 @@ pub enum Button {
     /// Switch between taking a screenshot and recording.
     Purpose(Purpose),
     Mode(Mode),
+    /// Record a GIF instead of a video (recording only).
+    Gif,
     /// Record the system audio (recording only).
     SystemAudio,
     /// Record the microphone (recording only).
@@ -22,8 +24,9 @@ pub enum Button {
     Close,
 }
 
-/// Toolbar buttons for `purpose`, in groups separated by a thin line.
-pub fn groups(purpose: Purpose) -> Vec<Vec<Button>> {
+/// Toolbar buttons for `purpose`, in groups separated by a thin line. A GIF
+/// has no sound, so the audio toggles only appear for videos.
+pub fn groups(purpose: Purpose, format: RecordingFormat) -> Vec<Vec<Button>> {
     let mut groups = vec![
         vec![
             Button::Purpose(Purpose::Screenshot),
@@ -32,7 +35,11 @@ pub fn groups(purpose: Purpose) -> Vec<Vec<Button>> {
         purpose.modes().iter().map(|&m| Button::Mode(m)).collect(),
     ];
     if purpose == Purpose::Recording {
-        groups.push(vec![Button::SystemAudio, Button::Microphone]);
+        let mut output = vec![Button::Gif];
+        if format == RecordingFormat::Mp4 {
+            output.extend([Button::SystemAudio, Button::Microphone]);
+        }
+        groups.push(output);
     }
     groups.push(vec![Button::Close]);
     groups
@@ -49,8 +56,8 @@ pub struct Toolbar {
 }
 
 impl Toolbar {
-    pub fn new(monitor: Rect, scale: f32, purpose: Purpose) -> Self {
-        let groups = groups(purpose);
+    pub fn new(monitor: Rect, scale: f32, purpose: Purpose, format: RecordingFormat) -> Self {
+        let groups = groups(purpose, format);
         let button = px(40.0, scale);
         let pad = px(4.0, scale);
         let separator = px(12.0, scale);
@@ -177,10 +184,11 @@ mod tests {
     use super::*;
 
     const MONITOR: Rect = Rect::new(0, 0, 1920, 1080);
+    const MP4: RecordingFormat = RecordingFormat::Mp4;
 
     #[test]
     fn toolbar_is_centred_and_hit_tested() {
-        let bar = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot);
+        let bar = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot, MP4);
         assert!((bar.frame.left + bar.frame.width() / 2 - 960).abs() <= 1);
         assert_eq!(bar.frame.top, 16);
         // Last button flush with the frame padding.
@@ -199,20 +207,23 @@ mod tests {
 
     #[test]
     fn toolbar_scales_with_dpi() {
-        let normal = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot);
-        let large = Toolbar::new(MONITOR, 1.5, Purpose::Screenshot);
+        let normal = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot, MP4);
+        let large = Toolbar::new(MONITOR, 1.5, Purpose::Screenshot, MP4);
         assert_eq!(large.frame.height(), normal.frame.height() * 3 / 2);
     }
 
     #[test]
     fn recording_toolbar_has_audio_toggles() {
-        let shot = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot);
-        let rec = Toolbar::new(MONITOR, 1.0, Purpose::Recording);
+        let shot = Toolbar::new(MONITOR, 1.0, Purpose::Screenshot, MP4);
+        let rec = Toolbar::new(MONITOR, 1.0, Purpose::Recording, MP4);
         let has = |bar: &Toolbar, b| bar.buttons.iter().any(|&(x, _)| x == b);
         assert!(has(&shot, Button::Mode(Mode::Picker)));
         assert!(!has(&shot, Button::Microphone));
         assert!(has(&rec, Button::SystemAudio) && has(&rec, Button::Microphone));
         assert!(!has(&rec, Button::Mode(Mode::Freeform)));
+        assert!(has(&rec, Button::Gif) && !has(&shot, Button::Gif));
+        let gif = Toolbar::new(MONITOR, 1.0, Purpose::Recording, RecordingFormat::Gif);
+        assert!(has(&gif, Button::Gif) && !has(&gif, Button::Microphone));
         assert_eq!(shot.separators.len(), 2);
         assert_eq!(rec.separators.len(), 3);
         // Separators never overlap a button.

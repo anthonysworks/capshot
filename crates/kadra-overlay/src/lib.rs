@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use kadra_core::{BgraImage, Rect};
+use kadra_core::{BgraImage, RecordingFormat, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
@@ -32,7 +32,8 @@ pub struct CaptureRequest {
     pub copy_to_clipboard: bool,
     /// Show a thumbnail in the corner of the screen afterwards.
     pub show_preview: bool,
-    /// Initial state of the audio toggles shown when recording.
+    /// Initial state of the recording toggles.
+    pub format: RecordingFormat,
     pub system_audio: bool,
     pub microphone: bool,
     /// When the user asked for the capture, to measure latency.
@@ -51,6 +52,7 @@ pub enum CaptureResult {
     /// audio sources chosen on the toolbar.
     RegionSelected {
         region: Rect,
+        format: RecordingFormat,
         system_audio: bool,
         microphone: bool,
     },

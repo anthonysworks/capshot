@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use kadra_capture::{Capturer, Gpu, Snapshot};
-use kadra_core::{ImageFormat, Point};
+use kadra_core::{ImageFormat, Point, RecordingFormat};
 use kadra_overlay::layout::{Button, Magnifier, Toolbar};
 use kadra_overlay::render::{Renderer, Scene};
 use kadra_overlay::selection::{Mode, Purpose, Selection};
@@ -23,6 +23,7 @@ fn scene<'a>(
     toolbar: &'a Toolbar,
     hover: Option<Button>,
     purpose: Purpose,
+    format: RecordingFormat,
 ) -> Scene<'a> {
     let cursor = selection.cursor();
     let monitor = snap.monitor_at(cursor);
@@ -36,11 +37,16 @@ fn scene<'a>(
         scale: monitor.scale(),
         bounds: snap.bounds(),
         purpose,
+        format,
         system_audio: true,
         microphone: false,
     }
 }
 
+const MP4: RecordingFormat = RecordingFormat::Mp4;
+
+// A flat list of scenes: long but simple.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".into()));
     // SAFETY: called once at start-up.
@@ -59,8 +65,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|m| m.primary)
         .unwrap_or(&snap.monitors[0]);
     let m = monitor.rect;
-    let toolbar = Toolbar::new(m, monitor.scale(), Purpose::Screenshot);
-    let record_bar = Toolbar::new(m, monitor.scale(), Purpose::Recording);
+    let toolbar = Toolbar::new(
+        m,
+        monitor.scale(),
+        Purpose::Screenshot,
+        RecordingFormat::Mp4,
+    );
+    let record_bar = Toolbar::new(m, monitor.scale(), Purpose::Recording, RecordingFormat::Mp4);
     let still = Purpose::Screenshot;
     let at = |fx: f32, fy: f32| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -88,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &toolbar,
             Some(Button::Mode(Mode::Freeform)),
             still,
+            MP4,
         ),
     )?;
 
@@ -95,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut drag = Selection::new(Mode::Region, at(0.2, 0.25));
     drag.press(at(0.2, 0.25), &snap);
     drag.moved(at(0.55, 0.6), &snap);
-    save("2-drag", &scene(&snap, &drag, &toolbar, None, still))?;
+    save("2-drag", &scene(&snap, &drag, &toolbar, None, still, MP4))?;
 
     // 3. Drawing a freeform shape (a rough circle).
     let mut free = Selection::new(Mode::Freeform, at(0.5, 0.3));
@@ -104,22 +116,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t = f32::from(u8::try_from(i).unwrap_or(0)) / 48.0 * std::f32::consts::TAU * 0.9;
         free.moved(at(0.5 + 0.15 * t.sin(), 0.5 - 0.2 * t.cos()), &snap);
     }
-    save("3-freeform", &scene(&snap, &free, &toolbar, None, still))?;
+    save(
+        "3-freeform",
+        &scene(&snap, &free, &toolbar, None, still, MP4),
+    )?;
 
     // 4. Screen mode.
     let screen = Selection::new(Mode::Screen, at(0.7, 0.7));
     save(
         "4-screen",
-        &scene(&snap, &screen, &toolbar, Some(Button::Close), still),
+        &scene(&snap, &screen, &toolbar, Some(Button::Close), still, MP4),
     )?;
 
     // 5. Magnifier close to the bottom-right corner.
     let corner = Selection::new(Mode::Region, Point::new(m.right - 5, m.bottom - 5));
-    save("5-corner", &scene(&snap, &corner, &toolbar, None, still))?;
+    save(
+        "5-corner",
+        &scene(&snap, &corner, &toolbar, None, still, MP4),
+    )?;
 
     // 6. Colour picker.
     let picker = Selection::new(Mode::Picker, at(0.4, 0.4));
-    save("6-picker", &scene(&snap, &picker, &toolbar, None, still))?;
+    save(
+        "6-picker",
+        &scene(&snap, &picker, &toolbar, None, still, MP4),
+    )?;
 
     // 7. Recording: rectangular modes and audio toggles (microphone off).
     let record = Selection::new(Mode::Region, at(0.5, 0.5));
@@ -131,6 +152,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &record_bar,
             Some(Button::Purpose(Purpose::Screenshot)),
             Purpose::Recording,
+            MP4,
+        ),
+    )?;
+
+    // 8. Recording a GIF: no audio toggles.
+    let gif_bar = Toolbar::new(m, monitor.scale(), Purpose::Recording, RecordingFormat::Gif);
+    save(
+        "8-gif",
+        &scene(
+            &snap,
+            &record,
+            &gif_bar,
+            None,
+            Purpose::Recording,
+            RecordingFormat::Gif,
         ),
     )?;
 
