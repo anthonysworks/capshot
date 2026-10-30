@@ -13,6 +13,9 @@ use crate::paths::Paths;
 
 /// Lowest and highest frame rates accepted for recordings.
 pub const FPS_RANGE: std::ops::RangeInclusive<u32> = 1..=240;
+/// GIF delays are in hundredths of a second; browsers slow down anything
+/// faster than 50 FPS.
+pub const GIF_FPS_RANGE: std::ops::RangeInclusive<u32> = 1..=50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -40,6 +43,7 @@ pub struct Config {
     pub hotkeys: Hotkeys,
     pub capture: CaptureSettings,
     pub recording: RecordingSettings,
+    pub gif: GifSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +113,42 @@ pub struct RecordingSettings {
     pub microphone: bool,
     /// Seconds counted down on screen before recording starts (0 = none).
     pub countdown_secs: u32,
+    /// Last format chosen on the toolbar.
+    pub format: RecordingFormat,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordingFormat {
+    #[default]
+    Mp4,
+    Gif,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GifSettings {
+    pub fps: u32,
+    /// Wider recordings are scaled down (0 = keep the size).
+    pub max_width: u32,
+    /// Palette quality, 1–100.
+    pub quality: u8,
+    /// Smoother gradients, slightly larger files.
+    pub dither: bool,
+    /// Loop forever.
+    pub repeat: bool,
+}
+
+impl Default for GifSettings {
+    fn default() -> Self {
+        Self {
+            fps: 15,
+            max_width: 0,
+            quality: 90,
+            dither: true,
+            repeat: true,
+        }
+    }
 }
 
 impl Default for RecordingSettings {
@@ -124,6 +164,7 @@ impl Default for RecordingSettings {
             system_audio: true,
             microphone: false,
             countdown_secs: 3,
+            format: RecordingFormat::Mp4,
         }
     }
 }
@@ -145,6 +186,20 @@ impl Config {
                 FPS_RANGE.start(),
                 FPS_RANGE.end(),
                 self.recording.fps
+            )));
+        }
+        if !GIF_FPS_RANGE.contains(&self.gif.fps) {
+            return Err(ConfigError::Invalid(format!(
+                "GIF frame rate must be between {} and {} (got {})",
+                GIF_FPS_RANGE.start(),
+                GIF_FPS_RANGE.end(),
+                self.gif.fps
+            )));
+        }
+        if !(1..=100).contains(&self.gif.quality) {
+            return Err(ConfigError::Invalid(format!(
+                "GIF quality must be between 1 and 100 (got {})",
+                self.gif.quality
             )));
         }
         if self.recording.countdown_secs > 10 {
@@ -248,6 +303,16 @@ mod tests {
     }
 
     #[test]
+    fn gif_limits_are_checked() {
+        let mut config = Config::default();
+        config.gif.fps = 60;
+        assert!(config.validate().is_err());
+        config.gif.fps = 50;
+        config.gif.quality = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn missing_file_is_created_with_defaults() {
         let (_dir, path) = temp_config();
         let config = Config::load_or_init(&path).unwrap();
@@ -262,6 +327,8 @@ mod tests {
         config.recording.fps = 144;
         config.recording.codec = VideoCodec::Av1;
         config.capture.format = ImageFormat::Webp;
+        config.recording.format = RecordingFormat::Gif;
+        config.gif.max_width = 960;
         config.save(&path).unwrap();
         assert_eq!(Config::load_or_init(&path).unwrap(), config);
     }
