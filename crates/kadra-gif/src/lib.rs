@@ -55,6 +55,10 @@ pub struct GifOptions {
     pub dither: bool,
     /// Loop forever instead of playing once.
     pub repeat: bool,
+    /// Per-channel difference below which a pixel counts as unchanged.
+    /// 0 for screen captures (exact); a few units for decoded video, whose
+    /// compression noise changes every pixel slightly.
+    pub tolerance: u8,
 }
 
 impl Default for GifOptions {
@@ -64,6 +68,7 @@ impl Default for GifOptions {
             quality: 90,
             dither: true,
             repeat: true,
+            tolerance: 0,
         }
     }
 }
@@ -130,7 +135,8 @@ pub struct GifWriter {
     workers: Vec<JoinHandle<()>>,
     results: Sender<Message>,
     writer: Option<JoinHandle<Result<GifSummary>>>,
-    previous: Option<BgraImage>,
+    /// What the viewer sees after the frames sent so far.
+    shown: Option<BgraImage>,
     next_index: u64,
 }
 
@@ -176,7 +182,7 @@ impl GifWriter {
             workers,
             results,
             writer: Some(writer),
-            previous: None,
+            shown: None,
             next_index: 0,
         })
     }
@@ -202,11 +208,14 @@ impl GifWriter {
             return Ok(());
         }
 
-        let job = match &self.previous {
-            None => Some(full_frame(frame)),
-            Some(previous) => {
-                changed_area(previous, frame).map(|area| delta_frame(previous, frame, area))
+        let tolerance = self.options.tolerance;
+        let job = match &mut self.shown {
+            None => {
+                self.shown = Some(frame.clone());
+                Some(full_frame(frame))
             }
+            Some(shown) => changed_area(shown, frame, tolerance)
+                .map(|area| delta_frame(shown, frame, area, tolerance)),
         };
         let Some((area, pixels)) = job else {
             // Identical frame: the previous one simply lasts longer.
@@ -228,7 +237,6 @@ impl GifWriter {
             .ok_or(GifError::Stopped)?
             .send(job)
             .map_err(|_| GifError::Stopped)?;
-        self.previous = Some(frame.clone());
         Ok(())
     }
 
@@ -278,10 +286,24 @@ fn full_frame(frame: &BgraImage) -> (Rect, Vec<RGBA>) {
     (frame.bounds(), pixels)
 }
 
-/// Bounding box of the pixels that differ, if any.
-fn changed_area(previous: &BgraImage, frame: &BgraImage) -> Option<Rect> {
+/// Whether two BGRA pixels count as equal: exactly, or within
+/// `tolerance` on every channel (decoded video carries compression noise
+/// that would otherwise make every frame differ everywhere).
+#[inline]
+fn same(p: [u8; 4], q: [u8; 4], tolerance: u8) -> bool {
+    if tolerance == 0 {
+        return p == q;
+    }
+    p[..3]
+        .iter()
+        .zip(&q[..3])
+        .all(|(&x, &y)| x.abs_diff(y) <= tolerance)
+}
+
+/// Bounding box of the pixels that differ from what is shown, if any.
+fn changed_area(shown: &BgraImage, frame: &BgraImage, tolerance: u8) -> Option<Rect> {
     let width = frame.width() as usize;
-    let rows_a = previous.as_bytes().chunks_exact(width * 4);
+    let rows_a = shown.as_bytes().chunks_exact(width * 4);
     let rows_b = frame.as_bytes().chunks_exact(width * 4);
     let (mut left, mut right) = (usize::MAX, 0);
     let (mut top, mut bottom) = (usize::MAX, 0);
@@ -291,8 +313,11 @@ fn changed_area(previous: &BgraImage, frame: &BgraImage) -> Option<Rect> {
         }
         let a = a.as_chunks::<4>().0;
         let b = b.as_chunks::<4>().0;
-        let first = a.iter().zip(b).position(|(p, q)| p != q).unwrap_or(0);
-        let last = a.iter().zip(b).rposition(|(p, q)| p != q).unwrap_or(first);
+        let differs = |(p, q): (&[u8; 4], &[u8; 4])| !same(*p, *q, tolerance);
+        let Some(first) = a.iter().zip(b).position(differs) else {
+            continue;
+        };
+        let last = a.iter().zip(b).rposition(differs).unwrap_or(first);
         left = left.min(first);
         right = right.max(last + 1);
         top = top.min(y);
@@ -302,10 +327,16 @@ fn changed_area(previous: &BgraImage, frame: &BgraImage) -> Option<Rect> {
     (top != usize::MAX).then(|| Rect::new(left as i32, top as i32, right as i32, bottom as i32))
 }
 
-/// The changed area of `frame`, with pixels equal to `previous` made
+/// The changed area of `frame`, with pixels equal to what is shown made
 /// transparent so that the previous frame shows through (and compresses
-/// to almost nothing).
-fn delta_frame(previous: &BgraImage, frame: &BgraImage, area: Rect) -> (Rect, Vec<RGBA>) {
+/// to almost nothing). `shown` is updated to what the viewer will see, so
+/// that small differences never accumulate into drift.
+fn delta_frame(
+    shown: &mut BgraImage,
+    frame: &BgraImage,
+    area: Rect,
+    tolerance: u8,
+) -> (Rect, Vec<RGBA>) {
     #[allow(clippy::cast_sign_loss)]
     let (left, top, right, bottom) = (
         area.left as usize,
@@ -317,12 +348,13 @@ fn delta_frame(previous: &BgraImage, frame: &BgraImage, area: Rect) -> (Rect, Ve
     let mut pixels = Vec::with_capacity((right - left) * (bottom - top));
     for y in top..bottom {
         let span = y * stride + left * 4..y * stride + right * 4;
-        let before = previous.as_bytes()[span.clone()].as_chunks::<4>().0;
+        let before = shown.as_bytes_mut()[span.clone()].as_chunks_mut::<4>().0;
         let after = frame.as_bytes()[span].as_chunks::<4>().0;
-        pixels.extend(before.iter().zip(after).map(|(&old, &new)| {
-            if old == new {
+        pixels.extend(before.iter_mut().zip(after).map(|(old, &new)| {
+            if same(*old, new, tolerance) {
                 RGBA::new(0, 0, 0, 0)
             } else {
+                *old = new;
                 rgba(new)
             }
         }));
@@ -589,6 +621,31 @@ mod tests {
         let summary = gif.finish(ms(500)).unwrap();
         assert_eq!((summary.width, summary.height), (50, 25));
         assert!(summary.bytes > 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tolerance_ignores_noise_without_drift() {
+        let path = temp("noise");
+        let options = GifOptions {
+            tolerance: 4,
+            ..GifOptions::default()
+        };
+        let mut gif = GifWriter::create(&path, 8, 8, options).unwrap();
+        // Slowly brightening by 1 per frame: each step is within the
+        // tolerance, but the drift must not exceed it.
+        for i in 0..10u8 {
+            gif.push(
+                &solid(8, 8, [100 + i, 100 + i, 100 + i, 255]),
+                ms(u64::from(i) * 100),
+            )
+            .unwrap();
+        }
+        let summary = gif.finish(ms(1000)).unwrap();
+        // 100 shown, then updated at 105 (diff 5 > 4); 109 stays within 4.
+        assert_eq!(summary.frames, 2);
+        let decoded = decode(&path);
+        assert!(decoded.last[0].abs_diff(109) <= 4, "{}", decoded.last[0]);
         let _ = std::fs::remove_file(&path);
     }
 
