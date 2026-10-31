@@ -78,7 +78,7 @@ fn array(r: Rect) -> [i32; 4] {
 
 /// Thumbnail exchange format: width and height (u32 little endian), then
 /// BGRA pixels.
-fn write_thumbnail(image: &BgraImage) -> Option<PathBuf> {
+pub fn write_thumbnail(image: &BgraImage) -> Option<PathBuf> {
     let path = std::env::temp_dir().join(format!("kadra-thumb-{}.bgra", std::process::id()));
     let mut bytes = Vec::with_capacity(8 + image.as_bytes().len());
     bytes.extend(image.width().to_le_bytes());
@@ -136,6 +136,7 @@ pub fn run() -> i32 {
             quality: gif.quality,
             dither: gif.dither,
             repeat: gif.repeat,
+            tolerance: 0,
         }),
     }) {
         Ok(recording) => recording,

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 export type ImageFormat = "png" | "jpeg" | "webp";
 export type VideoCodec = "h264" | "hevc" | "av1";
@@ -59,3 +60,33 @@ export const openFolder = (folder: Folder) => invoke<void>("open_folder", { fold
 /** Configuration changed outside the settings window (e.g. the overlay). */
 export const onConfigChanged = (handler: (config: Config) => void) =>
   listen<Config>("config-changed", (event) => handler(event.payload));
+
+/** Progress of a video to GIF conversion. */
+export interface GifProgress {
+  input: string;
+  done: number;
+  output: string | null;
+  bytes: number | null;
+  error: string | null;
+}
+
+export const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "wmv", "avi", "mkv"];
+export const isVideo = (path: string) =>
+  VIDEO_EXTENSIONS.includes(path.split(".").pop()?.toLowerCase() ?? "");
+
+export const convertToGif = (path: string) => invoke<void>("convert_to_gif", { path });
+
+export const onGifProgress = (handler: (progress: GifProgress) => void) =>
+  listen<GifProgress>("gif-progress", (event) => handler(event.payload));
+
+/** Files dropped on the window; `over` tells whether a drag is in progress. */
+export const onFileDrop = (handler: (paths: string[] | null, over: boolean) => void) =>
+  getCurrentWebview().onDragDropEvent((event) => {
+    const p = event.payload;
+    if (p.type === "enter" || p.type === "over") handler(null, true);
+    else if (p.type === "drop") handler(p.paths, false);
+    else handler(null, false);
+  });
+
+/** Selects a file created by Kadra in Explorer. */
+export const showInFolder = (path: string) => invoke<void>("show_in_folder", { path });

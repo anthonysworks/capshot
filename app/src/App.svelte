@@ -9,8 +9,14 @@
     GIF_FPS_PRESETS,
     GIF_WIDTHS,
     appInfo,
+    type GifProgress,
+    convertToGif,
     getConfig,
+    isVideo,
     onConfigChanged,
+    onFileDrop,
+    onGifProgress,
+    showInFolder,
     openFolder,
     saveConfig,
   } from "./lib/api";
@@ -21,6 +27,8 @@
   let info = $state<AppInfo | null>(null);
   let status = $state<{ kind: "ok" | "error"; text: string } | null>(null);
   let saving = $state(false);
+  let conversions = $state<GifProgress[]>([]);
+  let dragging = $state(false);
 
   const dirty = $derived(config !== null && JSON.stringify(config) !== saved);
   const fpsValid = $derived(
@@ -78,6 +86,26 @@
     }
     saved = JSON.stringify(base);
   });
+
+  onGifProgress((p) => {
+    const i = conversions.findIndex((c) => c.input === p.input);
+    if (i >= 0) conversions[i] = p;
+    else conversions.push(p);
+  });
+
+  onFileDrop((paths, over) => {
+    dragging = over;
+    for (const path of paths ?? []) {
+      if (!isVideo(path)) continue;
+      conversions = conversions.filter((c) => c.input !== path);
+      conversions.push({ input: path, done: 0, output: null, bytes: null, error: null });
+      convertToGif(path);
+    }
+  });
+
+  const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
+  const size = (bytes: number) =>
+    bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
 </script>
 
 {#if config}
@@ -239,6 +267,24 @@
         <input type="checkbox" bind:checked={config.gif.repeat} />
         <span>Loop forever</span>
       </label>
+      <div class="drop" class:dragging>
+        <strong>Video to GIF</strong>
+        <span>Drop a video file on this window to convert it with these settings. The GIF is saved next to the video.</span>
+      </div>
+      {#each conversions as c (c.input)}
+        <div class="conversion">
+          <span class="name" title={c.input}>{fileName(c.input)}</span>
+          {#if c.error}
+            <span class="status error">{c.error}</span>
+          {:else if c.output}
+            <span class="value">{size(c.bytes ?? 0)}</span>
+            <button type="button" class="link" onclick={() => c.output && showInFolder(c.output)}>Show</button>
+          {:else}
+            <progress max="1" value={c.done}></progress>
+            <span class="value">{Math.round(c.done * 100)} %</span>
+          {/if}
+        </div>
+      {/each}
     </section>
 
     <footer>
@@ -326,6 +372,38 @@
   .value {
     width: 5rem;
     color: var(--text-muted);
+  }
+  .drop {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 12px;
+    padding: 14px;
+    border: 1px dashed var(--border, #8884);
+    border-radius: 8px;
+    font-size: 0.9em;
+    opacity: 0.85;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .drop.dragging {
+    border-color: var(--accent, #4f7cff);
+    background: color-mix(in srgb, var(--accent, #4f7cff) 12%, transparent);
+    opacity: 1;
+  }
+  .conversion {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .conversion .name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .conversion progress {
+    width: 140px;
   }
   .hint {
     margin: 6px 0 0;

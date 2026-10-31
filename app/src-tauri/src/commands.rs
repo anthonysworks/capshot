@@ -86,3 +86,27 @@ pub fn open_folder(state: State<'_, AppState>, folder: Folder) {
     };
     windows::open_in_explorer(&dir);
 }
+
+/// Converts a video file to GIF in the background; progress is reported
+/// with [`crate::convert::PROGRESS_EVENT`].
+#[tauri::command]
+pub fn convert_to_gif(app: AppHandle, path: String) {
+    crate::convert::to_gif(&app, std::path::PathBuf::from(path));
+}
+
+/// Selects a file in Explorer. Only files Kadra created (listed in the
+/// history) can be shown, never an arbitrary path coming from the webview.
+#[tauri::command]
+pub fn show_in_folder(state: State<'_, AppState>, path: String) {
+    let path = std::path::PathBuf::from(path);
+    let known = state.history().recent().any(|entry| entry.path == path);
+    if !known {
+        tracing::warn!("refusing to show {}", path.display());
+        return;
+    }
+    let mut select = std::ffi::OsString::from("/select,");
+    select.push(path.as_os_str());
+    if let Err(err) = std::process::Command::new("explorer").arg(select).spawn() {
+        tracing::warn!("cannot show {}: {err}", path.display());
+    }
+}

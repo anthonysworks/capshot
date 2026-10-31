@@ -4,6 +4,7 @@
 mod actions;
 mod capture;
 mod commands;
+mod convert;
 mod hotkeys;
 mod recorder_host;
 mod recording;
@@ -37,6 +38,14 @@ pub fn run() {
         };
         std::process::exit(code);
     }
+    // Same for the GIF converter.
+    if std::env::args().any(|a| a == convert::FLAG) {
+        let code = {
+            let _log_guard = logging::init(paths.log_dir());
+            convert::run_host()
+        };
+        std::process::exit(code);
+    }
 
     let mut log_guard = Some(logging::init(paths.log_dir()));
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Kadra");
@@ -50,7 +59,8 @@ pub fn run() {
     // and may take the foreground; hand that right to the running instance
     // so its overlay gets keyboard focus.
     let args: Vec<String> = std::env::args().collect();
-    if Action::from_args(&args).is_some() {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if Action::from_args(&args, &cwd).is_some() {
         // SAFETY: plain call, no pointers involved.
         let _ = unsafe {
             ::windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
@@ -64,7 +74,7 @@ pub fn run() {
         // `kadra.exe --capture` triggers a capture in the running instance,
         // any other launch opens the settings.
         .plugin(tauri_plugin_single_instance::init(
-            |app, args, _cwd| match Action::from_args(&args) {
+            |app, args, cwd| match Action::from_args(&args, std::path::Path::new(&cwd)) {
                 Some(action) => actions::trigger(app, action),
                 None => windows::show_settings(app),
             },
@@ -86,7 +96,7 @@ pub fn run() {
                 }
                 Err(err) => tracing::error!("cannot start the capture overlay: {err}"),
             }
-            if let Some(action) = Action::from_args(&args) {
+            if let Some(action) = Action::from_args(&args, &cwd) {
                 actions::trigger(app.handle(), action);
             }
             Ok(())
@@ -96,6 +106,8 @@ pub fn run() {
             commands::save_config,
             commands::app_info,
             commands::open_folder,
+            commands::convert_to_gif,
+            commands::show_in_folder,
         ])
         .build(tauri::generate_context!());
 

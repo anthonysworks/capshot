@@ -25,7 +25,7 @@ pub fn plugin() -> TauriPlugin<Wry> {
                 registered
                     .iter()
                     .find(|(s, _)| s == shortcut)
-                    .map(|&(_, action)| action)
+                    .map(|(_, action)| action.clone())
             });
             if let Some(action) = action {
                 actions::trigger(app, action);
