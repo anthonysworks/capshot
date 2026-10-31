@@ -15,6 +15,7 @@
 mod audio;
 mod clock;
 mod convert;
+mod decode;
 mod encoder;
 mod pacer;
 mod source;
@@ -33,8 +34,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 
+pub use decode::{Conversion, VideoDecoder, video_to_gif};
 pub use encoder::VideoSettings;
-pub use kadra_gif::GifOptions;
+pub use kadra_gif::{GifOptions, GifSummary};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecordError {
@@ -44,6 +46,8 @@ pub enum RecordError {
     EmptyRegion,
     #[error(transparent)]
     Gif(#[from] kadra_gif::GifError),
+    #[error("cancelled")]
+    Cancelled,
     #[error("the recording thread stopped unexpectedly")]
     ThreadLost,
 }
