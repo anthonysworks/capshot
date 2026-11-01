@@ -201,3 +201,39 @@ mod tests {
         assert_eq!(b.file_name().unwrap(), "Kadra 2026-11-11 09-05-03 (2).png");
     }
 }
+
+/// Image format matching a file extension.
+pub fn format_of(path: &Path) -> Option<ImageFormat> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        "webp" => Some(ImageFormat::Webp),
+        _ => None,
+    }
+}
+
+/// Decodes a PNG, JPEG or WebP file held in memory.
+pub fn decode(bytes: &[u8]) -> Result<BgraImage> {
+    let rgba = image::load_from_memory(bytes)?.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut data = rgba.into_raw();
+    for px in data.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
+    Ok(BgraImage::from_raw(width, height, data))
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+
+    #[test]
+    fn png_round_trip() {
+        let image = BgraImage::from_raw(2, 1, vec![1, 2, 3, 255, 10, 20, 30, 128]);
+        let png = encode(&image, ImageFormat::Png).unwrap();
+        assert_eq!(decode(&png).unwrap(), image);
+        assert_eq!(format_of(Path::new("a/b.JPG")), Some(ImageFormat::Jpeg));
+        assert_eq!(format_of(Path::new("a.gif")), None);
+    }
+}
