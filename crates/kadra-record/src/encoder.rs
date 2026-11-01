@@ -76,7 +76,7 @@ const fn pack(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | low as u64
 }
 
-fn video_type(settings: &VideoSettings, subtype: &GUID) -> Result<IMFMediaType> {
+pub(crate) fn video_type(settings: &VideoSettings, subtype: &GUID) -> Result<IMFMediaType> {
     // SAFETY: attribute setters on a freshly created media type.
     unsafe {
         let t = MFCreateMediaType()?;

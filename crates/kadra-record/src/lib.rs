@@ -19,6 +19,7 @@ mod decode;
 mod encoder;
 mod pacer;
 mod source;
+mod trim;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +38,7 @@ use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 pub use decode::{Conversion, VideoDecoder, video_to_gif};
 pub use encoder::VideoSettings;
 pub use kadra_gif::{GifOptions, GifSummary};
+pub use trim::{TrimOptions, TrimStats, trim_video};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecordError {

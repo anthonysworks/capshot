@@ -116,6 +116,19 @@ impl VideoDecoder {
         self.duration
     }
 
+    /// Moves to the key frame at or before `at`.
+    pub fn seek(&mut self, at: Duration) -> Result<()> {
+        let ticks = i64::try_from(at.as_nanos() / 100).unwrap_or(i64::MAX);
+        // SAFETY: plain call with a valid PROPVARIANT.
+        unsafe {
+            self.reader.SetCurrentPosition(
+                &windows::core::GUID::zeroed(),
+                &windows::Win32::System::Com::StructuredStorage::PROPVARIANT::from(ticks),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Next frame and its presentation time, or `None` at the end.
     pub fn next_frame(&mut self) -> Result<Option<(BgraImage, Duration)>> {
         loop {
@@ -220,10 +233,15 @@ pub fn video_to_gif(
     output: &Path,
     fps: u32,
     options: GifOptions,
+    range: Option<(Duration, Duration)>,
     mut progress: impl FnMut(f32) -> bool,
 ) -> Result<Conversion> {
     let fps = fps.clamp(1, kadra_gif::MAX_FPS);
     let mut decoder = VideoDecoder::open(input)?;
+    let (from, until) = range.unwrap_or((Duration::ZERO, Duration::MAX));
+    if !from.is_zero() {
+        decoder.seek(from)?;
+    }
     let (w, h) = decoder.size();
     let options = GifOptions {
         // Ignore compression noise.
@@ -231,15 +249,22 @@ pub fn video_to_gif(
         ..options
     };
     let mut writer = GifWriter::create(output, w, h, options)?;
-    let total = decoder.duration();
+    let total = decoder.duration().min(until).saturating_sub(from);
     let mut origin = None;
     let mut last_slot = None;
     let mut end = Duration::ZERO;
     let mut last = None;
 
     while let Some((frame, at)) = decoder.next_frame()? {
+        if at >= until {
+            break;
+        }
+        // Seeking lands on the key frame before `from`.
+        if at < from {
+            continue;
+        }
         // Timestamps may not start at zero.
-        let at = at.saturating_sub(*origin.get_or_insert(at));
+        let at = at.saturating_sub(*origin.get_or_insert(if from.is_zero() { at } else { from }));
         end = end.max(at);
         // Keep the first frame of each 1/fps slot.
         let slot = at.as_nanos() * u128::from(fps) / 1_000_000_000;
