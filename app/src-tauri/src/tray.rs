@@ -114,7 +114,7 @@ fn open_recent(app: &AppHandle, index: usize) {
         .nth(index)
         .map(|e| e.path.clone());
     if let Some(path) = path {
-        windows::open_file(&path);
+        crate::editor::open_capture(app, &path);
     }
 }
 

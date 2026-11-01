@@ -5,6 +5,7 @@ mod actions;
 mod capture;
 mod commands;
 mod convert;
+mod editor;
 mod hotkeys;
 mod recorder_host;
 mod recording;
@@ -83,6 +84,7 @@ pub fn run() {
         .manage(AppState::new(paths, config))
         .manage(hotkeys::Registered::default())
         .manage(recording::RecorderState::default())
+        .manage(editor::EditorFiles::default())
         .setup(move |app| {
             tray::create(app.handle())?;
             let state = app.state::<AppState>();
@@ -108,6 +110,10 @@ pub fn run() {
             commands::open_folder,
             commands::convert_to_gif,
             commands::show_in_folder,
+            commands::editor_read,
+            commands::editor_save,
+            commands::editor_copy,
+            commands::editor_export,
         ])
         .build(tauri::generate_context!());
 

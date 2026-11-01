@@ -63,6 +63,10 @@ impl CaptureService {
     pub fn hide_recording_indicator(&self) {
         self.overlay.hide_recording_indicator();
     }
+
+    pub fn copy_image(&self, image: BgraImage) {
+        self.overlay.copy_image(image);
+    }
 }
 
 /// Settings read when the overlay is requested.
@@ -137,6 +141,7 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
                 microphone,
             },
         ),
+        CaptureResult::OpenFile(path) => crate::editor::open_capture(app, &path),
         CaptureResult::StopRecording => recording::stop(app),
         CaptureResult::TogglePause => recording::toggle_pause(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),

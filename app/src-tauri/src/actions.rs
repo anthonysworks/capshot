@@ -12,6 +12,8 @@ pub enum Action {
     Record,
     /// Convert a video file to GIF (`kadra.exe --to-gif video.mp4`).
     ToGif(PathBuf),
+    /// Open a file in the editor (`kadra.exe --edit capture.png`).
+    Edit(PathBuf),
 }
 
 impl Action {
@@ -24,6 +26,7 @@ impl Action {
                 "--capture" => return Some(Self::Capture),
                 "--record" => return Some(Self::Record),
                 "--to-gif" => return args.next().map(|path| Self::ToGif(cwd.join(path))),
+                "--edit" => return args.next().map(|path| Self::Edit(cwd.join(path))),
                 _ => {}
             }
         }
@@ -36,7 +39,10 @@ pub fn trigger(app: &AppHandle, action: Action) {
         Action::Capture => capture::start(app, kadra_overlay::Purpose::Screenshot),
         // Starts selecting an area, or stops the current recording.
         Action::Record => recording::toggle(app),
-        Action::ToGif(path) => convert::to_gif(app, path),
+        Action::ToGif(path) => {
+            convert::to_gif(app, path);
+        }
+        Action::Edit(path) => crate::editor::open(app, &path),
     }
 }
 
@@ -62,5 +68,9 @@ mod tests {
             Some(Action::ToGif(PathBuf::from(r"D:\v.mp4")))
         );
         assert_eq!(Action::from_args(&["--to-gif"], cwd), None);
+        assert_eq!(
+            Action::from_args(&["--edit", "a.png"], cwd),
+            Some(Action::Edit(PathBuf::from(r"C:\work\a.png")))
+        );
     }
 }

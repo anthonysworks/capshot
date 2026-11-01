@@ -9,13 +9,13 @@
     GIF_FPS_PRESETS,
     GIF_WIDTHS,
     appInfo,
-    type GifProgress,
+    type JobProgress,
     convertToGif,
     getConfig,
     isVideo,
     onConfigChanged,
     onFileDrop,
-    onGifProgress,
+    onJobProgress,
     showInFolder,
     openFolder,
     saveConfig,
@@ -27,7 +27,7 @@
   let info = $state<AppInfo | null>(null);
   let status = $state<{ kind: "ok" | "error"; text: string } | null>(null);
   let saving = $state(false);
-  let conversions = $state<GifProgress[]>([]);
+  let conversions = $state<JobProgress[]>([]);
   let dragging = $state(false);
 
   const dirty = $derived(config !== null && JSON.stringify(config) !== saved);
@@ -87,19 +87,20 @@
     saved = JSON.stringify(base);
   });
 
-  onGifProgress((p) => {
-    const i = conversions.findIndex((c) => c.input === p.input);
+  onJobProgress((p) => {
+    const i = conversions.findIndex((c) => c.job === p.job);
     if (i >= 0) conversions[i] = p;
-    else conversions.push(p);
   });
 
   onFileDrop((paths, over) => {
     dragging = over;
     for (const path of paths ?? []) {
       if (!isVideo(path)) continue;
-      conversions = conversions.filter((c) => c.input !== path);
-      conversions.push({ input: path, done: 0, output: null, bytes: null, error: null });
-      convertToGif(path);
+      convertToGif(path).then((job) => {
+        if (!conversions.some((c) => c.job === job)) {
+          conversions.push({ job, input: path, done: 0, output: null, bytes: null, error: null });
+        }
+      });
     }
   });
 
@@ -160,6 +161,10 @@
       <label class="row check">
         <input type="checkbox" bind:checked={config.capture.show_preview} />
         <span>Show a preview after capturing</span>
+      </label>
+      <label class="row check">
+        <input type="checkbox" bind:checked={config.capture.open_in_editor} />
+        <span>Clicking the preview opens the Kadra editor (otherwise the default app)</span>
       </label>
       <div class="row">
         <input class="path" bind:value={config.capture.output_dir} aria-label="Screenshots folder" />
@@ -271,7 +276,7 @@
         <strong>Video to GIF</strong>
         <span>Drop a video file on this window to convert it with these settings. The GIF is saved next to the video.</span>
       </div>
-      {#each conversions as c (c.input)}
+      {#each conversions as c (c.job)}
         <div class="conversion">
           <span class="name" title={c.input}>{fileName(c.input)}</span>
           {#if c.error}

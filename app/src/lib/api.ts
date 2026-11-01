@@ -17,6 +17,7 @@ export interface Config {
     save_to_disk: boolean;
     show_preview: boolean;
     delay_secs: number;
+    open_in_editor: boolean;
   };
   recording: {
     output_dir: string;
@@ -61,8 +62,9 @@ export const openFolder = (folder: Folder) => invoke<void>("open_folder", { fold
 export const onConfigChanged = (handler: (config: Config) => void) =>
   listen<Config>("config-changed", (event) => handler(event.payload));
 
-/** Progress of a video to GIF conversion. */
-export interface GifProgress {
+/** Progress of a video job (conversion to GIF, export from the editor). */
+export interface JobProgress {
+  job: number;
   input: string;
   done: number;
   output: string | null;
@@ -74,10 +76,11 @@ export const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "wmv", "avi", "mkv"];
 export const isVideo = (path: string) =>
   VIDEO_EXTENSIONS.includes(path.split(".").pop()?.toLowerCase() ?? "");
 
-export const convertToGif = (path: string) => invoke<void>("convert_to_gif", { path });
+/** Starts converting a video to GIF; resolves to the job id. */
+export const convertToGif = (path: string) => invoke<number>("convert_to_gif", { path });
 
-export const onGifProgress = (handler: (progress: GifProgress) => void) =>
-  listen<GifProgress>("gif-progress", (event) => handler(event.payload));
+export const onJobProgress = (handler: (progress: JobProgress) => void) =>
+  listen<JobProgress>("video-job", (event) => handler(event.payload));
 
 /** Files dropped on the window; `over` tells whether a drag is in progress. */
 export const onFileDrop = (handler: (paths: string[] | null, over: boolean) => void) =>
@@ -90,3 +93,23 @@ export const onFileDrop = (handler: (paths: string[] | null, over: boolean) => v
 
 /** Selects a file created by Kadra in Explorer. */
 export const showInFolder = (path: string) => invoke<void>("show_in_folder", { path });
+
+// ── Editor ──────────────────────────────────────────────────────────────
+
+/** Reads a file opened in the editor. */
+export const editorRead = (path: string) => invoke<ArrayBuffer>("editor_read", { path });
+
+/** Saves an edited image (PNG bytes) over the original file. */
+export const editorSave = (path: string, png: Uint8Array) =>
+  invoke<void>("editor_save", png, { headers: { "x-path": encodeURIComponent(path) } });
+
+/** Copies an edited image (PNG bytes) to the clipboard. */
+export const editorCopy = (png: Uint8Array) => invoke<void>("editor_copy", png);
+
+export type ExportTask =
+  | { kind: "mp4"; start: number; end: number | null; audio: boolean }
+  | { kind: "gif"; gif: Config["gif"]; range: [number, number] | null };
+
+/** Exports part of a video; resolves to the job id. */
+export const editorExport = (path: string, task: ExportTask) =>
+  invoke<number>("editor_export", { path, task });

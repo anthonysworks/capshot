@@ -1,17 +1,19 @@
-//! Video to GIF conversion.
+//! Video jobs: conversion to GIF and trimming.
 //!
-//! Like recording, conversion runs in a child process
-//! (`kadra.exe --gif-host`): decoders and encoders allocate a lot, and all
-//! of it is returned to the system when the process ends. The child reads
-//! one JSON request on stdin and reports progress as JSON lines on stdout.
+//! Like recording, they run in a child process (`kadra.exe --gif-host`):
+//! decoders and encoders allocate a lot, and all of it is returned to the
+//! system when the process ends. The child reads one JSON request on stdin
+//! and reports progress as JSON lines on stdout.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use kadra_core::{GifSettings, Rect};
-use kadra_record::{GifOptions, video_to_gif};
+use kadra_record::{GifOptions, TrimOptions, trim_video, video_to_gif};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -19,20 +21,38 @@ use crate::capture::CaptureService;
 use crate::recorder_host::{take_thumbnail, write_thumbnail};
 use crate::state::AppState;
 
-/// Command-line flag selecting converter host mode.
+/// Command-line flag selecting the job host mode.
 pub const FLAG: &str = "--gif-host";
-/// Sent to the web UI while converting, see [`Progress`].
-pub const PROGRESS_EVENT: &str = "gif-progress";
+/// Sent to the web UI while a job runs, see [`Progress`].
+pub const PROGRESS_EVENT: &str = "video-job";
 /// `CREATE_NO_WINDOW`: no console flashes on screen.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// Video files offered for conversion.
+/// Video files Kadra can read.
 pub const VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "wmv", "avi", "mkv"];
+/// Quality of edited videos (0 best – 51 smallest): edits should not lose
+/// visible detail.
+const EDIT_QUALITY: u8 = 18;
+
+/// What to do with the input video. Times are in seconds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Task {
+    Gif {
+        gif: GifSettings,
+        range: Option<(f64, f64)>,
+    },
+    Mp4 {
+        start: f64,
+        end: Option<f64>,
+        audio: bool,
+    },
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Request {
     input: PathBuf,
     output: PathBuf,
-    gif: GifSettings,
+    task: Task,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,8 +64,6 @@ enum Event {
     Finished {
         width: u32,
         height: u32,
-        frames: u64,
-        bytes: u64,
         thumbnail: Option<PathBuf>,
     },
     Error {
@@ -53,10 +71,11 @@ enum Event {
     },
 }
 
-/// Conversion state reported to the web UI.
+/// Job state reported to the web UI.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
+    pub job: u64,
     pub input: String,
     /// 0–1.
     pub done: f32,
@@ -74,6 +93,10 @@ fn send(event: &Event) {
     }
 }
 
+fn seconds(s: f64) -> Duration {
+    Duration::try_from_secs_f64(s.max(0.0)).unwrap_or(Duration::ZERO)
+}
+
 /// Entry point of the host process. Returns the process exit code.
 pub fn run_host() -> i32 {
     let mut line = String::new();
@@ -81,46 +104,59 @@ pub fn run_host() -> i32 {
         .lock()
         .read_line(&mut line)
         .ok()
-        .and_then(|_| serde_json::from_str::<Request>(&line).ok());
+        // Shells may prefix piped text with a byte order mark.
+        .and_then(|_| serde_json::from_str::<Request>(line.trim_start_matches('\u{feff}')).ok());
     let Some(request) = request else {
         send(&Event::Error {
-            message: "invalid conversion request".into(),
+            message: "invalid job request".into(),
         });
         return 2;
     };
-    tracing::info!(input = %request.input.display(), "converting to GIF");
-    let gif = &request.gif;
+    tracing::info!(input = %request.input.display(), task = ?request.task, "video job");
     let mut last = -1.0f32;
-    let result = video_to_gif(
-        &request.input,
-        &request.output,
-        gif.fps,
-        GifOptions {
-            max_width: gif.max_width,
-            quality: gif.quality,
-            dither: gif.dither,
-            repeat: gif.repeat,
-            tolerance: 0,
-        },
-        |done| {
-            // About a hundred updates at most.
-            if done - last >= 0.01 {
-                last = done;
-                send(&Event::Progress { done });
-            }
-            true
-        },
-    );
+    let mut progress = |done: f32| {
+        // About a hundred updates at most.
+        if done - last >= 0.01 || done >= 1.0 {
+            last = done;
+            send(&Event::Progress { done });
+        }
+        true
+    };
+    let result = match &request.task {
+        Task::Gif { gif, range } => video_to_gif(
+            &request.input,
+            &request.output,
+            gif.fps,
+            GifOptions {
+                max_width: gif.max_width,
+                quality: gif.quality,
+                dither: gif.dither,
+                repeat: gif.repeat,
+                tolerance: 0,
+            },
+            range.map(|(a, b)| (seconds(a), seconds(b))),
+            &mut progress,
+        )
+        .map(|c| (c.summary.width, c.summary.height, c.thumbnail)),
+        Task::Mp4 { start, end, audio } => trim_video(
+            &request.input,
+            &request.output,
+            &TrimOptions {
+                start: seconds(*start),
+                end: end.map(seconds),
+                audio: *audio,
+                quality: EDIT_QUALITY,
+            },
+            &mut progress,
+        )
+        .map(|stats| (stats.width, stats.height, None)),
+    };
     match result {
-        Ok(conversion) => {
-            let s = conversion.summary;
-            tracing::info!(frames = s.frames, bytes = s.bytes, "GIF written");
+        Ok((width, height, thumbnail)) => {
             send(&Event::Finished {
-                width: s.width,
-                height: s.height,
-                frames: s.frames,
-                bytes: s.bytes,
-                thumbnail: conversion.thumbnail.as_ref().and_then(write_thumbnail),
+                width,
+                height,
+                thumbnail: thumbnail.as_ref().and_then(write_thumbnail),
             });
             0
         }
@@ -134,89 +170,103 @@ pub fn run_host() -> i32 {
     }
 }
 
-/// Whether `path` looks like a video Kadra can convert.
+/// Whether `path` looks like a video Kadra can read.
 pub fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| VIDEO_EXTENSIONS.iter().any(|v| v.eq_ignore_ascii_case(e)))
 }
 
-/// GIF written next to the video, never overwriting a file.
-fn output_for(input: &Path) -> PathBuf {
+/// Output written next to the input, never overwriting a file.
+fn output_for(input: &Path, suffix: &str, extension: &str) -> PathBuf {
     let dir = input.parent().unwrap_or(Path::new("."));
     let stem = input
         .file_stem()
         .map_or_else(|| "video".into(), |s| s.to_string_lossy().into_owned());
-    kadra_encode::unique_path(dir, &stem, "gif")
+    kadra_encode::unique_path(dir, &format!("{stem}{suffix}"), extension)
 }
 
-/// Converts `input` in the background, then adds the GIF to the history and
-/// shows its preview.
-pub fn to_gif(app: &AppHandle, input: PathBuf) {
+/// Converts a whole video to GIF with the GIF settings.
+pub fn to_gif(app: &AppHandle, input: PathBuf) -> u64 {
+    let gif = app.state::<AppState>().config().gif.clone();
+    let output = output_for(&input, "", "gif");
+    start(app, input, output, Task::Gif { gif, range: None })
+}
+
+/// Exports part of a video edited in the editor.
+pub fn export(app: &AppHandle, input: PathBuf, task: Task) -> u64 {
+    let extension = match task {
+        Task::Gif { .. } => "gif",
+        Task::Mp4 { .. } => "mp4",
+    };
+    let output = output_for(&input, " (edited)", extension);
+    start(app, input, output, task)
+}
+
+/// Runs a job in the background; returns its id. Progress is reported
+/// with [`PROGRESS_EVENT`]; the result is added to the history and
+/// previewed.
+fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task) -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let job = NEXT.fetch_add(1, Ordering::Relaxed);
     let app = app.clone();
     std::thread::spawn(move || {
         let label = input.display().to_string();
-        let report = |progress: Progress| {
-            let _ = app.emit(PROGRESS_EVENT, progress);
-        };
-        let failed = |error: String| {
-            tracing::error!("GIF conversion of {label} failed: {error}");
-            report(Progress {
-                input: label.clone(),
-                done: 0.0,
-                output: None,
-                bytes: None,
-                error: Some(error),
-            });
+        let report = |done: f32, output: Option<String>, bytes, error| {
+            let _ = app.emit(
+                PROGRESS_EVENT,
+                Progress {
+                    job,
+                    input: label.clone(),
+                    done,
+                    output,
+                    bytes,
+                    error,
+                },
+            );
         };
         if !input.is_file() || !is_video(&input) {
-            return failed("not a video file".into());
+            report(0.0, None, None, Some("not a video file".into()));
+            return;
         }
         let request = Request {
-            output: output_for(&input),
-            gif: app.state::<AppState>().config().gif.clone(),
             input: input.clone(),
+            output,
+            task,
         };
-        let result = convert_in_child(&request, |done| {
-            report(Progress {
-                input: label.clone(),
-                done,
-                output: None,
-                bytes: None,
-                error: None,
-            });
-        });
-        match result {
+        match run_child(&request, |done| report(done, None, None, None)) {
             Ok(Event::Finished {
                 width,
                 height,
-                bytes,
                 thumbnail,
-                ..
             }) => {
-                tracing::info!(path = %request.output.display(), bytes, "GIF saved");
+                let bytes = std::fs::metadata(&request.output).map_or(0, |m| m.len());
+                tracing::info!(path = %request.output.display(), bytes, "video job done");
                 crate::capture::remember(&app, &request.output, width, height);
-                report(Progress {
-                    input: label.clone(),
-                    done: 1.0,
-                    output: Some(request.output.display().to_string()),
-                    bytes: Some(bytes),
-                    error: None,
-                });
+                report(
+                    1.0,
+                    Some(request.output.display().to_string()),
+                    Some(bytes),
+                    None,
+                );
                 let image = thumbnail.as_deref().and_then(take_thumbnail);
                 if let (Some(image), Some(service)) = (image, app.try_state::<CaptureService>()) {
                     // Primary monitor.
                     service.show_file_preview(image, request.output.clone(), Rect::new(0, 0, 1, 1));
                 }
             }
-            Ok(_) => failed("unexpected converter reply".into()),
-            Err(err) => failed(err),
+            Ok(_) => report(0.0, None, None, Some("unexpected reply".into())),
+            Err(err) => {
+                tracing::error!("video job on {label} failed: {err}");
+                report(0.0, None, None, Some(err));
+            }
         }
     });
+    job
 }
 
-/// Runs the converter process and waits for its final event.
-fn convert_in_child(request: &Request, mut progress: impl FnMut(f32)) -> Result<Event, String> {
+/// Runs the job process and waits for its final event.
+fn run_child(request: &Request, mut progress: impl FnMut(f32)) -> Result<Event, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut child = Command::new(exe)
         .arg(FLAG)
@@ -261,7 +311,17 @@ mod tests {
     }
 
     #[test]
-    fn events_are_tagged() {
+    fn tasks_are_tagged() {
+        let json = serde_json::to_string(&Task::Mp4 {
+            start: 1.5,
+            end: None,
+            audio: false,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"mp4","start":1.5,"end":null,"audio":false}"#
+        );
         let json = serde_json::to_string(&Event::Progress { done: 0.5 }).unwrap();
         assert_eq!(json, r#"{"event":"progress","done":0.5}"#);
     }

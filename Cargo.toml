@@ -29,7 +29,7 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 windows = "0.62.2"
 
-tauri = { version = "2.12.5", features = ["tray-icon"] }
+tauri = { version = "2.12.5", features = ["tray-icon", "protocol-asset"] }
 tauri-build = { version = "2.7.4", features = [] }
 tauri-plugin-global-shortcut = "2.4.1"
 tauri-plugin-single-instance = "2.5.5"
