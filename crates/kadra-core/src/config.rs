@@ -66,6 +66,7 @@ impl Default for Hotkeys {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CaptureSettings {
     pub output_dir: PathBuf,
     pub format: ImageFormat,
@@ -75,6 +76,9 @@ pub struct CaptureSettings {
     pub show_preview: bool,
     /// Delay in seconds before the capture is taken.
     pub delay_secs: u32,
+    /// Clicking the preview (or a recent capture) opens the Kadra editor
+    /// rather than the default application.
+    pub open_in_editor: bool,
 }
 
 impl Default for CaptureSettings {
@@ -88,6 +92,7 @@ impl Default for CaptureSettings {
             save_to_disk: true,
             show_preview: true,
             delay_secs: 0,
+            open_in_editor: true,
         }
     }
 }
