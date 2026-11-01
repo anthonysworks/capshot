@@ -414,6 +414,11 @@ impl State {
                         Command::AttachFile { capture_id, path } => {
                             self.preview.attach_file(capture_id, path);
                         }
+                        Command::CopyImage(image) => {
+                            if let Err(err) = clipboard::set_image(self.hwnd, &image) {
+                                tracing::warn!("cannot copy to the clipboard: {err}");
+                            }
+                        }
                         Command::ShowIndicator { region, countdown } => {
                             let (monitor, _, scale) = monitor_of(region);
                             self.indicator.show(region, monitor, scale, countdown);
@@ -880,7 +885,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let mut state = state.try_borrow_mut().ok()?;
         let state = state.as_mut()?;
         if hwnd == state.preview.hwnd() {
-            state.preview.handle(msg, wparam, lparam)
+            let result = state.preview.handle(msg, wparam, lparam);
+            if let Some(path) = state.preview.take_clicked() {
+                (state.handler)(CaptureResult::OpenFile(path));
+            }
+            result
         } else if state.indicator.owns(hwnd) {
             let (result, request) = state.indicator.handle(hwnd, msg, lparam)?;
             match request {

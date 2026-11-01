@@ -60,6 +60,8 @@ pub enum CaptureResult {
     StopRecording,
     /// The pause/resume button of the recording indicator was clicked.
     TogglePause,
+    /// The preview was clicked: open this file.
+    OpenFile(PathBuf),
     /// The colour under the cursor was copied as `#RRGGBB`.
     ColorCopied(String),
     Cancelled,
@@ -85,6 +87,7 @@ enum Command {
     IndicatorRunning,
     IndicatorPaused(bool),
     HideIndicator,
+    CopyImage(BgraImage),
     ShowFile {
         image: BgraImage,
         path: PathBuf,
@@ -155,6 +158,11 @@ impl Overlay {
             path,
             region,
         });
+    }
+
+    /// Puts `image` on the clipboard (with transparency).
+    pub fn copy_image(&self, image: BgraImage) {
+        self.send(Command::CopyImage(image));
     }
 
     pub fn hide_recording_indicator(&self) {

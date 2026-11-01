@@ -1,7 +1,7 @@
 //! Floating thumbnail shown after a capture.
 //!
-//! A small GDI-painted popup in the corner of the screen: clicking opens the
-//! saved file, dragging drops it into any application, right click dismisses
+//! A small GDI-painted popup in the corner of the screen: clicking hands the
+//! saved file to the application (to open it in the editor), dragging drops it into any application, right click dismisses
 //! it. It never takes the keyboard focus and is excluded from captures.
 //!
 //! The same popup confirms a colour copied with the picker: a swatch and its
@@ -33,12 +33,12 @@ use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::Ole::DROPEFFECT_COPY;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, IShellItem, SHCreateItemFromParsingName, SHDoDragDrop, ShellExecuteW,
+    BHID_DataObject, IShellItem, SHCreateItemFromParsingName, SHDoDragDrop,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CreateWindowExW, GetSystemMetrics, HWND_TOPMOST, IDC_HAND, KillTimer,
-    LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_HIDE, SW_SHOWNORMAL,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+    LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_HIDE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
     WDA_EXCLUDEFROMCAPTURE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
@@ -143,6 +143,8 @@ pub struct Preview {
     /// Text shown right of the image (colour confirmation).
     caption: Option<Vec<u16>>,
     font_height: i32,
+    /// File clicked, waiting to be handed to the application.
+    clicked: Option<PathBuf>,
 }
 
 fn lparam_point(lparam: LPARAM) -> Point {
@@ -164,6 +166,7 @@ impl Preview {
             padding: 6,
             caption: None,
             font_height: 15,
+            clicked: None,
         }
     }
 
@@ -251,6 +254,11 @@ impl Preview {
         }
     }
 
+    /// The file the user clicked, if any.
+    pub fn take_clicked(&mut self) -> Option<PathBuf> {
+        self.clicked.take()
+    }
+
     /// Associates the saved file with the capture currently shown.
     pub fn attach_file(&mut self, capture_id: u64, path: PathBuf) {
         if self.thumbnail.is_some() && capture_id == self.capture_id {
@@ -285,9 +293,7 @@ impl Preview {
             WM_LBUTTONDOWN => self.pressed_at = Some(lparam_point(lparam)),
             WM_LBUTTONUP => {
                 if self.pressed_at.take().is_some() {
-                    if let Some(file) = &self.file {
-                        open(file);
-                    }
+                    self.clicked = self.file.clone();
                     self.hide();
                 }
             }
@@ -419,21 +425,6 @@ impl Preview {
             SelectObject(hdc, previous);
             let _ = DeleteObject(HGDIOBJ(font.0));
         }
-    }
-}
-
-/// Opens a file with its default application.
-fn open(file: &Path) {
-    // SAFETY: valid strings for the duration of the call.
-    unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            &HSTRING::from(file.as_os_str()),
-            None,
-            None,
-            SW_SHOWNORMAL,
-        );
     }
 }
 
