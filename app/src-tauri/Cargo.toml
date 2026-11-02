@@ -30,5 +30,12 @@ tauri-plugin-single-instance.workspace = true
 tracing.workspace = true
 windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 
+[features]
+# Serve the web UI embedded in the executable. `tauri dev` builds with
+# --no-default-features to load it from the Vite dev server instead; without
+# this, a plain `cargo build --release` would also expect the dev server.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [lints]
 workspace = true
