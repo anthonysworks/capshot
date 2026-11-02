@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use kadra_core::{Point, Rect};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CreateFontW, CreateSolidBrush, DT_CENTER, DT_SINGLELINE,
@@ -80,6 +81,21 @@ impl Phase {
             _ => Duration::ZERO,
         }
     }
+}
+
+/// Where the pill goes: under the recorded area, else above it, else (the
+/// area fills the screen) at the top of the screen, inside the area.
+fn pill_position(region: Rect, work: Rect, (w, h): (i32, i32), gap: i32) -> (i32, i32) {
+    let x =
+        (region.left + (region.width() - w) / 2).clamp(work.left, (work.right - w).max(work.left));
+    let y = if region.bottom + gap + h <= work.bottom {
+        region.bottom + gap
+    } else if region.top - gap - h >= work.top {
+        region.top - gap - h
+    } else {
+        region.top.max(work.top) + gap
+    };
+    (x, y)
 }
 
 pub fn register_classes(instance: HINSTANCE, wndproc: WNDPROC) -> bool {
@@ -187,8 +203,27 @@ impl Indicator {
         }
         let edge = || {
             let hwnd = create(instance, FRAME_CLASS, (WS_EX_LAYERED | WS_EX_TRANSPARENT).0)?;
-            // SAFETY: layered window owned by this thread.
-            unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 230, LWA_ALPHA)? };
+            // Windows 11 rounds and outlines popups: on 2-pixel strips this
+            // turns the frame into a blotchy, grey-edged line. Keep it crisp.
+            let square = DWMWCP_DONOTROUND;
+            let no_border = DWMWA_COLOR_NONE;
+            // SAFETY: layered window owned by this thread; the attribute
+            // values outlive the calls.
+            unsafe {
+                SetLayeredWindowAttributes(hwnd, COLORREF(0), 230, LWA_ALPHA)?;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    std::ptr::from_ref(&square).cast::<c_void>(),
+                    size_of_val(&square) as u32,
+                );
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_BORDER_COLOR,
+                    std::ptr::from_ref(&no_border).cast::<c_void>(),
+                    size_of_val(&no_border) as u32,
+                );
+            }
             Ok::<_, windows::core::Error>(hwnd)
         };
         Ok(Self {
@@ -219,10 +254,11 @@ impl Indicator {
     }
 
     /// Shows the frame around `region` and the pill next to it, both in
-    /// desktop coordinates; `monitor` keeps the pill on screen. With a
+    /// desktop coordinates; the pill stays inside `work` (the monitor
+    /// without the taskbar, which would cover it). With a
     /// non-zero `countdown`, the pill counts down until [`Self::running`].
     #[allow(clippy::many_single_char_names)]
-    pub fn show(&mut self, region: Rect, monitor: Rect, scale: f32, countdown: Duration) {
+    pub fn show(&mut self, region: Rect, work: Rect, scale: f32, countdown: Duration) {
         let px = |v: f32| (v * scale).round() as i32;
         let t = px(2.0).max(1);
         let edges = [
@@ -244,14 +280,7 @@ impl Indicator {
 
         let (w, h) = (px(164.0), px(36.0));
         let gap = px(8.0);
-        let x = (region.left + (region.width() - w) / 2).clamp(monitor.left, monitor.right - w);
-        let y = if region.bottom + gap + h <= monitor.bottom {
-            region.bottom + gap
-        } else if region.top - gap - h >= monitor.top {
-            region.top - gap - h
-        } else {
-            region.bottom - gap - h
-        };
+        let (x, y) = pill_position(region, work, (w, h), gap);
         let side = h - px(10.0);
         self.stop_button = Rect::from_size(w - px(5.0) - side, px(5.0), side, side);
         self.pause_button = self.stop_button.offset(-(side + px(4.0)), 0);
@@ -504,5 +533,29 @@ impl Indicator {
             fill(hdc, &win_rect(left), WHITE);
             fill(hdc, &win_rect(right), WHITE);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORK: Rect = Rect::new(0, 0, 1920, 1032);
+
+    #[test]
+    fn pill_goes_below_then_above_then_top() {
+        let size = (164, 36);
+        assert_eq!(
+            pill_position(Rect::new(100, 100, 500, 400), WORK, size, 8),
+            (218, 408)
+        );
+        // No room below (taskbar): above.
+        assert_eq!(
+            pill_position(Rect::new(100, 600, 500, 1030), WORK, size, 8).1,
+            556
+        );
+        // Full screen: at the top, never under the taskbar.
+        let (_, y) = pill_position(Rect::new(0, 0, 1920, 1080), WORK, size, 8);
+        assert_eq!(y, 8);
     }
 }
