@@ -17,6 +17,10 @@ pub enum Button {
     Mode(Mode),
     /// Record a GIF instead of a video (recording only).
     Gif,
+    /// Frame rate (recording only); click for the next value.
+    Fps,
+    /// Countdown before recording starts (recording only).
+    Countdown,
     /// Record the system audio (recording only).
     SystemAudio,
     /// Record the microphone (recording only).
@@ -40,6 +44,7 @@ pub fn groups(purpose: Purpose, format: RecordingFormat) -> Vec<Vec<Button>> {
             output.extend([Button::SystemAudio, Button::Microphone]);
         }
         groups.push(output);
+        groups.push(vec![Button::Fps, Button::Countdown]);
     }
     groups.push(vec![Button::Close]);
     groups
@@ -61,11 +66,17 @@ impl Toolbar {
         let button = px(40.0, scale);
         let pad = px(4.0, scale);
         let separator = px(12.0, scale);
-        let count = i32::try_from(groups.iter().map(Vec::len).sum::<usize>()).unwrap_or(0);
+        // Value buttons show text and are wider than icon buttons.
+        let width_of = |b: Button| match b {
+            Button::Fps => px(64.0, scale),
+            Button::Countdown => px(48.0, scale),
+            _ => button,
+        };
+        let content: i32 = groups.iter().flatten().map(|&b| width_of(b) + pad).sum();
         let gaps = i32::try_from(groups.len().saturating_sub(1)).unwrap_or(0);
         // Inside a group buttons are `pad` apart; between groups the gap is
         // `separator` wide instead.
-        let width = pad + count * (button + pad) + gaps * (separator - pad);
+        let width = pad + content + gaps * (separator - pad);
         let height = button + pad * 2;
         let left = monitor.left + (monitor.width() - width) / 2;
         let top = monitor.top + px(16.0, scale);
@@ -81,8 +92,9 @@ impl Toolbar {
                 x += separator - pad;
             }
             for b in group {
-                buttons.push((b, Rect::from_size(x, top + pad, button, button)));
-                x += button + pad;
+                let w = width_of(b);
+                buttons.push((b, Rect::from_size(x, top + pad, w, button)));
+                x += w + pad;
             }
         }
         Self {
@@ -102,6 +114,34 @@ impl Toolbar {
 
     pub fn contains(&self, p: Point) -> bool {
         self.frame.contains(p)
+    }
+}
+
+/// Frame rates offered on the toolbar for videos and GIFs.
+pub const FPS_STEPS: [u32; 7] = [15, 24, 30, 60, 120, 144, 240];
+pub const GIF_FPS_STEPS: [u32; 6] = [10, 15, 20, 25, 30, 50];
+/// Countdowns offered on the toolbar, in seconds.
+pub const COUNTDOWN_STEPS: [u32; 4] = [0, 3, 5, 10];
+
+/// The value after (or before) `current` in `steps`, wrapping around. A
+/// value that is not a step (set in the settings) moves to its neighbour.
+pub fn step(steps: &[u32], current: u32, forward: bool) -> u32 {
+    let (Some(&first), Some(&last)) = (steps.first(), steps.last()) else {
+        return current;
+    };
+    if forward {
+        steps
+            .iter()
+            .copied()
+            .find(|&s| s > current)
+            .unwrap_or(first)
+    } else {
+        steps
+            .iter()
+            .rev()
+            .copied()
+            .find(|&s| s < current)
+            .unwrap_or(last)
     }
 }
 
@@ -225,13 +265,23 @@ mod tests {
         let gif = Toolbar::new(MONITOR, 1.0, Purpose::Recording, RecordingFormat::Gif);
         assert!(has(&gif, Button::Gif) && !has(&gif, Button::Microphone));
         assert_eq!(shot.separators.len(), 2);
-        assert_eq!(rec.separators.len(), 3);
+        assert_eq!(rec.separators.len(), 4);
         // Separators never overlap a button.
         for bar in [&shot, &rec] {
             for &x in &bar.separators {
                 assert!(bar.buttons.iter().all(|(_, r)| x < r.left || x >= r.right));
             }
         }
+    }
+
+    #[test]
+    fn steps_wrap_and_snap() {
+        assert_eq!(step(&FPS_STEPS, 60, true), 120);
+        assert_eq!(step(&FPS_STEPS, 240, true), 15);
+        assert_eq!(step(&FPS_STEPS, 15, false), 240);
+        assert_eq!(step(&FPS_STEPS, 50, true), 60);
+        assert_eq!(step(&FPS_STEPS, 50, false), 30);
+        assert_eq!(step(&COUNTDOWN_STEPS, 10, true), 0);
     }
 
     #[test]

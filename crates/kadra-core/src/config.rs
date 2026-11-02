@@ -72,13 +72,22 @@ pub struct CaptureSettings {
     pub format: ImageFormat,
     pub copy_to_clipboard: bool,
     pub save_to_disk: bool,
-    /// Shows a thumbnail in the corner of the screen after each capture.
-    pub show_preview: bool,
+    /// What happens after a screenshot or a recording.
+    pub after_capture: AfterCapture,
     /// Delay in seconds before the capture is taken.
     pub delay_secs: u32,
-    /// Clicking the preview (or a recent capture) opens the Kadra editor
-    /// rather than the default application.
-    pub open_in_editor: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterCapture {
+    /// Open the capture in the editor.
+    #[default]
+    Editor,
+    /// Copy it and show a thumbnail; clicking the thumbnail opens the editor.
+    Preview,
+    /// Copy it, nothing on screen.
+    Nothing,
 }
 
 impl Default for CaptureSettings {
@@ -90,9 +99,8 @@ impl Default for CaptureSettings {
             format: ImageFormat::Png,
             copy_to_clipboard: true,
             save_to_disk: true,
-            show_preview: true,
+            after_capture: AfterCapture::Editor,
             delay_secs: 0,
-            open_in_editor: true,
         }
     }
 }

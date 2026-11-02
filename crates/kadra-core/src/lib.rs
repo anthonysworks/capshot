@@ -10,7 +10,9 @@ pub mod image;
 pub mod logging;
 pub mod paths;
 
-pub use config::{Config, ConfigError, GifSettings, ImageFormat, RecordingFormat, VideoCodec};
+pub use config::{
+    AfterCapture, Config, ConfigError, GifSettings, ImageFormat, RecordingFormat, VideoCodec,
+};
 pub use geometry::{Point, Rect};
 pub use history::History;
 pub use image::BgraImage;

@@ -38,6 +38,8 @@ fn scene<'a>(
         bounds: snap.bounds(),
         purpose,
         format,
+        fps: 60,
+        countdown: 3,
         system_audio: true,
         microphone: false,
     }

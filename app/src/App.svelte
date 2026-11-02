@@ -158,13 +158,13 @@
         <input type="checkbox" bind:checked={config.capture.save_to_disk} />
         <span>Save to folder</span>
       </label>
-      <label class="row check">
-        <input type="checkbox" bind:checked={config.capture.show_preview} />
-        <span>Show a preview after capturing</span>
-      </label>
-      <label class="row check">
-        <input type="checkbox" bind:checked={config.capture.open_in_editor} />
-        <span>Clicking the preview opens the Kadra editor (otherwise the default app)</span>
+      <label class="row">
+        <span>After a screenshot or a recording</span>
+        <select bind:value={config.capture.after_capture}>
+          <option value="editor">Open the editor</option>
+          <option value="preview">Quick: copy and show a thumbnail (click it to edit)</option>
+          <option value="nothing">Quick: copy only</option>
+        </select>
       </label>
       <div class="row">
         <input class="path" bind:value={config.capture.output_dir} aria-label="Screenshots folder" />

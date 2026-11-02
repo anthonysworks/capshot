@@ -24,8 +24,8 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
-    CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_LEFT, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_SEMIBOLD, FillRect, HGDIOBJ,
+    CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_LEFT,
+    DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_SEMIBOLD, FillRect, HGDIOBJ,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetDIBitsToDevice, SetTextColor,
     TRANSPARENT,
 };
@@ -140,8 +140,9 @@ pub struct Preview {
     hovered: bool,
     pressed_at: Option<Point>,
     padding: i32,
-    /// Text shown right of the image (colour confirmation).
+    /// Text shown right of the image (colour confirmation) or below it.
     caption: Option<Vec<u16>>,
+    caption_below: bool,
     font_height: i32,
     /// File clicked, waiting to be handed to the application.
     clicked: Option<PathBuf>,
@@ -165,6 +166,7 @@ impl Preview {
             pressed_at: None,
             padding: 6,
             caption: None,
+            caption_below: false,
             font_height: 15,
             clicked: None,
         }
@@ -175,15 +177,29 @@ impl Preview {
     }
 
     /// Shows `image` in the bottom-right corner of `work_area` (desktop
-    /// coordinates).
-    pub fn show(&mut self, capture_id: u64, image: &BgraImage, work_area: Rect, scale: f32) {
+    /// coordinates), with an optional `label` under it.
+    pub fn show(
+        &mut self,
+        capture_id: u64,
+        image: &BgraImage,
+        work_area: Rect,
+        scale: f32,
+        label: Option<&str>,
+    ) {
         let px = |v: f32| (v * scale).round() as i32;
         let mut thumbnail = image.thumbnail(px(300.0) as u32, px(190.0) as u32);
         flatten(&mut thumbnail);
         self.padding = px(6.0);
-        let width = thumbnail.width() as i32 + 2 * self.padding;
-        let height = thumbnail.height() as i32 + 2 * self.padding;
-        self.caption = None;
+        // At least wide enough for the label.
+        let width = (thumbnail.width() as i32).max(if label.is_some() { px(180.0) } else { 0 })
+            + 2 * self.padding;
+        let mut height = thumbnail.height() as i32 + 2 * self.padding;
+        self.caption = label.map(|l| l.encode_utf16().collect());
+        self.caption_below = true;
+        if label.is_some() {
+            self.font_height = px(13.0);
+            height += px(22.0);
+        }
         self.place(
             capture_id,
             thumbnail,
@@ -208,6 +224,7 @@ impl Preview {
         let width = px(190.0);
         let height = side as i32 + 2 * self.padding;
         self.caption = Some(format!("{hex}   copied").encode_utf16().collect());
+        self.caption_below = false;
         self.place(
             0,
             swatch,
@@ -372,7 +389,7 @@ impl Preview {
                     DIB_RGB_COLORS,
                 );
                 if let Some(caption) = &self.caption {
-                    self.paint_caption(hdc, caption, thumb.width() as i32);
+                    self.paint_caption(hdc, caption, thumb.width() as i32, thumb.height() as i32);
                 }
             }
             let _ = EndPaint(self.hwnd, &ps);
@@ -387,6 +404,7 @@ impl Preview {
         hdc: windows::Win32::Graphics::Gdi::HDC,
         caption: &[u16],
         image_width: i32,
+        image_height: i32,
     ) {
         let mut client = windows::Win32::Foundation::RECT::default();
         // SAFETY: valid DC and out pointer; the font is deselected and
@@ -413,15 +431,17 @@ impl Preview {
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, COLORREF(0x00FF_FFFF));
             let mut rect = client;
-            rect.left = self.padding * 2 + image_width;
+            let mut format = DT_LEFT | DT_VCENTER | DT_SINGLELINE;
+            if self.caption_below {
+                rect.top = self.padding + image_height;
+                rect.left = self.padding;
+                format = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
+            } else {
+                rect.left = self.padding * 2 + image_width;
+            }
             rect.right -= self.padding;
             let mut text = caption.to_vec();
-            DrawTextW(
-                hdc,
-                &mut text,
-                &mut rect,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-            );
+            DrawTextW(hdc, &mut text, &mut rect, format);
             SelectObject(hdc, previous);
             let _ = DeleteObject(HGDIOBJ(font.0));
         }

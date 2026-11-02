@@ -50,14 +50,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SetCursor, SetCursorPos,
     SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
     WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSEXW,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSEXW,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{BOOL, Interface, w};
 
 use crate::clipboard;
 use crate::indicator::{self, Indicator};
-use crate::layout::{Button, Magnifier, Toolbar};
+use crate::layout::{self, Button, Magnifier, Toolbar};
 use crate::preview::{self, Preview};
 use crate::render::{Renderer, Scene, Screenshot};
 use crate::selection::{Outcome, Selection, Targets};
@@ -219,6 +219,9 @@ struct Session {
     /// Switchable from the toolbar, unlike the rest of the request.
     purpose: Purpose,
     format: RecordingFormat,
+    fps: u32,
+    gif_fps: u32,
+    countdown: u32,
     system_audio: bool,
     microphone: bool,
     request: CaptureRequest,
@@ -243,6 +246,8 @@ impl Session {
             bounds: self.snapshot.bounds(),
             purpose: self.purpose,
             format: self.format,
+            fps: self.current_fps(),
+            countdown: self.countdown,
             system_audio: self.system_audio,
             microphone: self.microphone,
         }
@@ -256,6 +261,26 @@ impl Session {
         self.rebuild_toolbar();
         let mode = purpose.sanitize(self.selection.mode());
         self.selection.set_mode(mode);
+    }
+
+    fn current_fps(&self) -> u32 {
+        match self.format {
+            RecordingFormat::Mp4 => self.fps,
+            RecordingFormat::Gif => self.gif_fps,
+        }
+    }
+
+    fn step_fps(&mut self, forward: bool) {
+        match self.format {
+            RecordingFormat::Mp4 => self.fps = layout::step(&layout::FPS_STEPS, self.fps, forward),
+            RecordingFormat::Gif => {
+                self.gif_fps = layout::step(&layout::GIF_FPS_STEPS, self.gif_fps, forward);
+            }
+        }
+    }
+
+    fn step_countdown(&mut self, forward: bool) {
+        self.countdown = layout::step(&layout::COUNTDOWN_STEPS, self.countdown, forward);
     }
 
     fn toggle_gif(&mut self) {
@@ -431,12 +456,18 @@ impl State {
                             image,
                             path,
                             region,
+                            label,
                         } => {
                             let (_, work, scale) = monitor_of(region);
                             self.next_capture_id += 1;
                             let id = self.next_capture_id;
-                            self.preview.show(id, &image, work, scale);
+                            self.preview.show(id, &image, work, scale, label.as_deref());
                             self.preview.attach_file(id, path);
+                        }
+                        Command::CopyFiles(files) => {
+                            if let Err(err) = clipboard::set_files(self.hwnd, &files) {
+                                tracing::warn!("cannot copy to the clipboard: {err}");
+                            }
                         }
                         Command::HideIndicator => self.indicator.hide(),
                     }
@@ -490,6 +521,7 @@ impl State {
             WM_LBUTTONDOWN => self.on_press(lparam_point(lparam)),
             WM_LBUTTONUP => self.on_release(lparam_point(lparam)),
             WM_KEYDOWN => self.on_key(wparam),
+            WM_MOUSEWHEEL => self.on_wheel(wparam),
             WM_ACTIVATE => {
                 #[allow(clippy::cast_possible_truncation)]
                 if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
@@ -591,6 +623,9 @@ impl State {
             toolbar_monitor,
             purpose,
             format: request.format,
+            fps: request.fps,
+            gif_fps: request.gif_fps,
+            countdown: request.countdown_secs,
             system_audio: request.system_audio,
             microphone: request.microphone,
             request,
@@ -657,6 +692,21 @@ impl State {
         self.invalidate();
     }
 
+    /// The wheel over a value button changes it (up: next value).
+    fn on_wheel(&mut self, wparam: WPARAM) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let up = ((wparam.0 >> 16) as u16 as i16) > 0;
+        match session.toolbar.hit(session.selection.cursor()) {
+            Some(Button::Fps) => session.step_fps(up),
+            Some(Button::Countdown) => session.step_countdown(up),
+            _ => return,
+        }
+        self.invalidate();
+    }
+
     fn on_press(&mut self, p: Point) {
         let Some(session) = self.session.as_mut() else {
             return;
@@ -666,6 +716,8 @@ impl State {
                 Some(Button::Purpose(purpose)) => session.set_purpose(purpose),
                 Some(Button::Mode(mode)) => session.set_mode(mode),
                 Some(Button::Gif) => session.toggle_gif(),
+                Some(Button::Fps) => session.step_fps(!shift_down()),
+                Some(Button::Countdown) => session.step_countdown(!shift_down()),
                 Some(Button::SystemAudio) => session.system_audio = !session.system_audio,
                 Some(Button::Microphone) => session.microphone = !session.microphone,
                 Some(Button::Close) => return self.finish(None),
@@ -842,6 +894,8 @@ impl State {
                         CaptureResult::RegionSelected {
                             region: r.offset(origin.x, origin.y),
                             format: session.format,
+                            fps: session.current_fps(),
+                            countdown_secs: session.countdown,
                             system_audio: session.system_audio,
                             microphone: session.microphone,
                         }
@@ -866,7 +920,8 @@ impl State {
                         let monitor = session.snapshot.monitor_at(session.selection.cursor());
                         let origin = session.snapshot.origin;
                         let work = monitor.work.offset(origin.x, origin.y);
-                        self.preview.show(id, &image, work, monitor.scale());
+                        let label = copied.then_some("Copied to the clipboard");
+                        self.preview.show(id, &image, work, monitor.scale(), label);
                     }
                     CaptureResult::Captured { id, image, copied }
                 }

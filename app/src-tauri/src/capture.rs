@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use kadra_core::{BgraImage, Rect};
+use kadra_core::{AfterCapture, BgraImage, Rect};
 use kadra_overlay::{CaptureRequest, CaptureResult, Mode, Overlay, Purpose};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -36,8 +36,11 @@ impl CaptureService {
             purpose,
             mode: Mode::Region,
             copy_to_clipboard: options.copy_to_clipboard,
-            show_preview: options.show_preview,
+            show_preview: options.after == AfterCapture::Preview,
             format: options.format,
+            fps: options.fps,
+            gif_fps: options.gif_fps,
+            countdown_secs: options.countdown_secs,
             system_audio: options.system_audio,
             microphone: options.microphone,
             requested_at: Instant::now(),
@@ -56,8 +59,18 @@ impl CaptureService {
         self.overlay.recording_paused(paused);
     }
 
-    pub fn show_file_preview(&self, image: BgraImage, path: std::path::PathBuf, region: Rect) {
-        self.overlay.show_file_preview(image, path, region);
+    pub fn show_file_preview(
+        &self,
+        image: BgraImage,
+        path: std::path::PathBuf,
+        region: Rect,
+        label: Option<String>,
+    ) {
+        self.overlay.show_file_preview(image, path, region, label);
+    }
+
+    pub fn copy_files(&self, files: Vec<std::path::PathBuf>) {
+        self.overlay.copy_files(files);
     }
 
     pub fn hide_recording_indicator(&self) {
@@ -74,8 +87,11 @@ impl CaptureService {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     copy_to_clipboard: bool,
-    show_preview: bool,
+    after: AfterCapture,
     format: kadra_core::RecordingFormat,
+    fps: u32,
+    gif_fps: u32,
+    countdown_secs: u32,
     system_audio: bool,
     microphone: bool,
 }
@@ -94,8 +110,11 @@ pub fn start(app: &AppHandle, purpose: Purpose) {
             config.capture.delay_secs,
             Options {
                 copy_to_clipboard: config.capture.copy_to_clipboard,
-                show_preview: config.capture.show_preview,
+                after: config.capture.after_capture,
                 format: config.recording.format,
+                fps: config.recording.fps,
+                gif_fps: config.gif.fps,
+                countdown_secs: config.recording.countdown_secs,
                 system_audio: config.recording.system_audio,
                 microphone: config.recording.microphone,
             },
@@ -130,6 +149,8 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
         CaptureResult::RegionSelected {
             region,
             format,
+            fps,
+            countdown_secs,
             system_audio,
             microphone,
         } => recording::start(
@@ -137,6 +158,8 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
             region,
             recording::Choices {
                 format,
+                fps,
+                countdown_secs,
                 system_audio,
                 microphone,
             },
@@ -151,18 +174,23 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
 }
 
 fn save(app: &AppHandle, id: u64, image: &BgraImage) {
-    let (enabled, format, dir) = {
+    let (enabled, format, dir, after) = {
         let state = app.state::<AppState>();
         let config = state.config();
         (
             config.capture.save_to_disk,
             config.capture.format,
             config.capture.output_dir.clone(),
+            config.capture.after_capture,
         )
     };
-    if !enabled {
-        return;
-    }
+    let edit = after == AfterCapture::Editor;
+    // The editor works on a file: without saving, use a temporary one.
+    let dir = match (enabled, edit) {
+        (true, _) => dir,
+        (false, true) => std::env::temp_dir().join("Kadra"),
+        (false, false) => return,
+    };
     let start = Instant::now();
     match kadra_encode::save_now(image, format, &dir) {
         Ok(path) => {
@@ -174,8 +202,13 @@ fn save(app: &AppHandle, id: u64, image: &BgraImage) {
             if let Some(service) = app.try_state::<CaptureService>() {
                 service.overlay.attach_file(id, path.clone());
             }
-            remember(app, &path, image.width(), image.height());
-            let _ = app.emit(SAVED_EVENT, path.display().to_string());
+            if enabled {
+                remember(app, &path, image.width(), image.height());
+                let _ = app.emit(SAVED_EVENT, path.display().to_string());
+            }
+            if edit {
+                crate::editor::open(app, &path);
+            }
         }
         Err(err) => tracing::error!("cannot save the screenshot: {err}"),
     }

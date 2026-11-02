@@ -1,5 +1,6 @@
 //! Clipboard output.
 
+use std::os::windows::ffi::OsStrExt;
 use std::time::Duration;
 
 use kadra_core::BgraImage;
@@ -108,6 +109,30 @@ pub fn set_text(owner: HWND, text: &str) -> Result<()> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     set(owner, u32::from(CF_UNICODETEXT.0), wide.len() * 2, |buf| {
         for (dst, unit) in buf.as_chunks_mut::<2>().0.iter_mut().zip(&wide) {
+            *dst = unit.to_le_bytes();
+        }
+    })
+}
+
+/// `CF_HDROP`: a list of files, pasted as the files themselves (Explorer,
+/// chat applications, mail).
+const CF_HDROP: u32 = 15;
+
+/// Copies files, as Explorer's "Copy" does.
+pub fn set_files(owner: HWND, files: &[std::path::PathBuf]) -> Result<()> {
+    // DROPFILES header: offset of the list, a point, two flags (wide = 1).
+    const HEADER: usize = 20;
+    let mut list: Vec<u16> = Vec::new();
+    for file in files {
+        list.extend(file.as_os_str().encode_wide());
+        list.push(0);
+    }
+    list.push(0);
+    set(owner, CF_HDROP, HEADER + list.len() * 2, |buf| {
+        buf[..HEADER].fill(0);
+        buf[0..4].copy_from_slice(&20u32.to_le_bytes());
+        buf[16..20].copy_from_slice(&1u32.to_le_bytes());
+        for (dst, unit) in buf[HEADER..].as_chunks_mut::<2>().0.iter_mut().zip(&list) {
             *dst = unit.to_le_bytes();
         }
     })

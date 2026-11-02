@@ -5,6 +5,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 export type ImageFormat = "png" | "jpeg" | "webp";
 export type VideoCodec = "h264" | "hevc" | "av1";
 export type RecordingFormat = "mp4" | "gif";
+export type AfterCapture = "editor" | "preview" | "nothing";
 export type Folder = "screenshots" | "recordings" | "logs";
 
 /** Mirrors `kadra_core::Config`. */
@@ -15,9 +16,8 @@ export interface Config {
     format: ImageFormat;
     copy_to_clipboard: boolean;
     save_to_disk: boolean;
-    show_preview: boolean;
+    after_capture: AfterCapture;
     delay_secs: number;
-    open_in_editor: boolean;
   };
   recording: {
     output_dir: string;

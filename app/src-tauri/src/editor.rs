@@ -13,8 +13,6 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::state::AppState;
-
 /// Files opened in an editor during this session.
 #[derive(Debug, Default)]
 pub struct EditorFiles(Mutex<HashSet<PathBuf>>);
@@ -130,11 +128,10 @@ fn strip_unc(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Opens a capture: in the editor when enabled and supported, otherwise
-/// with the default application.
+/// Opens a capture (preview or recent capture clicked): in the editor when
+/// it can edit it, otherwise with the default application.
 pub fn open_capture(app: &AppHandle, path: &Path) {
-    let in_editor = app.state::<AppState>().config().capture.open_in_editor;
-    if in_editor && kind(path).is_some() {
+    if kind(path).is_some() {
         open(app, path);
     } else {
         crate::windows::open_file(path);

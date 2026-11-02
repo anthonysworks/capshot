@@ -34,6 +34,10 @@ pub struct CaptureRequest {
     pub show_preview: bool,
     /// Initial state of the recording toggles.
     pub format: RecordingFormat,
+    /// Frame rates for videos and GIFs, and the countdown in seconds.
+    pub fps: u32,
+    pub gif_fps: u32,
+    pub countdown_secs: u32,
     pub system_audio: bool,
     pub microphone: bool,
     /// When the user asked for the capture, to measure latency.
@@ -53,6 +57,9 @@ pub enum CaptureResult {
     RegionSelected {
         region: Rect,
         format: RecordingFormat,
+        /// Frame rate for that format.
+        fps: u32,
+        countdown_secs: u32,
         system_audio: bool,
         microphone: bool,
     },
@@ -92,7 +99,9 @@ enum Command {
         image: BgraImage,
         path: PathBuf,
         region: Rect,
+        label: Option<String>,
     },
+    CopyFiles(Vec<PathBuf>),
 }
 
 /// Handle to the overlay thread.
@@ -152,12 +161,24 @@ impl Overlay {
 
     /// Shows the preview for a saved file (e.g. a video and its last
     /// frame) on the monitor of `region`.
-    pub fn show_file_preview(&self, image: BgraImage, path: PathBuf, region: Rect) {
+    pub fn show_file_preview(
+        &self,
+        image: BgraImage,
+        path: PathBuf,
+        region: Rect,
+        label: Option<String>,
+    ) {
         self.send(Command::ShowFile {
             image,
             path,
             region,
+            label,
         });
+    }
+
+    /// Puts files on the clipboard, to paste them anywhere files go.
+    pub fn copy_files(&self, files: Vec<PathBuf>) {
+        self.send(Command::CopyFiles(files));
     }
 
     /// Puts `image` on the clipboard (with transparency).

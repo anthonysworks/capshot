@@ -252,7 +252,12 @@ fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task) -> u64 {
                 let image = thumbnail.as_deref().and_then(take_thumbnail);
                 if let (Some(image), Some(service)) = (image, app.try_state::<CaptureService>()) {
                     // Primary monitor.
-                    service.show_file_preview(image, request.output.clone(), Rect::new(0, 0, 1, 1));
+                    service.show_file_preview(
+                        image,
+                        request.output.clone(),
+                        Rect::new(0, 0, 1, 1),
+                        None,
+                    );
                 }
             }
             Ok(_) => report(0.0, None, None, Some("unexpected reply".into())),

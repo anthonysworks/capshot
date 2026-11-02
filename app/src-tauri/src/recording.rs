@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use kadra_core::{RecordingFormat, Rect};
+use kadra_core::{AfterCapture, RecordingFormat, Rect};
 use tauri::{AppHandle, Manager};
 
 use crate::capture::CaptureService;
@@ -71,6 +71,9 @@ pub fn toggle(app: &AppHandle) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Choices {
     pub format: RecordingFormat,
+    /// Frame rate for `format`.
+    pub fps: u32,
+    pub countdown_secs: u32,
     pub system_audio: bool,
     pub microphone: bool,
 }
@@ -97,15 +100,11 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
             tracing::error!("cannot create {}: {err}", dir.display());
         }
         let stem = kadra_encode::file_stem(kadra_encode::now());
-        let countdown = Duration::from_secs(u64::from(config.recording.countdown_secs));
+        let countdown = Duration::from_secs(u64::from(choices.countdown_secs));
         let extension = if gif { "gif" } else { "mp4" };
         let options = HostOptions {
             region: [region.left, region.top, region.right, region.bottom],
-            fps: if gif {
-                config.gif.fps
-            } else {
-                config.recording.fps
-            },
+            fps: choices.fps,
             codec: config.recording.codec,
             quality: config.recording.quality,
             capture_cursor: config.recording.capture_cursor,
@@ -138,6 +137,11 @@ fn remember(app: &AppHandle, choices: Choices) {
     let mut config = app_state.config();
     let current = Choices {
         format: config.recording.format,
+        fps: match choices.format {
+            RecordingFormat::Mp4 => config.recording.fps,
+            RecordingFormat::Gif => config.gif.fps,
+        },
+        countdown_secs: config.recording.countdown_secs,
         system_audio: config.recording.system_audio,
         microphone: config.recording.microphone,
     };
@@ -145,6 +149,11 @@ fn remember(app: &AppHandle, choices: Choices) {
         return;
     }
     config.recording.format = choices.format;
+    match choices.format {
+        RecordingFormat::Mp4 => config.recording.fps = choices.fps,
+        RecordingFormat::Gif => config.gif.fps = choices.fps,
+    }
+    config.recording.countdown_secs = choices.countdown_secs;
     config.recording.system_audio = choices.system_audio;
     config.recording.microphone = choices.microphone;
     if let Err(err) = config.save(&app_state.paths().config_file()) {
@@ -273,9 +282,30 @@ pub fn stop(app: &AppHandle) {
             let seconds = duration_ms as f64 / 1000.0;
             tracing::info!(path = %path.display(), frames, dropped, seconds, "recording saved");
             crate::capture::remember(&app, &path, width, height);
-            let preview = app.state::<AppState>().config().capture.show_preview;
-            if preview && let (Some(image), Some(service)) = (image, service(&app)) {
-                service.show_file_preview(image, path, region);
+            let (after, copy) = {
+                let state = app.state::<AppState>();
+                let config = state.config();
+                (
+                    config.capture.after_capture,
+                    config.capture.copy_to_clipboard,
+                )
+            };
+            if after == AfterCapture::Editor {
+                crate::editor::open(&app, &path);
+                return;
+            }
+            let Some(service) = service(&app) else {
+                return;
+            };
+            // Pasted as a file: into Explorer, a chat, a mail.
+            if copy {
+                service.copy_files(vec![path.clone()]);
+            }
+            if after == AfterCapture::Preview
+                && let Some(image) = image
+            {
+                let label = copy.then(|| "Copied to the clipboard".to_owned());
+                service.show_file_preview(image, path, region, label);
             }
         }
         Ok(other) => tracing::error!("unexpected recorder event {other:?}"),

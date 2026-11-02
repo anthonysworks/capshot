@@ -78,7 +78,8 @@ pub fn icon(button: Button, on: bool) -> char {
         Button::Mode(Mode::Screen) => '\u{E7F4}',
         Button::Mode(Mode::Picker) => '\u{EF3C}',
         // Drawn as text instead.
-        Button::Gif => ' ',
+        Button::Gif | Button::Fps => ' ',
+        Button::Countdown => '\u{E916}',
         Button::SystemAudio if on => '\u{E767}',
         Button::SystemAudio => '\u{E74F}',
         Button::Microphone if on => '\u{E720}',
@@ -116,6 +117,9 @@ pub struct Scene<'a> {
     pub purpose: Purpose,
     /// Recording toggles.
     pub format: RecordingFormat,
+    /// Frame rate of the current format and countdown, in seconds.
+    pub fps: u32,
+    pub countdown: u32,
     pub system_audio: bool,
     pub microphone: bool,
 }
@@ -492,6 +496,29 @@ impl Renderer {
                 self.text("GIF", &label, rect_f(rect), colour);
                 continue;
             }
+            if button == Button::Fps {
+                let label = self.format(Font::Label, 12.0 * s)?;
+                self.text(&format!("{} fps", scene.fps), &label, rect_f(rect), WHITE);
+                continue;
+            }
+            if button == Button::Countdown {
+                // Stopwatch glyph on the left, seconds on the right.
+                let mut glyph = rect_f(rect);
+                glyph.right = glyph.left + 22.0 * s;
+                glyph.left += 4.0 * s;
+                let colour = if scene.countdown == 0 { DIMMED } else { WHITE };
+                self.text(
+                    "\u{E916}",
+                    &self.format(Font::Icon, 14.0 * s)?,
+                    glyph,
+                    colour,
+                );
+                let mut value = rect_f(rect);
+                value.left += 20.0 * s;
+                let label = self.format(Font::Label, 12.0 * s)?;
+                self.text(&format!("{}s", scene.countdown), &label, value, colour);
+                continue;
+            }
             let colour = match (active, toggle) {
                 (true, _) => BLACK,
                 (_, Some(false)) => MUTED,
@@ -627,6 +654,8 @@ impl Renderer {
                     Purpose::Recording
                 },
                 format: RecordingFormat::Mp4,
+                fps: 60,
+                countdown: 3,
                 system_audio: true,
                 microphone: false,
             };
