@@ -316,6 +316,8 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    /// Windows whose paint request arrived while `STATE` was borrowed.
+    static MISSED_PAINTS: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
 }
 
 fn lparam_point(lparam: LPARAM) -> Point {
@@ -420,8 +422,8 @@ impl State {
                             }
                         }
                         Command::ShowIndicator { region, countdown } => {
-                            let (monitor, _, scale) = monitor_of(region);
-                            self.indicator.show(region, monitor, scale, countdown);
+                            let (_, work, scale) = monitor_of(region);
+                            self.indicator.show(region, work, scale, countdown);
                         }
                         Command::IndicatorRunning => self.indicator.running(),
                         Command::IndicatorPaused(paused) => self.indicator.set_paused(paused),
@@ -904,8 +906,31 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             state.handle(msg, wparam, lparam)
         }
     });
+    if let Some(result) = handled {
+        repaint_missed();
+        return result;
+    }
+    if msg == WM_PAINT && STATE.with(|state| state.try_borrow_mut().is_err()) {
+        // Re-entrant paint, e.g. while COM pumps messages during a call made
+        // from a handler: the default handling would mark the window as
+        // painted without drawing it, leaving it blank for good. Paint it
+        // once the state is available again.
+        MISSED_PAINTS.with(|missed| missed.borrow_mut().push(hwnd.0 as isize));
+        // SAFETY: our own window; avoids an endless stream of WM_PAINT.
+        let _ = unsafe { ValidateRect(Some(hwnd), None) };
+        return LRESULT(0);
+    }
     // SAFETY: forwarding the original arguments.
-    handled.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Requests a new paint of the windows whose paint was missed.
+fn repaint_missed() {
+    let missed = MISSED_PAINTS.with(|missed| std::mem::take(&mut *missed.borrow_mut()));
+    for hwnd in missed {
+        // SAFETY: invalidating a window of this thread (a stale handle fails).
+        let _ = unsafe { InvalidateRect(Some(HWND(hwnd as *mut _)), None, true) };
+    }
 }
 
 /// Thread entry point. Reports the window handle (or an error) through
