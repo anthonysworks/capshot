@@ -103,12 +103,23 @@ export const editorRead = (path: string) => invoke<ArrayBuffer>("editor_read", {
 export const editorSave = (path: string, png: Uint8Array) =>
   invoke<void>("editor_save", png, { headers: { "x-path": encodeURIComponent(path) } });
 
+/** Saves an edited image as a new file next to the original; resolves to its path. */
+export const editorSaveCopy = (path: string, png: Uint8Array) =>
+  invoke<string>("editor_save_copy", png, { headers: { "x-path": encodeURIComponent(path) } });
+
 /** Copies an edited image (PNG bytes) to the clipboard. */
 export const editorCopy = (png: Uint8Array) => invoke<void>("editor_copy", png);
 
+/** Edits made in the video editor (times in seconds, crop in video pixels). */
+export interface VideoEdit {
+  segments: [number, number][];
+  speed: number;
+  crop: [number, number, number, number] | null;
+}
+
 export type ExportTask =
-  | { kind: "mp4"; start: number; end: number | null; audio: boolean }
-  | { kind: "gif"; gif: Config["gif"]; range: [number, number] | null };
+  | { kind: "mp4"; edit: VideoEdit; audio: boolean; quality: number | null }
+  | { kind: "gif"; gif: Config["gif"]; edit: VideoEdit | null };
 
 /** Exports part of a video; resolves to the job id. */
 export const editorExport = (path: string, task: ExportTask) =>

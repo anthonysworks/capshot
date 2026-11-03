@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use kadra_core::{GifSettings, Rect};
-use kadra_record::{GifOptions, TrimOptions, trim_video, video_to_gif};
+use kadra_record::{GifOptions, TrimOptions, VideoEdit, trim_video, video_to_gif};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -33,18 +33,44 @@ pub const VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "wmv", "avi", "mkv
 /// visible detail.
 const EDIT_QUALITY: u8 = 18;
 
-/// What to do with the input video. Times are in seconds.
+/// Edits made in the video editor. Times are in seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Edit {
+    /// Parts kept, in order.
+    pub segments: Vec<(f64, f64)>,
+    /// 2.0 plays twice as fast.
+    pub speed: f64,
+    /// `[x, y, width, height]` in video pixels.
+    pub crop: Option<[i32; 4]>,
+}
+
+impl Edit {
+    fn segments(&self) -> Vec<(Duration, Duration)> {
+        self.segments
+            .iter()
+            .map(|&(a, b)| (seconds(a), seconds(b)))
+            .collect()
+    }
+
+    fn crop(&self) -> Option<Rect> {
+        self.crop.map(|[x, y, w, h]| Rect::from_size(x, y, w, h))
+    }
+}
+
+/// What to do with the input video.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Task {
     Gif {
         gif: GifSettings,
-        range: Option<(f64, f64)>,
+        /// `None`: the whole video.
+        edit: Option<Edit>,
     },
     Mp4 {
-        start: f64,
-        end: Option<f64>,
+        edit: Edit,
         audio: bool,
+        /// 0 (best) – 51 (smallest).
+        quality: Option<u8>,
     },
 }
 
@@ -123,7 +149,7 @@ pub fn run_host() -> i32 {
         true
     };
     let result = match &request.task {
-        Task::Gif { gif, range } => video_to_gif(
+        Task::Gif { gif, edit } => video_to_gif(
             &request.input,
             &request.output,
             gif.fps,
@@ -134,18 +160,27 @@ pub fn run_host() -> i32 {
                 repeat: gif.repeat,
                 tolerance: 0,
             },
-            range.map(|(a, b)| (seconds(a), seconds(b))),
+            &edit.as_ref().map_or_else(VideoEdit::whole, |e| VideoEdit {
+                segments: e.segments(),
+                speed: e.speed,
+                crop: e.crop(),
+            }),
             &mut progress,
         )
         .map(|c| (c.summary.width, c.summary.height, c.thumbnail)),
-        Task::Mp4 { start, end, audio } => trim_video(
+        Task::Mp4 {
+            edit,
+            audio,
+            quality,
+        } => trim_video(
             &request.input,
             &request.output,
             &TrimOptions {
-                start: seconds(*start),
-                end: end.map(seconds),
+                segments: edit.segments(),
                 audio: *audio,
-                quality: EDIT_QUALITY,
+                quality: quality.unwrap_or(EDIT_QUALITY).min(51),
+                speed: edit.speed,
+                crop: edit.crop(),
             },
             &mut progress,
         )
@@ -190,7 +225,7 @@ fn output_for(input: &Path, suffix: &str, extension: &str) -> PathBuf {
 pub fn to_gif(app: &AppHandle, input: PathBuf) -> u64 {
     let gif = app.state::<AppState>().config().gif.clone();
     let output = output_for(&input, "", "gif");
-    start(app, input, output, Task::Gif { gif, range: None })
+    start(app, input, output, Task::Gif { gif, edit: None })
 }
 
 /// Exports part of a video edited in the editor.
@@ -317,16 +352,15 @@ mod tests {
 
     #[test]
     fn tasks_are_tagged() {
-        let json = serde_json::to_string(&Task::Mp4 {
-            start: 1.5,
-            end: None,
-            audio: false,
-        })
+        let task: Task = serde_json::from_str(
+            r#"{"kind":"mp4","edit":{"segments":[[0,1.5],[3,4]],"speed":2,"crop":[10,20,300,200]},"audio":false,"quality":null}"#,
+        )
         .unwrap();
-        assert_eq!(
-            json,
-            r#"{"kind":"mp4","start":1.5,"end":null,"audio":false}"#
-        );
+        let Task::Mp4 { edit, .. } = task else {
+            panic!("expected an MP4 task");
+        };
+        assert_eq!(edit.segments().len(), 2);
+        assert_eq!(edit.crop(), Some(Rect::new(10, 20, 310, 220)));
         let json = serde_json::to_string(&Event::Progress { done: 0.5 }).unwrap();
         assert_eq!(json, r#"{"event":"progress","done":0.5}"#);
     }

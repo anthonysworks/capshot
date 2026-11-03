@@ -112,6 +112,7 @@ pub fn run() {
             commands::show_in_folder,
             commands::editor_read,
             commands::editor_save,
+            commands::editor_save_copy,
             commands::editor_copy,
             commands::editor_export,
         ])

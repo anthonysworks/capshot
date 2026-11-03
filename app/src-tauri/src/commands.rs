@@ -155,6 +155,30 @@ pub fn editor_save(app: AppHandle, request: Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Saves an edited image (PNG body) as a new file next to the original,
+/// `<name> (edited).<ext>`; returns its path. The copy joins the history
+/// and can itself be edited.
+#[tauri::command]
+pub fn editor_save_copy(app: AppHandle, request: Request<'_>) -> Result<String, String> {
+    let original = header_path(&app, &request)?;
+    let image = kadra_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
+    let format = kadra_encode::format_of(&original).ok_or("unsupported image format")?;
+    let bytes = kadra_encode::encode(&image, format).map_err(|e| e.to_string())?;
+    let dir = original.parent().ok_or("no folder")?;
+    let stem = original
+        .file_stem()
+        .map_or_else(|| "capture".into(), |s| s.to_string_lossy().into_owned());
+    let extension = original
+        .extension()
+        .map_or_else(|| "png".into(), |e| e.to_string_lossy().into_owned());
+    let path = kadra_encode::unique_path(dir, &format!("{stem} (edited)"), &extension);
+    std::fs::write(&path, bytes).map_err(|e| format!("cannot save {}: {e}", path.display()))?;
+    tracing::info!(path = %path.display(), "edited copy saved");
+    app.state::<EditorFiles>().allow(&path);
+    crate::capture::remember(&app, &path, image.width(), image.height());
+    Ok(path.display().to_string())
+}
+
 /// Copies an edited image (PNG body) to the clipboard.
 #[tauri::command]
 pub fn editor_copy(app: AppHandle, request: Request<'_>) -> Result<(), String> {
