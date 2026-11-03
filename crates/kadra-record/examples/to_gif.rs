@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_width,
             ..GifOptions::default()
         },
-        None,
+        &kadra_record::VideoEdit::whole(),
         |done| {
             let percent = (done * 100.0) as u32;
             if percent / 25 != last / 25 {

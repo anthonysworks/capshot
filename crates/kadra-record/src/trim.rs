@@ -1,4 +1,5 @@
-//! Trimming a video: decode the kept range and encode it again.
+//! Editing a video: decode the kept segments and encode them again, one
+//! after the other, optionally faster or slower and cropped.
 //!
 //! Re-encoding (rather than copying compressed samples) makes the cut
 //! frame-accurate: a copy could only start on a key frame, possibly seconds
@@ -37,15 +38,55 @@ const AUDIO: u32 = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
 /// AAC at 192 kbit/s.
 const AAC_BYTES_PER_SECOND: u32 = 24_000;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TrimOptions {
-    pub start: Duration,
-    /// `None` keeps everything after `start`.
-    pub end: Option<Duration>,
-    /// Keep the sound track (if there is one).
+    /// Parts of the video to keep, in order (`Duration::MAX` as an end
+    /// means "until the end").
+    pub segments: Vec<(Duration, Duration)>,
+    /// Keep the sound track (if there is one). Ignored unless `speed` is 1.
     pub audio: bool,
     /// 0 (best) to 51 (smallest); edited videos default to a high quality.
     pub quality: u8,
+    /// Playback speed: 2.0 plays twice as fast.
+    pub speed: f64,
+    /// Area to keep, in pixels of the video; `None` keeps the whole frame.
+    pub crop: Option<Rect>,
+}
+
+impl TrimOptions {
+    /// The whole video, unchanged.
+    pub fn whole(audio: bool, quality: u8) -> Self {
+        Self {
+            segments: vec![(Duration::ZERO, Duration::MAX)],
+            audio,
+            quality,
+            speed: 1.0,
+            crop: None,
+        }
+    }
+
+    fn keeps_sound(&self) -> bool {
+        self.audio && (self.speed - 1.0).abs() < 1e-6
+    }
+}
+
+/// `crop` (relative to the visible frame) as an even-aligned area of the
+/// decoded frame.
+fn apply_crop(visible: Rect, crop: Option<Rect>) -> Rect {
+    let Some(crop) = crop else {
+        return visible;
+    };
+    let area = crop.offset(visible.left, visible.top).intersect(visible);
+    if area.width() < 2 || area.height() < 2 {
+        return visible;
+    }
+    let even = |v: i32| v & !1;
+    Rect::new(
+        even(area.left),
+        even(area.top),
+        even(area.left) + even(area.width()),
+        even(area.top) + even(area.height()),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -220,7 +261,8 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         nv12.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
         reader.SetCurrentMediaType(VIDEO, None, &nv12)?;
         let decoded = reader.GetCurrentMediaType(VIDEO)?;
-        let layout = layout(&decoded)?;
+        let mut layout = layout(&decoded)?;
+        layout.visible = apply_crop(layout.visible, options.crop);
         let fps = decoded
             .GetUINT64(&MF_MT_FRAME_RATE)
             .ok()
@@ -267,7 +309,7 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
             None,
         )?;
 
-        let audio_out = if options.audio && reader.SetStreamSelection(AUDIO, true).is_ok() {
+        let audio_out = if options.keeps_sound() && reader.SetStreamSelection(AUDIO, true).is_ok() {
             let pcm = MFCreateMediaType()?;
             pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
             pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
@@ -307,9 +349,8 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
     }
 }
 
-/// Writes the part of `input` between `options.start` and `options.end` to
-/// `output` (H.264 + AAC MP4). `progress` receives the fraction done and
-/// returns `false` to cancel.
+/// Writes the kept segments of `input` to `output` (H.264 + AAC MP4).
+/// `progress` receives the fraction done and returns `false` to cancel.
 pub fn trim_video(
     input: &Path,
     output: &Path,
@@ -329,7 +370,29 @@ pub fn trim_video(
     result
 }
 
+/// Segments clipped to the video and in 100 ns units, in order.
+fn clip_segments(segments: &[(Duration, Duration)], duration: Duration) -> Vec<(i64, i64)> {
+    let limit = if duration.is_zero() {
+        i64::MAX
+    } else {
+        ticks(duration)
+    };
+    let mut out: Vec<(i64, i64)> = segments
+        .iter()
+        .map(|&(a, b)| (ticks(a).min(limit), ticks(b).min(limit)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 /// SAFETY: Media Foundation must be started.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
 unsafe fn run(
     input: &Path,
     output: &Path,
@@ -339,97 +402,106 @@ unsafe fn run(
     // SAFETY: Media Foundation calls with valid arguments.
     unsafe {
         let p = open(input, output, options)?;
-        let start = ticks(options.start);
-        let end = options
-            .end
-            .map_or(i64::MAX, ticks)
-            .min(if p.duration.is_zero() {
-                i64::MAX
-            } else {
-                ticks(p.duration)
-            });
-        if end <= start {
+        let segments = clip_segments(&options.segments, p.duration);
+        if segments.is_empty() {
             return Err(RecordError::EmptyRegion);
         }
-        if start > 0 {
+        let speed = if options.speed > 0.0 {
+            options.speed
+        } else {
+            1.0
+        };
+        let scale = |t: i64| (t as f64 / speed).round() as i64;
+        let total: i64 = segments
+            .iter()
+            .map(|(a, b)| (*b).min(ticks(p.duration).max(*a + 1)) - a)
+            .sum::<i64>()
+            .max(1);
+        p.writer.BeginWriting()?;
+
+        #[allow(clippy::cast_sign_loss)]
+        let any = MF_SOURCE_READER_ANY_STREAM.0 as u32;
+        let mut frames = 0u64;
+        // Output time where the current segment starts, and source time
+        // already written (for progress).
+        let mut offset = 0i64;
+        let mut done_before = 0i64;
+        for &(start, end) in &segments {
+            p.reader.SetStreamSelection(VIDEO, true)?;
+            if p.audio_out.is_some() {
+                p.reader.SetStreamSelection(AUDIO, true)?;
+            }
             // Lands on the key frame before `start`; earlier frames are
             // decoded and dropped below.
             p.reader
                 .SetCurrentPosition(&GUID::zeroed(), &PROPVARIANT::from(start))?;
-        }
-        p.writer.BeginWriting()?;
-
-        let span = (end.min(ticks(p.duration).max(start + 1)) - start).max(1);
-        let mut frames = 0u64;
-        let mut last_video = 0i64;
-        let (mut video_done, mut audio_done) = (false, p.audio_out.is_none());
-        #[allow(clippy::cast_sign_loss)]
-        let any = MF_SOURCE_READER_ANY_STREAM.0 as u32;
-        while !(video_done && audio_done) {
-            let (mut index, mut flags, mut time) = (0u32, 0u32, 0i64);
-            let mut sample: Option<IMFSample> = None;
-            p.reader.ReadSample(
-                any,
-                0,
-                Some(&mut index),
-                Some(&mut flags),
-                Some(&mut time),
-                Some(&mut sample),
-            )?;
-            #[allow(clippy::cast_sign_loss)]
-            let has = |flag: i32| flags & flag as u32 != 0;
-            if has(MF_SOURCE_READERF_ERROR.0) {
-                return Err(RecordError::Windows(windows::core::Error::empty()));
-            }
-            let is_video = !is_audio_index(&p.reader, index);
-            let finished = has(MF_SOURCE_READERF_ENDOFSTREAM.0) || time >= end;
-            if finished {
+            let (mut video_done, mut audio_done) = (false, p.audio_out.is_none());
+            let mut segment_end = 0i64;
+            while !(video_done && audio_done) {
+                let (mut index, mut flags, mut time) = (0u32, 0u32, 0i64);
+                let mut sample: Option<IMFSample> = None;
+                p.reader.ReadSample(
+                    any,
+                    0,
+                    Some(&mut index),
+                    Some(&mut flags),
+                    Some(&mut time),
+                    Some(&mut sample),
+                )?;
+                #[allow(clippy::cast_sign_loss)]
+                let has = |flag: i32| flags & flag as u32 != 0;
+                if has(MF_SOURCE_READERF_ERROR.0) {
+                    return Err(RecordError::Windows(windows::core::Error::empty()));
+                }
+                let is_video = !is_audio_index(&p.reader, index);
+                if has(MF_SOURCE_READERF_ENDOFSTREAM.0) || time >= end {
+                    if is_video {
+                        video_done = true;
+                    } else {
+                        audio_done = true;
+                    }
+                    // Stop reading a stream that is past the end.
+                    let _ = p.reader.SetStreamSelection(index, false);
+                    continue;
+                }
+                let Some(sample) = sample else {
+                    continue;
+                };
+                let duration = sample.GetSampleDuration().unwrap_or(0);
+                if time + duration <= start {
+                    continue;
+                }
+                let at = offset + scale((time - start).max(0));
                 if is_video {
-                    video_done = true;
-                } else {
-                    audio_done = true;
+                    let out = crop_nv12(&sample, p.layout)?;
+                    out.SetSampleTime(at)?;
+                    out.SetSampleDuration(scale(duration))?;
+                    p.writer.WriteSample(p.video_out, &out)?;
+                    frames += 1;
+                    segment_end = segment_end.max(at + scale(duration));
+                    let done = (done_before + (time - start).max(0)) as f64 / total as f64;
+                    if !progress(done.min(1.0) as f32) {
+                        return Err(RecordError::Cancelled);
+                    }
+                } else if let Some(stream) = p.audio_out {
+                    sample.SetSampleTime(at)?;
+                    p.writer.WriteSample(stream, &sample)?;
                 }
-                // Stop reading a stream that is past the end.
-                let _ = p.reader.SetStreamSelection(index, false);
-                continue;
             }
-            let Some(sample) = sample else {
-                continue;
-            };
-            let duration = sample.GetSampleDuration().unwrap_or(0);
-            if time + duration <= start {
-                continue;
-            }
-            let at = (time - start).max(0);
-            if is_video {
-                let out = crop_nv12(&sample, p.layout)?;
-                out.SetSampleTime(at)?;
-                out.SetSampleDuration(duration)?;
-                p.writer.WriteSample(p.video_out, &out)?;
-                frames += 1;
-                last_video = at + duration;
-                #[allow(clippy::cast_precision_loss)]
-                let done = (at as f64 / span as f64).min(1.0);
-                #[allow(clippy::cast_possible_truncation)]
-                if !progress(done as f32) {
-                    return Err(RecordError::Cancelled);
-                }
-            } else if let Some(stream) = p.audio_out {
-                sample.SetSampleTime(at)?;
-                p.writer.WriteSample(stream, &sample)?;
-            }
+            done_before += end.min(ticks(p.duration).max(start + 1)) - start;
+            // The next segment follows the last frame written.
+            offset = offset.max(segment_end);
         }
         if frames == 0 {
             return Err(RecordError::EmptyRegion);
         }
         p.writer.Finalize()?;
         progress(1.0);
-        #[allow(clippy::cast_sign_loss)]
         Ok(TrimStats {
             width: p.layout.visible.width() as u32,
             height: p.layout.visible.height() as u32,
             frames,
-            duration: Duration::from_nanos(last_video as u64 * 100),
+            duration: Duration::from_nanos(offset as u64 * 100),
         })
     }
 }
@@ -442,5 +514,42 @@ fn is_audio_index(reader: &IMFSourceReader, index: u32) -> bool {
             .GetCurrentMediaType(index)
             .and_then(|t| t.GetGUID(&MF_MT_MAJOR_TYPE))
             .is_ok_and(|major| major == MFMediaType_Audio)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: f64) -> Duration {
+        Duration::from_secs_f64(v)
+    }
+
+    #[test]
+    fn segments_are_clipped_and_sorted() {
+        let clipped = clip_segments(
+            &[(s(5.0), s(9.0)), (s(1.0), s(2.0)), (s(3.0), s(3.0))],
+            s(8.0),
+        );
+        assert_eq!(
+            clipped,
+            vec![(10_000_000, 20_000_000), (50_000_000, 80_000_000)]
+        );
+        assert_eq!(
+            clip_segments(&[(Duration::ZERO, Duration::MAX)], s(2.0)),
+            vec![(0, 20_000_000)]
+        );
+    }
+
+    #[test]
+    fn crop_is_even_and_inside_the_frame() {
+        let visible = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(apply_crop(visible, None), visible);
+        assert_eq!(
+            apply_crop(visible, Some(Rect::new(101, 51, 600, 2000))),
+            Rect::new(100, 50, 598, 1078)
+        );
+        // Degenerate crops keep the whole frame.
+        assert_eq!(apply_crop(visible, Some(Rect::new(5, 5, 6, 6))), visible);
     }
 }

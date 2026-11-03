@@ -225,78 +225,133 @@ pub struct Conversion {
     pub thumbnail: Option<BgraImage>,
 }
 
-/// Converts the video at `input` into a GIF at `output`, sampled at `fps`.
-/// `progress` receives the fraction done (0–1) and returns `false` to
-/// cancel.
+/// Which parts of a video to keep and how (see [`video_to_gif`]).
+#[derive(Debug, Clone)]
+pub struct VideoEdit {
+    /// Parts to keep, in order (`Duration::MAX` as an end: until the end).
+    pub segments: Vec<(Duration, Duration)>,
+    /// Playback speed: 2.0 plays twice as fast.
+    pub speed: f64,
+    /// Area to keep, in pixels of the video.
+    pub crop: Option<Rect>,
+}
+
+impl VideoEdit {
+    pub fn whole() -> Self {
+        Self {
+            segments: vec![(Duration::ZERO, Duration::MAX)],
+            speed: 1.0,
+            crop: None,
+        }
+    }
+}
+
+/// Converts the kept parts of the video at `input` into a GIF at
+/// `output`, sampled at `fps`. `progress` receives the fraction done
+/// (0–1) and returns `false` to cancel.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn video_to_gif(
     input: &Path,
     output: &Path,
     fps: u32,
     options: GifOptions,
-    range: Option<(Duration, Duration)>,
+    edit: &VideoEdit,
     mut progress: impl FnMut(f32) -> bool,
 ) -> Result<Conversion> {
     let fps = fps.clamp(1, kadra_gif::MAX_FPS);
+    let speed = if edit.speed > 0.0 { edit.speed } else { 1.0 };
     let mut decoder = VideoDecoder::open(input)?;
-    let (from, until) = range.unwrap_or((Duration::ZERO, Duration::MAX));
-    if !from.is_zero() {
-        decoder.seek(from)?;
-    }
     let (w, h) = decoder.size();
+    #[allow(clippy::cast_possible_wrap)]
+    let frame_rect = Rect::new(0, 0, w as i32, h as i32);
+    let crop = edit
+        .crop
+        .map(|c| c.intersect(frame_rect))
+        .filter(|c| c.width() >= 2 && c.height() >= 2);
+    let (out_w, out_h) = crop.map_or((w, h), |c| (c.width() as u32, c.height() as u32));
     let options = GifOptions {
         // Ignore compression noise.
         tolerance: options.tolerance.max(VIDEO_TOLERANCE),
         ..options
     };
-    let mut writer = GifWriter::create(output, w, h, options)?;
-    let total = decoder.duration().min(until).saturating_sub(from);
-    let mut origin = None;
-    let mut last_slot = None;
-    let mut end = Duration::ZERO;
-    let mut last = None;
+    let mut writer = GifWriter::create(output, out_w, out_h, options)?;
 
-    while let Some((frame, at)) = decoder.next_frame()? {
-        if at >= until {
-            break;
-        }
-        // Seeking lands on the key frame before `from`.
-        if at < from {
-            continue;
-        }
-        // Timestamps may not start at zero.
-        let at = at.saturating_sub(*origin.get_or_insert(if from.is_zero() { at } else { from }));
-        end = end.max(at);
-        // Keep the first frame of each 1/fps slot.
-        let slot = at.as_nanos() * u128::from(fps) / 1_000_000_000;
-        if last_slot.is_some_and(|last| slot <= last) {
-            continue;
-        }
-        last_slot = Some(slot);
-        let time = Duration::from_nanos(
-            u64::try_from(slot * 1_000_000_000 / u128::from(fps)).unwrap_or(u64::MAX),
-        );
-        writer.push(&frame, time)?;
-        last = Some(frame);
-        #[allow(clippy::cast_possible_truncation)]
-        let done = if total.is_zero() {
-            0.0
-        } else {
-            (at.as_secs_f64() / total.as_secs_f64()).min(1.0) as f32
-        };
-        if !progress(done) {
-            drop(writer);
-            let _ = std::fs::remove_file(output);
-            return Err(RecordError::Cancelled);
-        }
-    }
-    // The last frame lasts one source frame interval at most; use the
-    // container duration when it is known.
-    let end = if total > end {
-        total
+    let duration = decoder.duration();
+    let limit = if duration.is_zero() {
+        Duration::MAX
     } else {
-        end + Duration::from_secs(1) / fps
+        duration
     };
-    let summary = writer.finish(end)?;
+    let mut segments: Vec<(Duration, Duration)> = edit
+        .segments
+        .iter()
+        .map(|&(a, b)| (a.min(limit), b.min(limit)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    segments.sort_unstable();
+    let total: f64 = segments
+        .iter()
+        .map(|(a, b)| (b.min(&duration.max(*a)).saturating_sub(*a)).as_secs_f64())
+        .sum::<f64>()
+        .max(1e-3);
+
+    let mut offset = Duration::ZERO;
+    let mut done_before = 0.0;
+    let mut last_slot = None;
+    let mut last = None;
+    for (index, &(start, end)) in segments.iter().enumerate() {
+        if index > 0 || !start.is_zero() {
+            decoder.seek(start)?;
+        }
+        let mut segment_last = start;
+        while let Some((frame, at)) = decoder.next_frame()? {
+            if at >= end {
+                break;
+            }
+            // Seeking lands on the key frame before `start`.
+            if at < start {
+                continue;
+            }
+            segment_last = at;
+            let into = at.saturating_sub(start);
+            let time = offset + into.div_f64(speed);
+            // Keep the first frame of each 1/fps slot.
+            let slot = time.as_nanos() * u128::from(fps) / 1_000_000_000;
+            if last_slot.is_some_and(|last| slot <= last) {
+                continue;
+            }
+            last_slot = Some(slot);
+            let time = Duration::from_nanos(
+                u64::try_from(slot * 1_000_000_000 / u128::from(fps)).unwrap_or(u64::MAX),
+            );
+            let frame = match crop {
+                Some(c) => frame.crop(c),
+                None => frame,
+            };
+            writer.push(&frame, time)?;
+            last = Some(frame);
+            let done = (done_before + into.as_secs_f64()) / total;
+            if !progress(done.min(1.0) as f32) {
+                drop(writer);
+                let _ = std::fs::remove_file(output);
+                return Err(RecordError::Cancelled);
+            }
+        }
+        // A segment lasts until its end (or the end of the video), which
+        // also gives the last frame its duration.
+        let real_end = if end == Duration::MAX || end > duration {
+            if duration.is_zero() {
+                segment_last + Duration::from_secs(1) / fps
+            } else {
+                duration
+            }
+        } else {
+            end
+        };
+        done_before += real_end.saturating_sub(start).as_secs_f64();
+        offset += real_end.saturating_sub(start).div_f64(speed);
+    }
+    let summary = writer.finish(offset)?;
     progress(1.0);
     Ok(Conversion {
         summary,
