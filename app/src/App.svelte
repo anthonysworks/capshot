@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    type AfterCapture,
     type AppInfo,
     type Config,
     FPS_MAX,
@@ -28,6 +29,16 @@
   let status = $state<{ kind: "ok" | "error"; text: string } | null>(null);
   let saving = $state(false);
   let conversions = $state<JobProgress[]>([]);
+
+  const AFTER: { value: AfterCapture; title: string; text: string }[] = [
+    { value: "editor", title: "Open the editor", text: "Annotate or trim right away." },
+    {
+      value: "preview",
+      title: "Quick",
+      text: "Copied, with a thumbnail in the corner; click it to open the editor.",
+    },
+    { value: "nothing", title: "Silent", text: "Copied and saved, nothing on screen." },
+  ];
   let dragging = $state(false);
 
   const dirty = $derived(config !== null && JSON.stringify(config) !== saved);
@@ -78,12 +89,12 @@
   onConfigChanged((next) => {
     if (!config) return;
     const base = JSON.parse(saved) as Config;
-    base.recording.format = next.recording.format;
-    config.recording.format = next.recording.format;
-    for (const key of ["system_audio", "microphone"] as const) {
-      base.recording[key] = next.recording[key];
-      config.recording[key] = next.recording[key];
+    for (const key of ["format", "fps", "countdown_secs", "system_audio", "microphone"] as const) {
+      (base.recording as Record<string, unknown>)[key] = next.recording[key];
+      (config.recording as Record<string, unknown>)[key] = next.recording[key];
     }
+    base.gif.fps = next.gif.fps;
+    config.gif.fps = next.gif.fps;
     saved = JSON.stringify(base);
   });
 
@@ -115,6 +126,23 @@
       <h1>Settings</h1>
       {#if info}<span class="version">Kadra {info.version}</span>{/if}
     </header>
+
+    <section>
+      <h2>After a capture</h2>
+      <div class="modes" role="radiogroup" aria-label="After a capture">
+        {#each AFTER as mode (mode.value)}
+          <label class="mode" class:active={config.capture.after_capture === mode.value}>
+            <input type="radio" name="after" value={mode.value} bind:group={config.capture.after_capture} />
+            <strong>{mode.title}</strong>
+            <span>{mode.text}</span>
+          </label>
+        {/each}
+      </div>
+      <label class="row check">
+        <input type="checkbox" bind:checked={config.capture.copy_to_clipboard} />
+        <span>Copy to the clipboard (videos are copied as files, ready to paste in a chat or a folder)</span>
+      </label>
+    </section>
 
     <section>
       <h2>Shortcuts</h2>
@@ -151,20 +179,8 @@
         </select>
       </label>
       <label class="row check">
-        <input type="checkbox" bind:checked={config.capture.copy_to_clipboard} />
-        <span>Copy to clipboard</span>
-      </label>
-      <label class="row check">
         <input type="checkbox" bind:checked={config.capture.save_to_disk} />
         <span>Save to folder</span>
-      </label>
-      <label class="row">
-        <span>After a screenshot or a recording</span>
-        <select bind:value={config.capture.after_capture}>
-          <option value="editor">Open the editor</option>
-          <option value="preview">Quick: copy and show a thumbnail (click it to edit)</option>
-          <option value="nothing">Quick: copy only</option>
-        </select>
       </label>
       <div class="row">
         <input class="path" bind:value={config.capture.output_dir} aria-label="Screenshots folder" />
@@ -174,6 +190,17 @@
 
     <section>
       <h2>Recording</h2>
+      <p class="hint">
+        Format, frame rate, countdown, sound and microphone can also be changed on the capture toolbar
+        (Shift+Print Screen); the toolbar remembers your last choice.
+      </p>
+      <label class="row">
+        <span>Format</span>
+        <select bind:value={config.recording.format}>
+          <option value="mp4">MP4 video</option>
+          <option value="gif">Animated GIF</option>
+        </select>
+      </label>
       <div class="row">
         <span>Frame rate</span>
         <div class="fps">
@@ -237,7 +264,7 @@
 
     <section>
       <h2>GIF</h2>
-      <p class="hint">Turn on <strong>GIF</strong> in the recording toolbar (or press G) to record an animated GIF.</p>
+      <p class="hint">Turn on <strong>GIF</strong> in the recording toolbar (or press G) to record an animated GIF. These settings also apply to videos converted to GIF.</p>
       <div class="row">
         <span>Frame rate</span>
         <div class="fps">
@@ -290,6 +317,48 @@
           {/if}
         </div>
       {/each}
+    </section>
+
+    <section>
+      <h2>Keyboard</h2>
+      <details>
+        <summary>Capture toolbar</summary>
+        <dl>
+          <dt>Tab / V</dt><dd>Switch between screenshot and recording</dd>
+          <dt>R / F / S</dt><dd>Region, freeform, whole screen</dd>
+          <dt>I</dt><dd>Colour picker (click copies #RRGGBB)</dd>
+          <dt>C</dt><dd>Copy the colour under the cursor</dd>
+          <dt>G</dt><dd>Record a GIF instead of a video</dd>
+          <dt>A / M</dt><dd>System sound / microphone</dd>
+          <dt>Click, wheel</dt><dd>On "fps" and the stopwatch: frame rate and countdown</dd>
+          <dt>Arrows</dt><dd>Move the cursor by 1 px (10 px with Shift)</dd>
+          <dt>Enter / Esc</dt><dd>Capture what is highlighted / cancel</dd>
+        </dl>
+      </details>
+      <details>
+        <summary>Image editor</summary>
+        <dl>
+          <dt>V A L R E P</dt><dd>Select, arrow, line, rectangle, ellipse, pen</dd>
+          <dt>H T N</dt><dd>Highlighter, text, numbered step</dd>
+          <dt>S U B C</dt><dd>Spotlight, blur, pixelate, crop</dd>
+          <dt>Shift</dt><dd>While drawing: straight angles, squares and circles</dd>
+          <dt>Ctrl+Z / Ctrl+Y</dt><dd>Undo / redo</dd>
+          <dt>Ctrl+D, Delete, arrows</dt><dd>Duplicate, delete, nudge the selection</dd>
+          <dt>Ctrl+wheel, Space+drag</dt><dd>Zoom, pan (Ctrl+0 fits, Ctrl+1 is 100 %)</dd>
+          <dt>Ctrl+C / Ctrl+S / Ctrl+Shift+S</dt><dd>Copy, save, save as a copy</dd>
+        </dl>
+      </details>
+      <details>
+        <summary>Video editor</summary>
+        <dl>
+          <dt>Space, arrows</dt><dd>Play / pause, step one frame (one second with Shift)</dd>
+          <dt>S</dt><dd>Split at the playhead</dd>
+          <dt>Delete</dt><dd>Remove or restore the selected part</dd>
+          <dt>I / O</dt><dd>Start / end at the playhead</dd>
+          <dt>C</dt><dd>Crop the picture</dd>
+          <dt>Ctrl+Z / Ctrl+Y</dt><dd>Undo / redo</dd>
+        </dl>
+      </details>
     </section>
 
     <footer>
@@ -377,6 +446,57 @@
   .value {
     width: 5rem;
     color: var(--text-muted);
+  }
+  .modes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .mode {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--control);
+    cursor: pointer;
+  }
+  .mode input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .mode span {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .mode.active {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  details {
+    margin: 4px 0;
+  }
+  summary {
+    cursor: pointer;
+    padding: 4px 0;
+  }
+  dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 16px;
+    margin: 6px 0 10px 12px;
+    font-size: 13px;
+  }
+  dt {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  dd {
+    margin: 0;
   }
   .drop {
     display: flex;
