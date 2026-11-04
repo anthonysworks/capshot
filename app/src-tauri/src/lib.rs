@@ -115,6 +115,8 @@ pub fn run() {
             commands::editor_save_copy,
             commands::editor_copy,
             commands::editor_export,
+            commands::editor_copy_file,
+            commands::editor_video_sources,
         ])
         .build(tauri::generate_context!());
 

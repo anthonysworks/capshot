@@ -116,7 +116,16 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
             // starts exactly when it reaches zero.
             start_paused: !countdown.is_zero(),
             gif: gif.then(|| config.gif.clone()),
+            clean_output: None,
+            cursor_track: None,
         };
+        let mut options = options;
+        if !gif && config.recording.editable_cursor {
+            let (clean, track) = crate::editor::edit_files(app_state.paths(), &options.output);
+            crate::editor::prune_edit_files(app_state.paths());
+            options.clean_output = Some(clean);
+            options.cursor_track = Some(track);
+        }
         (options, countdown)
     };
 

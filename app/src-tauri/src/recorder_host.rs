@@ -45,6 +45,11 @@ pub struct HostOptions {
     pub start_paused: bool,
     /// Record a GIF with these settings instead of a video.
     pub gif: Option<GifSettings>,
+    /// Editing material: the video without cursor and the cursor track.
+    #[serde(default)]
+    pub clean_output: Option<PathBuf>,
+    #[serde(default)]
+    pub cursor_track: Option<PathBuf>,
 }
 
 /// Events sent back by the host.
@@ -138,6 +143,8 @@ pub fn run() -> i32 {
             repeat: gif.repeat,
             tolerance: 0,
         }),
+        clean_output: options.clean_output.clone(),
+        cursor_track: options.cursor_track.clone(),
     }) {
         Ok(recording) => recording,
         Err(err) => {

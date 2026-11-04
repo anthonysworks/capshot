@@ -138,6 +138,51 @@ pub fn open_capture(app: &AppHandle, path: &Path) {
     }
 }
 
+/// Where the editing material of `video` lives: the copy without cursor
+/// and the cursor track.
+pub fn edit_files(paths: &kadra_core::Paths, video: &Path) -> (PathBuf, PathBuf) {
+    let name = video
+        .file_name()
+        .map_or_else(|| "video".into(), |n| n.to_string_lossy().into_owned());
+    let dir = paths.edit_dir();
+    (
+        dir.join(format!("{name}.clean.mp4")),
+        dir.join(format!("{name}.cursor.json")),
+    )
+}
+
+/// Editing material that exists for `video`.
+pub fn existing_edit_files(paths: &kadra_core::Paths, video: &Path) -> Option<(PathBuf, PathBuf)> {
+    let (clean, track) = edit_files(paths, video);
+    (clean.is_file() && track.is_file()).then_some((clean, track))
+}
+
+/// Keeps the material of the most recent recordings only: it doubles the
+/// disk space a recording takes.
+pub fn prune_edit_files(paths: &kadra_core::Paths) {
+    const KEEP: usize = 30;
+    let dir = paths.edit_dir();
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        tracing::warn!("cannot create {}: {err}", dir.display());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut clean: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".clean.mp4"))
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .collect();
+    clean.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    for (_, path) in clean.into_iter().skip(KEEP) {
+        let track = PathBuf::from(path.to_string_lossy().replace(".clean.mp4", ".cursor.json"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(track);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

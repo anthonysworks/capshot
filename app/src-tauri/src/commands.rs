@@ -190,11 +190,65 @@ pub fn editor_copy(app: AppHandle, request: Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// Exports part of a video opened in the editor; returns the job id.
+/// Exports part of a video opened in the editor; returns the job id. With
+/// `copy`, the result goes to the clipboard once written.
 #[tauri::command]
-pub fn editor_export(app: AppHandle, path: String, task: Task) -> Result<u64, String> {
+pub fn editor_export(
+    app: AppHandle,
+    path: String,
+    task: Task,
+    copy: Option<bool>,
+) -> Result<u64, String> {
     let path = editable(&app, &path)?;
-    Ok(crate::convert::export(&app, path, task))
+    Ok(crate::convert::export(
+        &app,
+        path,
+        task,
+        copy.unwrap_or(false),
+    ))
+}
+
+/// Puts a file opened in the editor on the clipboard (pasted as a file).
+#[tauri::command]
+pub fn editor_copy_file(app: AppHandle, path: String) -> Result<(), String> {
+    let path = editable(&app, &path)?;
+    let service = app
+        .try_state::<CaptureService>()
+        .ok_or("the clipboard is unavailable")?;
+    service.copy_files(vec![path]);
+    Ok(())
+}
+
+/// What the video editor can use besides the video: the copy without
+/// cursor (playable) and the cursor track, when the recording kept them.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoSources {
+    clean: Option<String>,
+    track: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+pub fn editor_video_sources(app: AppHandle, path: String) -> Result<VideoSources, String> {
+    let path = editable(&app, &path)?;
+    let Some((clean, track)) =
+        crate::editor::existing_edit_files(app.state::<AppState>().paths(), &path)
+    else {
+        return Ok(VideoSources {
+            clean: None,
+            track: None,
+        });
+    };
+    if let Err(err) = app.asset_protocol_scope().allow_file(&clean) {
+        tracing::warn!("cannot play {}: {err}", clean.display());
+    }
+    let track = std::fs::read(&track)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    Ok(VideoSources {
+        clean: Some(clean.display().to_string()),
+        track,
+    })
 }
 
 /// Selects a file in Explorer. Only files Kadra created (listed in the

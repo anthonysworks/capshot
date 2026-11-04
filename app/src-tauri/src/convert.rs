@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use kadra_core::{GifSettings, Rect};
+use kadra_record::compose::Composition;
+use kadra_record::cursor::CursorTrack;
 use kadra_record::{GifOptions, TrimOptions, VideoEdit, trim_video, video_to_gif};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -42,6 +44,9 @@ pub struct Edit {
     pub speed: f64,
     /// `[x, y, width, height]` in video pixels.
     pub crop: Option<[i32; 4]>,
+    /// Overlays, cursor and click effects, aspect ratio.
+    #[serde(default)]
+    pub composition: Composition,
 }
 
 impl Edit {
@@ -79,6 +84,41 @@ struct Request {
     input: PathBuf,
     output: PathBuf,
     task: Task,
+    /// The recording without cursor and its cursor track, when kept.
+    #[serde(default)]
+    clean: Option<PathBuf>,
+    #[serde(default)]
+    track: Option<PathBuf>,
+}
+
+impl Request {
+    /// The video to read and the cursor track, given what the edit needs:
+    /// cursor effects read the copy without cursor. Without editing
+    /// material, cursor and click effects are dropped.
+    fn sources(&self, composition: &Composition) -> (PathBuf, Composition, Option<CursorTrack>) {
+        let mut composition = composition.clone();
+        let track = if composition.uses_track() {
+            self.track.as_deref().and_then(CursorTrack::load)
+        } else {
+            None
+        };
+        let clean = self.clean.as_ref().filter(|p| p.is_file());
+        match (&track, clean) {
+            (Some(_), Some(clean)) if composition.cursor.is_some() => {
+                (clean.clone(), composition, track)
+            }
+            (Some(_), _) => {
+                // Clicks can still be marked over the original cursor.
+                composition.cursor = None;
+                (self.input.clone(), composition, track)
+            }
+            (None, _) => {
+                composition.cursor = None;
+                composition.clicks = None;
+                (self.input.clone(), composition, None)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,42 +189,57 @@ pub fn run_host() -> i32 {
         true
     };
     let result = match &request.task {
-        Task::Gif { gif, edit } => video_to_gif(
-            &request.input,
-            &request.output,
-            gif.fps,
-            GifOptions {
-                max_width: gif.max_width,
-                quality: gif.quality,
-                dither: gif.dither,
-                repeat: gif.repeat,
-                tolerance: 0,
-            },
-            &edit.as_ref().map_or_else(VideoEdit::whole, |e| VideoEdit {
-                segments: e.segments(),
-                speed: e.speed,
-                crop: e.crop(),
-            }),
-            &mut progress,
-        )
-        .map(|c| (c.summary.width, c.summary.height, c.thumbnail)),
+        Task::Gif { gif, edit } => {
+            let (input, composition, track) = request.sources(
+                &edit
+                    .as_ref()
+                    .map(|e| e.composition.clone())
+                    .unwrap_or_default(),
+            );
+            video_to_gif(
+                &input,
+                &request.output,
+                gif.fps,
+                GifOptions {
+                    max_width: gif.max_width,
+                    quality: gif.quality,
+                    dither: gif.dither,
+                    repeat: gif.repeat,
+                    tolerance: 0,
+                },
+                &edit.as_ref().map_or_else(VideoEdit::whole, |e| VideoEdit {
+                    segments: e.segments(),
+                    speed: e.speed,
+                    crop: e.crop(),
+                    composition,
+                    track,
+                }),
+                &mut progress,
+            )
+            .map(|c| (c.summary.width, c.summary.height, c.thumbnail))
+        }
         Task::Mp4 {
             edit,
             audio,
             quality,
-        } => trim_video(
-            &request.input,
-            &request.output,
-            &TrimOptions {
-                segments: edit.segments(),
-                audio: *audio,
-                quality: quality.unwrap_or(EDIT_QUALITY).min(51),
-                speed: edit.speed,
-                crop: edit.crop(),
-            },
-            &mut progress,
-        )
-        .map(|stats| (stats.width, stats.height, None)),
+        } => {
+            let (input, composition, track) = request.sources(&edit.composition);
+            trim_video(
+                &input,
+                &request.output,
+                &TrimOptions {
+                    segments: edit.segments(),
+                    audio: *audio,
+                    quality: quality.unwrap_or(EDIT_QUALITY).min(51),
+                    speed: edit.speed,
+                    crop: edit.crop(),
+                    composition,
+                    track,
+                },
+                &mut progress,
+            )
+            .map(|stats| (stats.width, stats.height, None))
+        }
     };
     match result {
         Ok((width, height, thumbnail)) => {
@@ -225,23 +280,25 @@ fn output_for(input: &Path, suffix: &str, extension: &str) -> PathBuf {
 pub fn to_gif(app: &AppHandle, input: PathBuf) -> u64 {
     let gif = app.state::<AppState>().config().gif.clone();
     let output = output_for(&input, "", "gif");
-    start(app, input, output, Task::Gif { gif, edit: None })
+    start(app, input, output, Task::Gif { gif, edit: None }, false)
 }
 
 /// Exports part of a video edited in the editor.
-pub fn export(app: &AppHandle, input: PathBuf, task: Task) -> u64 {
+/// Exports part of a video edited in the editor; with `copy`, the result
+/// is put on the clipboard when done.
+pub fn export(app: &AppHandle, input: PathBuf, task: Task, copy: bool) -> u64 {
     let extension = match task {
         Task::Gif { .. } => "gif",
         Task::Mp4 { .. } => "mp4",
     };
     let output = output_for(&input, " (edited)", extension);
-    start(app, input, output, task)
+    start(app, input, output, task, copy)
 }
 
 /// Runs a job in the background; returns its id. Progress is reported
 /// with [`PROGRESS_EVENT`]; the result is added to the history and
 /// previewed.
-fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task) -> u64 {
+fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task, copy: bool) -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let job = NEXT.fetch_add(1, Ordering::Relaxed);
     let app = app.clone();
@@ -264,10 +321,14 @@ fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task) -> u64 {
             report(0.0, None, None, Some("not a video file".into()));
             return;
         }
+        let (clean, track) =
+            crate::editor::existing_edit_files(app.state::<AppState>().paths(), &input).unzip();
         let request = Request {
             input: input.clone(),
             output,
             task,
+            clean,
+            track,
         };
         match run_child(&request, |done| report(done, None, None, None)) {
             Ok(Event::Finished {
@@ -278,6 +339,9 @@ fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task) -> u64 {
                 let bytes = std::fs::metadata(&request.output).map_or(0, |m| m.len());
                 tracing::info!(path = %request.output.display(), bytes, "video job done");
                 crate::capture::remember(&app, &request.output, width, height);
+                if copy && let Some(service) = app.try_state::<CaptureService>() {
+                    service.copy_files(vec![request.output.clone()]);
+                }
                 report(
                     1.0,
                     Some(request.output.display().to_string()),
