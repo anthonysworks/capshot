@@ -14,11 +14,14 @@
 
 mod audio;
 mod clock;
+pub mod compose;
 mod convert;
+pub mod cursor;
 mod decode;
 mod encoder;
 mod pacer;
 mod source;
+pub mod stretch;
 mod trim;
 
 use std::path::PathBuf;
@@ -78,6 +81,11 @@ pub struct RecordOptions {
     /// Record an animated GIF instead of a video (no audio; the frame rate
     /// is capped at [`kadra_gif::MAX_FPS`]).
     pub gif: Option<GifOptions>,
+    /// Also write the video without the cursor here (same sound), for the
+    /// editor. Videos only.
+    pub clean_output: Option<PathBuf>,
+    /// Write the cursor positions, shapes and clicks here (JSON).
+    pub cursor_track: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,7 +173,10 @@ impl Recording {
                 run(
                     &options,
                     monitor,
-                    area,
+                    (
+                        area,
+                        Point::new(monitor_rect.left + area.left, monitor_rect.top + area.top),
+                    ),
                     &thread_stop,
                     &thread_clock,
                     &ready_tx,
@@ -287,10 +298,18 @@ fn ticks_to_duration(ticks: i64) -> Duration {
 }
 
 /// Recording thread body.
+/// The video without cursor written next to the main one.
+struct Clean {
+    source: source::Source,
+    converter: convert::Converter,
+    encoder: Arc<encoder::Encoder>,
+}
+
+#[allow(clippy::too_many_lines)]
 fn run(
     options: &RecordOptions,
     monitor: HMONITOR,
-    area: Rect,
+    (area, origin): (Rect, Point),
     stop: &AtomicBool,
     clock: &Arc<clock::Clock>,
     ready: &mpsc::SyncSender<Result<(u32, u32)>>,
@@ -317,10 +336,32 @@ fn run(
             bitrate = settings.bitrate(),
             "recording started"
         );
-        Ok((gpu, source, converter, encoder, fps, settings.codec))
+        // The copy without cursor is a bonus for the editor: recording goes
+        // on without it if it cannot be set up.
+        let clean = options.clean_output.as_ref().and_then(|path| {
+            let audio = options.system_audio || options.microphone;
+            let make = || -> Result<Clean> {
+                let source = source::Source::start(&gpu, monitor, fps, false)?;
+                let converter =
+                    convert::Converter::new(&gpu, source.latest(), source.size(), area, size, fps)?;
+                let encoder = encoder::Encoder::new(&gpu, path, &settings, audio)?;
+                Ok(Clean {
+                    source,
+                    converter,
+                    encoder: Arc::new(encoder),
+                })
+            };
+            make()
+                .inspect_err(|err| {
+                    tracing::warn!("no copy without cursor: {err}");
+                    let _ = std::fs::remove_file(path);
+                })
+                .ok()
+        });
+        Ok((gpu, source, converter, encoder, fps, settings.codec, clean))
     };
 
-    let (gpu, source, converter, encoder, fps, codec) = match setup() {
+    let (gpu, source, converter, encoder, fps, codec, clean) = match setup() {
         Ok(parts) => parts,
         Err(err) => {
             // The caller receives the actual error through `ready`.
@@ -343,13 +384,25 @@ fn run(
     let pace = pacer::Pacer::new(fps, Arc::clone(clock))?;
     let audio = (options.system_audio || options.microphone).then(|| {
         let encoder = Arc::clone(&encoder);
+        let clean = clean.as_ref().map(|c| Arc::clone(&c.encoder));
         audio::AudioCapture::start(
             options.system_audio,
             options.microphone,
             Arc::clone(clock),
-            Box::new(move |pcm, time, duration| encoder.write_audio(pcm, time, duration)),
+            Box::new(move |pcm, time, duration| {
+                if let Some(clean) = &clean
+                    && let Err(err) = clean.write_audio(pcm, time, duration)
+                {
+                    tracing::debug!("audio of the copy without cursor: {err}");
+                }
+                encoder.write_audio(pcm, time, duration)
+            }),
         )
     });
+    let mut tracker = options
+        .cursor_track
+        .as_ref()
+        .map(|_| cursor::CursorTracker::new(origin));
     let frame_ticks = encoder::TICKS_PER_SECOND / i64::from(fps);
     let mut frames = 0u64;
     let mut result = Ok(());
@@ -363,13 +416,26 @@ fn run(
             }
             pacer::Tick::Paused => continue,
         };
-        let frame = converter.convert().and_then(|texture| {
-            #[allow(clippy::cast_possible_wrap)]
-            encoder.write_video(&texture, index as i64 * frame_ticks, frame_ticks)
-        });
+        #[allow(clippy::cast_possible_wrap)]
+        let time = index as i64 * frame_ticks;
+        let frame = converter
+            .convert()
+            .and_then(|texture| encoder.write_video(&texture, time, frame_ticks));
         if let Err(err) = frame {
             result = Err(err);
             break;
+        }
+        if let Some(clean) = &clean
+            && let Err(err) = clean
+                .converter
+                .convert()
+                .and_then(|texture| clean.encoder.write_video(&texture, time, frame_ticks))
+        {
+            tracing::debug!("frame of the copy without cursor: {err}");
+        }
+        if let Some(tracker) = &mut tracker {
+            #[allow(clippy::cast_precision_loss)]
+            tracker.sample(index as f64 / f64::from(fps));
         }
         frames += 1;
     }
@@ -379,6 +445,20 @@ fn run(
         audio.stop();
     }
     let finished = encoder.finish();
+    if let Some(clean) = &clean {
+        if let Err(err) = clean.encoder.finish() {
+            tracing::warn!("cannot finish the copy without cursor: {err}");
+        }
+        tracing::debug!(
+            screen_updates = clean.source.frames(),
+            "copy without cursor written"
+        );
+    }
+    if let (Some(tracker), Some(path)) = (tracker, &options.cursor_track)
+        && let Err(err) = tracker.finish().save(path)
+    {
+        tracing::warn!("cannot save the cursor track: {err}");
+    }
     let thumbnail = source
         .read_area(&gpu, area)
         .map(|image| image.thumbnail(320, 200))

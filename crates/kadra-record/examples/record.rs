@@ -164,6 +164,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_paused: false,
         output: output.clone(),
         gif,
+        clean_output: std::env::var_os("KADRA_CLEAN").map(PathBuf::from),
+        cursor_track: std::env::var_os("KADRA_TRACK").map(PathBuf::from),
     })?;
     println!(
         "started in {:.0} ms, {:?}",

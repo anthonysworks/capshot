@@ -12,23 +12,27 @@ use std::time::Duration;
 use kadra_core::{Rect, VideoCodec};
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer2, IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
-    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_NUM_CHANNELS,
-    MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-    MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_ANY_STREAM, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
-    MF_VERSION, MF2DBuffer_LockFlags_Read, MFAudioFormat_AAC, MFAudioFormat_PCM,
-    MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video,
-    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoArea, MFVideoFormat_H264, MFVideoFormat_NV12,
-    eAVEncH264VProfile_High,
+    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
+    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_MPEG2_PROFILE,
+    MF_MT_SUBTYPE, MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ANY_STREAM,
+    MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MF2DBuffer_LockFlags_Read,
+    MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL,
+    MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoArea,
+    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoFormat_RGB32, eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::core::{GUID, HSTRING, Interface};
 
+use crate::compose::{Composer, Composition, to_nv12};
+use crate::cursor::CursorTrack;
+use crate::decode::rgb32_frame;
 use crate::encoder::{VideoSettings, video_type};
+use crate::stretch::{click_sound, mix_at, stretch};
 use crate::{RecordError, Result};
 
 #[allow(clippy::cast_sign_loss)]
@@ -51,6 +55,10 @@ pub struct TrimOptions {
     pub speed: f64,
     /// Area to keep, in pixels of the video; `None` keeps the whole frame.
     pub crop: Option<Rect>,
+    /// Drawn on the frames (overlays, cursor, clicks, canvas).
+    pub composition: Composition,
+    /// Cursor recorded with the video (needed for cursor and click effects).
+    pub track: Option<CursorTrack>,
 }
 
 impl TrimOptions {
@@ -62,11 +70,17 @@ impl TrimOptions {
             quality,
             speed: 1.0,
             crop: None,
+            composition: Composition::default(),
+            track: None,
         }
     }
 
     fn keeps_sound(&self) -> bool {
-        self.audio && (self.speed - 1.0).abs() < 1e-6
+        self.audio
+    }
+
+    fn click_sound(&self) -> bool {
+        self.composition.wants_click_sound() && self.track.is_some()
     }
 }
 
@@ -237,12 +251,19 @@ struct Pipeline {
     video_out: u32,
     /// Writer stream for the sound, if kept.
     audio_out: Option<u32>,
+    /// Sample rate and channels of the sound written.
+    audio_format: (u32, u32),
+    /// The source has no sound: the track is generated (click sounds).
+    synth_audio: bool,
+    /// Frames are decoded as RGB32 and composited.
+    composer: Option<Composer>,
     duration: Duration,
 }
 
 /// Opens the reader and the writer.
 ///
 /// SAFETY: Media Foundation must be started.
+#[allow(clippy::too_many_lines)]
 unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pipeline> {
     // SAFETY: Media Foundation calls with valid arguments.
     unsafe {
@@ -256,13 +277,39 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
         reader.SetStreamSelection(VIDEO, true)?;
 
-        let nv12 = MFCreateMediaType()?;
-        nv12.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-        nv12.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-        reader.SetCurrentMediaType(VIDEO, None, &nv12)?;
+        // Composited frames are decoded as RGB32; plain cuts stay in NV12.
+        let compose = !options.composition.is_empty();
+        let wanted = MFCreateMediaType()?;
+        wanted.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+        let subtype = if compose {
+            &MFVideoFormat_RGB32
+        } else {
+            &MFVideoFormat_NV12
+        };
+        wanted.SetGUID(&MF_MT_SUBTYPE, subtype)?;
+        reader.SetCurrentMediaType(VIDEO, None, &wanted)?;
         let decoded = reader.GetCurrentMediaType(VIDEO)?;
         let mut layout = layout(&decoded)?;
-        layout.visible = apply_crop(layout.visible, options.crop);
+        let cropped = apply_crop(layout.visible, options.crop);
+        let composer = compose.then(|| {
+            let visible = layout.visible;
+            #[allow(clippy::cast_sign_loss)]
+            let frame = (visible.width() as u32, visible.height() as u32);
+            Composer::new(
+                &options.composition,
+                options.track.clone(),
+                frame,
+                Some(cropped.offset(-visible.left, -visible.top)),
+            )
+        });
+        if composer.is_none() {
+            layout.visible = cropped;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let (out_w, out_h) = composer.as_ref().map_or(
+            (cropped.width() as u32, cropped.height() as u32),
+            Composer::output_size,
+        );
         let fps = decoded
             .GetUINT64(&MF_MT_FRAME_RATE)
             .ok()
@@ -290,10 +337,9 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
             None,
             &writer_attributes,
         )?;
-        #[allow(clippy::cast_sign_loss)]
         let settings = VideoSettings {
-            width: layout.visible.width() as u32,
-            height: layout.visible.height() as u32,
+            width: out_w & !1,
+            height: out_h & !1,
             fps,
             codec: VideoCodec::H264,
             quality: options.quality,
@@ -309,6 +355,7 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
             None,
         )?;
 
+        let mut audio_format = (48_000, 2);
         let audio_out = if options.keeps_sound() && reader.SetStreamSelection(AUDIO, true).is_ok() {
             let pcm = MFCreateMediaType()?;
             pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
@@ -324,10 +371,13 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
                     aac.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BYTES_PER_SECOND)?;
                     let stream = writer.AddStream(&aac)?;
                     writer.SetInputMediaType(stream, &current, None)?;
-                    Ok(stream)
+                    Ok((stream, rate, channels))
                 });
             match configured {
-                Ok(stream) => Some(stream),
+                Ok((stream, rate, channels)) => {
+                    audio_format = (rate, channels);
+                    Some(stream)
+                }
                 Err(err) => {
                     // AAC only takes 44.1/48 kHz, mono or stereo.
                     tracing::warn!("sound dropped: {err}");
@@ -338,12 +388,32 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         } else {
             None
         };
+        // No sound in the source but click sounds wanted: generate a track.
+        let mut synth_audio = false;
+        let audio_out = match audio_out {
+            None if options.click_sound() => {
+                let pcm = audio_type(&MFAudioFormat_PCM, 48_000, 2)?;
+                pcm.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4)?;
+                pcm.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 48_000 * 4)?;
+                let aac = audio_type(&MFAudioFormat_AAC, 48_000, 2)?;
+                aac.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BYTES_PER_SECOND)?;
+                let stream = writer.AddStream(&aac)?;
+                writer.SetInputMediaType(stream, &pcm, None)?;
+                synth_audio = true;
+                audio_format = (48_000, 2);
+                Some(stream)
+            }
+            other => other,
+        };
         Ok(Pipeline {
             reader,
             writer,
             layout,
             video_out,
             audio_out,
+            audio_format,
+            synth_audio,
+            composer,
             duration,
         })
     }
@@ -421,22 +491,40 @@ unsafe fn run(
 
         #[allow(clippy::cast_sign_loss)]
         let any = MF_SOURCE_READER_ANY_STREAM.0 as u32;
+        // The sound is rebuilt (time-stretched, clicks mixed in) rather
+        // than copied when the speed changes or clicks are heard.
+        let rebuild_audio = p.audio_out.is_some()
+            && !p.synth_audio
+            && ((speed - 1.0).abs() > 1e-6 || options.click_sound());
+        let clicks: Vec<f64> = if options.click_sound() {
+            options
+                .track
+                .as_ref()
+                .map_or_else(Vec::new, |t| t.clicks.iter().map(|c| c.t).collect())
+        } else {
+            Vec::new()
+        };
+        let click = click_sound(p.audio_format.0);
+        let (rate, channels) = (p.audio_format.0, p.audio_format.1 as usize);
         let mut frames = 0u64;
         // Output time where the current segment starts, and source time
         // already written (for progress).
         let mut offset = 0i64;
         let mut done_before = 0i64;
+        let mut segment_starts = Vec::with_capacity(segments.len());
         for &(start, end) in &segments {
+            segment_starts.push(offset);
             p.reader.SetStreamSelection(VIDEO, true)?;
-            if p.audio_out.is_some() {
+            if p.audio_out.is_some() && !p.synth_audio {
                 p.reader.SetStreamSelection(AUDIO, true)?;
             }
             // Lands on the key frame before `start`; earlier frames are
             // decoded and dropped below.
             p.reader
                 .SetCurrentPosition(&GUID::zeroed(), &PROPVARIANT::from(start))?;
-            let (mut video_done, mut audio_done) = (false, p.audio_out.is_none());
+            let (mut video_done, mut audio_done) = (false, p.audio_out.is_none() || p.synth_audio);
             let mut segment_end = 0i64;
+            let mut pcm: Vec<i16> = Vec::new();
             while !(video_done && audio_done) {
                 let (mut index, mut flags, mut time) = (0u32, 0u32, 0i64);
                 let mut sample: Option<IMFSample> = None;
@@ -473,7 +561,14 @@ unsafe fn run(
                 }
                 let at = offset + scale((time - start).max(0));
                 if is_video {
-                    let out = crop_nv12(&sample, p.layout)?;
+                    let out = match &p.composer {
+                        Some(composer) => {
+                            let frame = rgb32_frame(&sample, p.layout.coded, p.layout.visible)?;
+                            let rendered = composer.render(frame, time as f64 / 1e7);
+                            nv12_sample(&to_nv12(&rendered))?
+                        }
+                        None => crop_nv12(&sample, p.layout)?,
+                    };
                     out.SetSampleTime(at)?;
                     out.SetSampleDuration(scale(duration))?;
                     p.writer.WriteSample(p.video_out, &out)?;
@@ -483,26 +578,136 @@ unsafe fn run(
                     if !progress(done.min(1.0) as f32) {
                         return Err(RecordError::Cancelled);
                     }
+                } else if rebuild_audio {
+                    pcm.extend(read_pcm(&sample)?);
                 } else if let Some(stream) = p.audio_out {
                     sample.SetSampleTime(at)?;
                     p.writer.WriteSample(stream, &sample)?;
                 }
             }
+            if rebuild_audio && let Some(stream) = p.audio_out {
+                let mut out = stretch(&pcm, channels, rate, speed);
+                let here: Vec<f64> = clicks
+                    .iter()
+                    .filter(|&&t| t >= start as f64 / 1e7 && t < end as f64 / 1e7)
+                    .map(|&t| (t - start as f64 / 1e7) / speed)
+                    .collect();
+                mix_at(&mut out, channels, rate, &click, &here, 0.7);
+                write_pcm(&p.writer, stream, &out, channels, rate, offset)?;
+            }
             done_before += end.min(ticks(p.duration).max(start + 1)) - start;
             // The next segment follows the last frame written.
             offset = offset.max(segment_end);
+        }
+        if p.synth_audio
+            && let Some(stream) = p.audio_out
+        {
+            let total_frames = (offset as f64 / 1e7 * f64::from(rate)) as usize;
+            let mut out = vec![0i16; total_frames * channels];
+            let times: Vec<f64> = clicks
+                .iter()
+                .filter_map(|&t| {
+                    segments
+                        .iter()
+                        .zip(&segment_starts)
+                        .find_map(|(&(a, b), &o)| {
+                            let tt = (t * 1e7) as i64;
+                            (tt >= a && tt < b).then(|| (o + scale(tt - a)) as f64 / 1e7)
+                        })
+                })
+                .collect();
+            mix_at(&mut out, channels, rate, &click, &times, 0.7);
+            write_pcm(&p.writer, stream, &out, channels, rate, 0)?;
         }
         if frames == 0 {
             return Err(RecordError::EmptyRegion);
         }
         p.writer.Finalize()?;
         progress(1.0);
+        #[allow(clippy::cast_sign_loss)]
+        let (width, height) = p.composer.as_ref().map_or(
+            (p.layout.visible.width() as u32, p.layout.visible.height() as u32),
+            Composer::output_size,
+        );
         Ok(TrimStats {
-            width: p.layout.visible.width() as u32,
-            height: p.layout.visible.height() as u32,
+            width,
+            height,
             frames,
             duration: Duration::from_nanos(offset as u64 * 100),
         })
+    }
+}
+
+/// Interleaved 16-bit samples of a decoded PCM sample.
+fn read_pcm(sample: &IMFSample) -> Result<Vec<i16>> {
+    // SAFETY: the buffer is locked while read.
+    unsafe {
+        let buffer = sample.ConvertToContiguousBuffer()?;
+        let (mut data, mut len) = (std::ptr::null_mut(), 0u32);
+        buffer.Lock(&mut data, None, Some(&mut len))?;
+        let bytes = std::slice::from_raw_parts(data, len as usize);
+        let pcm = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
+            .collect();
+        buffer.Unlock()?;
+        Ok(pcm)
+    }
+}
+
+/// Writes interleaved PCM from output time `start` (100 ns units), in
+/// chunks the encoder takes comfortably.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn write_pcm(
+    writer: &IMFSinkWriter,
+    stream: u32,
+    pcm: &[i16],
+    channels: usize,
+    rate: u32,
+    start: i64,
+) -> Result<()> {
+    const CHUNK: usize = 4096;
+    let channels = channels.max(1);
+    for (i, chunk) in pcm.chunks(CHUNK * channels).enumerate() {
+        let frames = chunk.len() / channels;
+        let time = start + (i * CHUNK) as i64 * 10_000_000 / i64::from(rate);
+        let duration = frames as i64 * 10_000_000 / i64::from(rate);
+        let bytes = std::mem::size_of_val(chunk);
+        // SAFETY: the buffer is locked while `bytes` bytes are copied in.
+        unsafe {
+            let buffer = MFCreateMemoryBuffer(bytes as u32)?;
+            let mut data = std::ptr::null_mut();
+            buffer.Lock(&mut data, None, None)?;
+            std::ptr::copy_nonoverlapping(chunk.as_ptr().cast::<u8>(), data, bytes);
+            buffer.Unlock()?;
+            buffer.SetCurrentLength(bytes as u32)?;
+            let sample = MFCreateSample()?;
+            sample.AddBuffer(&buffer)?;
+            sample.SetSampleTime(time)?;
+            sample.SetSampleDuration(duration)?;
+            writer.WriteSample(stream, &sample)?;
+        }
+    }
+    Ok(())
+}
+
+/// A packed NV12 frame as an encoder sample.
+fn nv12_sample(nv12: &[u8]) -> Result<IMFSample> {
+    // SAFETY: the buffer is locked while the frame is copied in.
+    unsafe {
+        #[allow(clippy::cast_possible_truncation)]
+        let buffer = MFCreateMemoryBuffer(nv12.len() as u32)?;
+        let mut data = std::ptr::null_mut();
+        buffer.Lock(&mut data, None, None)?;
+        std::ptr::copy_nonoverlapping(nv12.as_ptr(), data, nv12.len());
+        buffer.Unlock()?;
+        #[allow(clippy::cast_possible_truncation)]
+        buffer.SetCurrentLength(nv12.len() as u32)?;
+        let sample = MFCreateSample()?;
+        sample.AddBuffer(&buffer)?;
+        Ok(sample)
     }
 }
 

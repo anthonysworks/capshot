@@ -22,6 +22,8 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::{HSTRING, Interface};
 
+use crate::compose::{Composer, Composition};
+use crate::cursor::CursorTrack;
 use crate::{RecordError, Result};
 
 #[allow(clippy::cast_sign_loss)]
@@ -168,7 +170,18 @@ impl VideoDecoder {
     }
 
     fn copy(&self, sample: &IMFSample) -> Result<BgraImage> {
-        let (w, h) = self.coded;
+        rgb32_frame(sample, self.coded, self.visible)
+    }
+}
+
+/// The visible part of a decoded RGB32 sample, as BGRA.
+pub(crate) fn rgb32_frame(
+    sample: &IMFSample,
+    coded: (u32, u32),
+    visible: Rect,
+) -> Result<BgraImage> {
+    {
+        let (w, h) = coded;
         let mut full = BgraImage::new(w, h);
         // SAFETY: the buffer is locked while read; the slices stay within
         // the locked area (`h` rows of `pitch` bytes).
@@ -199,10 +212,10 @@ impl VideoDecoder {
         for px in full.as_bytes_mut().as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
-        Ok(if self.visible == full.bounds() {
+        Ok(if visible == full.bounds() {
             full
         } else {
-            full.crop(self.visible)
+            full.crop(visible)
         })
     }
 }
@@ -234,6 +247,9 @@ pub struct VideoEdit {
     pub speed: f64,
     /// Area to keep, in pixels of the video.
     pub crop: Option<Rect>,
+    /// Drawn on the frames.
+    pub composition: Composition,
+    pub track: Option<CursorTrack>,
 }
 
 impl VideoEdit {
@@ -242,6 +258,8 @@ impl VideoEdit {
             segments: vec![(Duration::ZERO, Duration::MAX)],
             speed: 1.0,
             crop: None,
+            composition: Composition::default(),
+            track: None,
         }
     }
 }
@@ -268,7 +286,12 @@ pub fn video_to_gif(
         .crop
         .map(|c| c.intersect(frame_rect))
         .filter(|c| c.width() >= 2 && c.height() >= 2);
-    let (out_w, out_h) = crop.map_or((w, h), |c| (c.width() as u32, c.height() as u32));
+    let composer = (!edit.composition.is_empty())
+        .then(|| Composer::new(&edit.composition, edit.track.clone(), (w, h), crop));
+    let (out_w, out_h) = match &composer {
+        Some(c) => c.output_size(),
+        None => crop.map_or((w, h), |c| (c.width() as u32, c.height() as u32)),
+    };
     let options = GifOptions {
         // Ignore compression noise.
         tolerance: options.tolerance.max(VIDEO_TOLERANCE),
@@ -324,9 +347,10 @@ pub fn video_to_gif(
             let time = Duration::from_nanos(
                 u64::try_from(slot * 1_000_000_000 / u128::from(fps)).unwrap_or(u64::MAX),
             );
-            let frame = match crop {
-                Some(c) => frame.crop(c),
-                None => frame,
+            let frame = match (&composer, crop) {
+                (Some(composer), _) => composer.render(frame, at.as_secs_f64()),
+                (None, Some(c)) => frame.crop(c),
+                (None, None) => frame,
             };
             writer.push(&frame, time)?;
             last = Some(frame);
