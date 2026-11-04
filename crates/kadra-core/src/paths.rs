@@ -12,6 +12,7 @@ const APP_NAME: &str = "Kadra";
 pub struct Paths {
     config_dir: PathBuf,
     log_dir: PathBuf,
+    edit_dir: PathBuf,
     pictures_dir: PathBuf,
     videos_dir: PathBuf,
 }
@@ -36,6 +37,7 @@ impl Paths {
         Some(Self {
             config_dir: project.config_dir().to_path_buf(),
             log_dir: project.data_local_dir().join("logs"),
+            edit_dir: project.data_local_dir().join("edit"),
             pictures_dir: pictures.join(APP_NAME),
             videos_dir: videos.join(APP_NAME),
         })
@@ -46,6 +48,7 @@ impl Paths {
         Self {
             config_dir: root.join("config"),
             log_dir: root.join("logs"),
+            edit_dir: root.join("edit"),
             pictures_dir: root.join("pictures"),
             videos_dir: root.join("videos"),
         }
@@ -65,6 +68,12 @@ impl Paths {
 
     pub fn log_dir(&self) -> &Path {
         &self.log_dir
+    }
+
+    /// Editing material kept next to recordings: the video without cursor
+    /// and the cursor track.
+    pub fn edit_dir(&self) -> &Path {
+        &self.edit_dir
     }
 
     /// Default destination for screenshots.

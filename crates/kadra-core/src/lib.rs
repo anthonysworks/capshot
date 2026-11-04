@@ -3,6 +3,7 @@
 //! This crate deliberately has no dependency on the UI layer or on Windows
 //! APIs so that it can be tested anywhere and used by every other crate.
 
+pub mod base64;
 pub mod config;
 pub mod geometry;
 pub mod history;

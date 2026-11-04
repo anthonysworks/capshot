@@ -115,6 +115,7 @@ pub enum ImageFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RecordingSettings {
     pub output_dir: PathBuf,
     pub fps: u32,
@@ -128,6 +129,9 @@ pub struct RecordingSettings {
     pub countdown_secs: u32,
     /// Last format chosen on the toolbar.
     pub format: RecordingFormat,
+    /// Also keep the video without cursor and the cursor movements, so the
+    /// editor can hide, enlarge or replace the cursor and mark clicks.
+    pub editable_cursor: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +182,7 @@ impl Default for RecordingSettings {
             microphone: false,
             countdown_secs: 3,
             format: RecordingFormat::Mp4,
+            editable_cursor: true,
         }
     }
 }
