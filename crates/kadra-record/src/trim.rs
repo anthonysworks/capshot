@@ -626,7 +626,10 @@ unsafe fn run(
         progress(1.0);
         #[allow(clippy::cast_sign_loss)]
         let (width, height) = p.composer.as_ref().map_or(
-            (p.layout.visible.width() as u32, p.layout.visible.height() as u32),
+            (
+                p.layout.visible.width() as u32,
+                p.layout.visible.height() as u32,
+            ),
             Composer::output_size,
         );
         Ok(TrimStats {

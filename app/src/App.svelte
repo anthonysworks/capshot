@@ -256,6 +256,10 @@
         <input type="checkbox" bind:checked={config.recording.microphone} />
         <span>Record microphone</span>
       </label>
+      <label class="row check">
+        <input type="checkbox" bind:checked={config.recording.editable_cursor} />
+        <span>Editable cursor: keep a copy without the pointer so the editor can hide, enlarge or replace it and mark clicks (uses twice the disk space; the 30 latest are kept)</span>
+      </label>
       <div class="row">
         <input class="path" bind:value={config.recording.output_dir} aria-label="Recordings folder" />
         <button type="button" onclick={() => openFolder("recordings")}>Open</button>
@@ -338,9 +342,12 @@
       <details>
         <summary>Image editor</summary>
         <dl>
-          <dt>V A L R E P</dt><dd>Select, arrow, line, rectangle, ellipse, pen</dd>
-          <dt>H T N</dt><dd>Highlighter, text, numbered step</dd>
-          <dt>S U B C</dt><dd>Spotlight, blur, pixelate, crop</dd>
+          <dt>V</dt><dd>Select, move, resize</dd>
+          <dt>A L R E</dt><dd>Arrow, line, rectangle, ellipse</dd>
+          <dt>P H</dt><dd>Pencil (freehand), highlighter (yellow)</dd>
+          <dt>T N</dt><dd>Text, numbered step</dd>
+          <dt>S U B</dt><dd>Spotlight, blur, pixelate</dd>
+          <dt>C F</dt><dd>Crop, frame (background, margin, corners)</dd>
           <dt>Shift</dt><dd>While drawing: straight angles, squares and circles</dd>
           <dt>Ctrl+Z / Ctrl+Y</dt><dd>Undo / redo</dd>
           <dt>Ctrl+D, Delete, arrows</dt><dd>Duplicate, delete, nudge the selection</dd>
@@ -351,11 +358,14 @@
       <details>
         <summary>Video editor</summary>
         <dl>
+          <dt>1 – 5</dt><dd>Panels: cut & speed, text & shapes, cursor & clicks, crop & format, export</dd>
           <dt>Space, arrows</dt><dd>Play / pause, step one frame (one second with Shift)</dd>
           <dt>S</dt><dd>Split at the playhead</dd>
-          <dt>Delete</dt><dd>Remove or restore the selected part</dd>
+          <dt>Delete</dt><dd>Remove the selected text or shape, else the selected part</dd>
           <dt>I / O</dt><dd>Start / end at the playhead</dd>
+          <dt>V T A L R E P H N</dt><dd>Select, text, arrow, line, rectangle, ellipse, pencil, highlighter, step</dd>
           <dt>C</dt><dd>Crop the picture</dd>
+          <dt>Ctrl+C / Ctrl+E</dt><dd>Copy the video (edited if needed), export MP4</dd>
           <dt>Ctrl+Z / Ctrl+Y</dt><dd>Undo / redo</dd>
         </dl>
       </details>

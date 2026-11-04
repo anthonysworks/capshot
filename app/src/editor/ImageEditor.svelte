@@ -3,10 +3,12 @@
   import { onMount } from "svelte";
   import { editorCopy, editorRead, editorSave, editorSaveCopy, showInFolder } from "../lib/api";
   import Icon from "./Icon.svelte";
+  import Kbd from "./Kbd.svelte";
   import type { IconName } from "./icons";
   import {
     BACKGROUNDS,
     BOXED,
+    FREEHAND,
     type Fill,
     type Frame,
     LINEAR,
@@ -25,23 +27,56 @@
 
   let { path }: { path: string } = $props();
 
-  type Tool = "select" | "crop" | ShapeKind;
-  const TOOLS: { tool: Tool; icon: IconName; label: string; key: string }[] = [
-    { tool: "select", icon: "select", label: "Select, move and resize", key: "V" },
-    { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
-    { tool: "line", icon: "line", label: "Line", key: "L" },
-    { tool: "rect", icon: "rect", label: "Rectangle", key: "R" },
-    { tool: "ellipse", icon: "ellipse", label: "Ellipse", key: "E" },
-    { tool: "pen", icon: "pen", label: "Pen", key: "P" },
-    { tool: "highlight", icon: "highlight", label: "Highlighter", key: "H" },
-    { tool: "text", icon: "text", label: "Text", key: "T" },
-    { tool: "number", icon: "number", label: "Numbered step", key: "N" },
-    { tool: "spotlight", icon: "spotlight", label: "Spotlight (dims the rest)", key: "S" },
-    { tool: "blur", icon: "blur", label: "Blur", key: "U" },
-    { tool: "pixelate", icon: "pixelate", label: "Pixelate (hides text for good)", key: "B" },
-    { tool: "crop", icon: "crop", label: "Crop", key: "C" },
+  type Tool = "select" | "crop" | "frame" | ShapeKind;
+  type ToolInfo = { tool: Tool; icon: IconName; label: string; key: string };
+  /** Tools grouped by what they are for. */
+  const GROUPS: { title: string; tools: ToolInfo[] }[] = [
+    { title: "Select", tools: [{ tool: "select", icon: "select", label: "Select, move, resize", key: "V" }] },
+    {
+      title: "Shapes",
+      tools: [
+        { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
+        { tool: "line", icon: "line", label: "Line", key: "L" },
+        { tool: "rect", icon: "rect", label: "Rectangle", key: "R" },
+        { tool: "ellipse", icon: "ellipse", label: "Ellipse", key: "E" },
+      ],
+    },
+    {
+      title: "Draw",
+      tools: [
+        { tool: "pen", icon: "pen", label: "Pencil (freehand)", key: "P" },
+        { tool: "highlight", icon: "highlight", label: "Highlighter", key: "H" },
+      ],
+    },
+    {
+      title: "Text",
+      tools: [
+        { tool: "text", icon: "text", label: "Text", key: "T" },
+        { tool: "number", icon: "number", label: "Numbered step", key: "N" },
+      ],
+    },
+    {
+      title: "Hide",
+      tools: [
+        { tool: "spotlight", icon: "spotlight", label: "Spotlight (dims the rest)", key: "S" },
+        { tool: "blur", icon: "blur", label: "Blur", key: "U" },
+        { tool: "pixelate", icon: "pixelate", label: "Pixelate (hides text for good)", key: "B" },
+      ],
+    },
+    {
+      title: "Image",
+      tools: [
+        { tool: "crop", icon: "crop", label: "Crop", key: "C" },
+        { tool: "frame", icon: "frame", label: "Frame: background, margin, corners", key: "F" },
+      ],
+    },
   ];
-  const COLORS = ["#e5484d", "#f5a524", "#30a46c", "#3b82f6", "#a855f7", "#ffffff", "#111111"];
+  const TOOLS = GROUPS.flatMap((g) => g.tools);
+  /** Default colour of each tool (the highlighter is yellow); the last
+   * colour picked for a tool is remembered. */
+  const toolColors: Partial<Record<Tool, string>> = { highlight: "#ffd60a" };
+  let lastColor = "#e5484d";
+  const COLORS = ["#e5484d", "#f5a524", "#ffd60a", "#30a46c", "#3b82f6", "#a855f7", "#ffffff", "#111111"];
   const SIZES = [
     { level: 1, label: "Thin" },
     { level: 2, label: "Medium" },
@@ -72,7 +107,6 @@
   let dirty = $state(false);
   let toast = $state("");
   let editing = $state<{ x: number; y: number; text: string; id: number | null } | null>(null);
-  let showFrame = $state(false);
   /** Physical pixels per image pixel, and where the image starts. */
   let view = $state({ s: 1, ox: 0, oy: 0, dpr: 1 });
   let fitMode = $state(true);
@@ -402,7 +436,8 @@
       return;
     }
     drag = { kind: "draw", start: p, moved: false };
-    draft = make(tool, p, tool === "pen" ? { points: [p] } : {});
+    if (tool === "frame") return;
+    draft = make(tool, p, FREEHAND.includes(tool) ? { points: [p] } : {});
   }
 
   function pointerMove(e: PointerEvent) {
@@ -450,7 +485,7 @@
       if (current.kind === "crop") {
         cropDraft = normalize({ x1: current.start.x, y1: current.start.y, x2: p.x, y2: p.y });
       } else if (draft) {
-        if (draft.kind === "pen") draft.points = [...(draft.points ?? []), p];
+        if (FREEHAND.includes(draft.kind)) draft.points = [...(draft.points ?? []), p];
         else if (e.shiftKey && LINEAR.includes(draft.kind)) {
           // Shift: snap to 45°.
           const angle = Math.round(Math.atan2(p.y - draft.y1, p.x - draft.x1) / (Math.PI / 4)) * (Math.PI / 4);
@@ -542,6 +577,8 @@
 
   function setColor(c: string) {
     color = c;
+    if (tool === "select") lastColor = c;
+    else toolColors[tool] = c;
     const sh = selectedShape;
     if (sh && tool === "select") commit(() => (sh.color = c));
   }
@@ -632,6 +669,21 @@
 
   // ── Keyboard ───────────────────────────────────────────────────────────
 
+  function duplicate() {
+    if (!selectedShape) return;
+    const copyOf: Shape = { ...$state.snapshot(selectedShape), id: nextId++ };
+    nudge(copyOf, 12 * unit, 12 * unit);
+    commit(() => shapes.push(copyOf));
+    selected = copyOf.id;
+  }
+
+  function removeSelected() {
+    const id = selected;
+    if (id === null) return;
+    selected = null;
+    commit(() => (shapes = shapes.filter((sh) => sh.id !== id)));
+  }
+
   function nudge(sh: Shape, dx: number, dy: number) {
     sh.x1 += dx;
     sh.x2 += dx;
@@ -698,8 +750,16 @@
       tool = "select";
     } else if (!ctrl && !e.altKey) {
       const found = TOOLS.find((t) => t.key.toLowerCase() === key);
-      if (found) tool = found.tool;
+      if (found) pick(found.tool);
     }
+  }
+
+  /** Switches tool, with that tool's colour. */
+  function pick(next: Tool) {
+    if (tool !== "select" && tool !== "crop" && tool !== "frame" && !toolColors[tool]) lastColor = color;
+    tool = next;
+    if (next !== "select" && next !== "crop" && next !== "frame") color = toolColors[next] ?? lastColor;
+    if (next !== "select") selected = null;
   }
 
   function keyUp(e: KeyboardEvent) {
@@ -726,20 +786,8 @@
 <svelte:window onkeydown={keyDown} onkeyup={keyUp} />
 
 <div class="editor">
-  <header>
-    <div class="group" role="toolbar" aria-label="Tools">
-      {#each TOOLS as t (t.tool)}
-        <button
-          type="button"
-          class="icon"
-          class:active={tool === t.tool}
-          title="{t.label} ({t.key})"
-          aria-label={t.label}
-          onclick={() => (tool = t.tool)}><Icon name={t.icon} /></button
-        >
-      {/each}
-    </div>
-    <div class="spacer"></div>
+  <header class="topbar">
+    <span class="title" title={path}>{path.split(/[\\/]/).pop()}</span>
     <div class="group">
       <button type="button" class="icon" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}
         ><Icon name="undo" /></button
@@ -748,171 +796,210 @@
         ><Icon name="redo" /></button
       >
     </div>
-    <button type="button" class="text" title="Copy (Ctrl+C)" onclick={copy}><Icon name="copy" /> Copy</button>
-    <button type="button" class="text" title="Save as a new file (Ctrl+Shift+S)" onclick={saveCopy}
-      ><Icon name="saveCopy" /> Save copy</button
+    <div class="group zoom">
+      <button type="button" class="icon" title="Zoom out (Ctrl+-)" aria-label="Zoom out" onclick={() => zoomTo(view.s / 1.25)}
+        >−</button
+      >
+      <button type="button" class="chip" title="Actual size (Ctrl+1)" onclick={() => zoomTo(1)}>{zoomLabel}</button>
+      <button type="button" class="icon" title="Zoom in (Ctrl++)" aria-label="Zoom in" onclick={() => zoomTo(view.s * 1.25)}
+        >+</button
+      >
+      <button type="button" class="icon" title="Fit in the window (Ctrl+0)" aria-label="Fit" onclick={fit}
+        ><Icon name="fit" /></button
+      >
+    </div>
+    <div class="spacer"></div>
+    <button type="button" class="action" onclick={copy}><Icon name="copy" /> Copy <Kbd keys="Ctrl+C" /></button>
+    <button type="button" class="action" onclick={saveCopy}
+      ><Icon name="saveCopy" /> Save a copy <Kbd keys="Ctrl+Shift+S" /></button
     >
-    <button type="button" class="text primary" title="Save over the capture (Ctrl+S)" onclick={save}
-      ><Icon name="save" /> Save</button
-    >
+    <button type="button" class="action primary" onclick={save}><Icon name="save" /> Save <Kbd keys="Ctrl+S" /></button>
   </header>
 
-  <div class="properties">
-    <div class="group" role="radiogroup" aria-label="Colour">
-      {#each COLORS as c (c)}
-        <button
-          type="button"
-          class="swatch"
-          class:active={color === c}
-          style="--swatch:{c}"
-          aria-label="Colour {c}"
-          onclick={() => setColor(c)}
-        ></button>
+  <div class="body">
+    <nav class="tools" aria-label="Tools">
+      {#each GROUPS as group (group.title)}
+        <div class="tool-group">
+          <span class="heading">{group.title}</span>
+          <div class="tool-grid">
+            {#each group.tools as t (t.tool)}
+              <button
+                type="button"
+                class="tool"
+                class:active={tool === t.tool}
+                title="{t.label} ({t.key})"
+                aria-label={t.label}
+                onclick={() => pick(t.tool)}
+              >
+                <Icon name={t.icon} />
+                <span class="key">{t.key}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
       {/each}
-      <label class="custom" title="Other colour">
-        <input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} />
-      </label>
+    </nav>
+
+    <div class="stage" bind:this={stage}>
+      <canvas
+        bind:this={canvas}
+        style="cursor:{cursor}"
+        onpointerdown={pointerDown}
+        onpointermove={pointerMove}
+        onpointerup={pointerUp}
+        ondblclick={doubleClick}
+        onwheel={wheel}
+      ></canvas>
+      {#if editing}
+        <textarea
+          bind:value={editing.text}
+          use:focusNow
+          class="text-input"
+          style={textStyle}
+          rows="1"
+          spellcheck="false"
+          onkeydown={textKey}
+          onblur={commitText}
+        ></textarea>
+      {/if}
+      {#if error}
+        <p class="message">{error}</p>
+      {:else if !image}
+        <p class="message">Loading…</p>
+      {/if}
+      {#if toast}
+        <div class="toast" role="status">
+          {toast}
+          {#if copyPath && toast.startsWith("Saved as")}
+            <button type="button" class="link" onclick={() => copyPath && showInFolder(copyPath)}>Show</button>
+          {/if}
+        </div>
+      {/if}
+      {#if tool === "crop"}
+        <div class="hint">Drag to choose the area to keep · <Kbd keys="Enter" /> confirm · <Kbd keys="Esc" /> leave</div>
+      {/if}
     </div>
-    <div class="group" role="radiogroup" aria-label="Thickness">
-      {#each SIZES as s (s.level)}
-        <button
-          type="button"
-          class="icon"
-          class:active={level === s.level}
-          title={s.label}
-          aria-label={s.label}
-          onclick={() => setLevel(s.level)}><span class="dot" style="--d:{3 + s.level * 2}px"></span></button
-        >
-      {/each}
-    </div>
-    {#if showFill}
-      <div class="group" role="radiogroup" aria-label="Fill">
-        {#each FILLS as f (f.fill)}
-          <button type="button" class="chip" class:active={fill === f.fill} onclick={() => setFill(f.fill)}
-            >{f.label}</button
+
+    <aside class="panel" aria-label="Properties">
+      {#if tool === "frame"}
+        <section>
+          <h3>Frame</h3>
+          <label class="check"
+            ><input type="checkbox" checked={frame.enabled} onchange={(e) => setFrame({ enabled: e.currentTarget.checked })} />
+            Add a background</label
           >
-        {/each}
-      </div>
-    {/if}
-    {#if crop}
-      <button type="button" class="chip" onclick={() => commit(() => (crop = null))}>Reset crop</button>
-    {/if}
-    <div class="spacer"></div>
-    <div class="group">
-      <button
-        type="button"
-        class="chip"
-        class:active={frame.enabled}
-        title="Background, margin, rounded corners and shadow"
-        onclick={() => (showFrame = !showFrame)}><Icon name="frame" /> Frame</button
-      >
-    </div>
-    <div class="group zoom">
-      <button
-        type="button"
-        class="icon"
-        title="Zoom out (Ctrl+-)"
-        aria-label="Zoom out"
-        onclick={() => zoomTo(view.s / 1.25)}>−</button
-      >
-      <button type="button" class="chip" title="Actual size (Ctrl+1)" onclick={() => zoomTo(1)}>{zoomLabel}</button
-      >
-      <button
-        type="button"
-        class="icon"
-        title="Zoom in (Ctrl++)"
-        aria-label="Zoom in"
-        onclick={() => zoomTo(view.s * 1.25)}>+</button
-      >
-      <button type="button" class="icon" title="Fit (Ctrl+0)" aria-label="Fit" onclick={fit}><Icon name="fit" /></button>
-    </div>
-  </div>
-
-  {#if showFrame}
-    <div class="properties">
-      <label class="check"
-        ><input type="checkbox" checked={frame.enabled} onchange={(e) => setFrame({ enabled: e.currentTarget.checked })} />
-        Background</label
-      >
-      <div class="group" role="radiogroup" aria-label="Background">
-        {#each BACKGROUNDS as b, i (b.name)}
-          <button
-            type="button"
-            class="swatch wide"
-            class:active={frame.enabled && frame.background === i}
-            style="--swatch:linear-gradient(135deg,{b.stops.join(',')})"
-            title={b.name}
-            aria-label={b.name}
-            onclick={() => setFrame({ background: i, enabled: true })}
-          ></button>
-        {/each}
-      </div>
-      <label class="range"
-        >Margin <input
-          type="range"
-          min="16"
-          max="200"
-          value={frame.padding}
-          onchange={(e) => setFrame({ padding: Number(e.currentTarget.value), enabled: true })}
-        /></label
-      >
-      <label class="range"
-        >Corners <input
-          type="range"
-          min="0"
-          max="40"
-          value={frame.radius}
-          onchange={(e) => setFrame({ radius: Number(e.currentTarget.value), enabled: true })}
-        /></label
-      >
-      <label class="check"
-        ><input
-          type="checkbox"
-          checked={frame.shadow}
-          onchange={(e) => setFrame({ shadow: e.currentTarget.checked, enabled: true })}
-        /> Shadow</label
-      >
-    </div>
-  {/if}
-
-  <div class="stage" bind:this={stage}>
-    <canvas
-      bind:this={canvas}
-      style="cursor:{cursor}"
-      onpointerdown={pointerDown}
-      onpointermove={pointerMove}
-      onpointerup={pointerUp}
-      ondblclick={doubleClick}
-      onwheel={wheel}
-    ></canvas>
-    {#if editing}
-      <textarea
-        bind:value={editing.text}
-        use:focusNow
-        class="text-input"
-        style={textStyle}
-        rows="1"
-        spellcheck="false"
-        onkeydown={textKey}
-        onblur={commitText}
-      ></textarea>
-    {/if}
-    {#if error}
-      <p class="message">{error}</p>
-    {:else if !image}
-      <p class="message">Loading…</p>
-    {/if}
-    {#if toast}
-      <div class="toast" role="status">
-        {toast}
-        {#if copyPath && toast.startsWith("Saved as")}
-          <button type="button" class="link" onclick={() => copyPath && showInFolder(copyPath)}>Show</button>
+          <div class="swatches">
+            {#each BACKGROUNDS as b, i (b.name)}
+              <button
+                type="button"
+                class="swatch wide"
+                class:active={frame.enabled && frame.background === i}
+                style="--swatch:linear-gradient(135deg,{b.stops.join(',')})"
+                title={b.name}
+                aria-label={b.name}
+                onclick={() => setFrame({ background: i, enabled: true })}
+              ></button>
+            {/each}
+          </div>
+          <label class="field"
+            >Margin <input
+              type="range"
+              min="16"
+              max="200"
+              value={frame.padding}
+              onchange={(e) => setFrame({ padding: Number(e.currentTarget.value), enabled: true })}
+            /></label
+          >
+          <label class="field"
+            >Corners <input
+              type="range"
+              min="0"
+              max="40"
+              value={frame.radius}
+              onchange={(e) => setFrame({ radius: Number(e.currentTarget.value), enabled: true })}
+            /></label
+          >
+          <label class="check"
+            ><input
+              type="checkbox"
+              checked={frame.shadow}
+              onchange={(e) => setFrame({ shadow: e.currentTarget.checked, enabled: true })}
+            /> Shadow</label
+          >
+        </section>
+      {:else if tool === "crop"}
+        <section>
+          <h3>Crop</h3>
+          <p class="note">Drag over the image to keep only that area.</p>
+          {#if crop}
+            <p class="note">{crop.w} × {crop.h} px</p>
+            <button type="button" onclick={() => commit(() => (crop = null))}>Reset crop</button>
+          {/if}
+        </section>
+      {:else}
+        <section>
+          <h3>Colour</h3>
+          <div class="swatches">
+            {#each COLORS as c (c)}
+              <button
+                type="button"
+                class="swatch"
+                class:active={color === c}
+                style="--swatch:{c}"
+                aria-label="Colour {c}"
+                onclick={() => setColor(c)}
+              ></button>
+            {/each}
+            <label class="custom" title="Any colour">
+              <input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} />
+            </label>
+          </div>
+        </section>
+        <section>
+          <h3>Thickness</h3>
+          <div class="row">
+            {#each SIZES as sz (sz.level)}
+              <button
+                type="button"
+                class="chip"
+                class:active={level === sz.level}
+                title={sz.label}
+                onclick={() => setLevel(sz.level)}><span class="dot" style="--d:{3 + sz.level * 2}px"></span> {sz.label}</button
+              >
+            {/each}
+          </div>
+        </section>
+        {#if showFill}
+          <section>
+            <h3>{tool === "text" || selectedShape?.kind === "text" ? "Background" : "Fill"}</h3>
+            <div class="row">
+              {#each FILLS as fl (fl.fill)}
+                <button type="button" class="chip" class:active={fill === fl.fill} onclick={() => setFill(fl.fill)}
+                  >{fl.label}</button
+                >
+              {/each}
+            </div>
+          </section>
         {/if}
-      </div>
-    {/if}
-    {#if tool === "crop"}
-      <div class="hint">Drag to choose the area to keep · Enter to confirm · Esc to leave</div>
-    {/if}
+        {#if selectedShape}
+          <section>
+            <h3>Selection</h3>
+            <div class="column">
+              <button type="button" onclick={duplicate}>Duplicate <Kbd keys="Ctrl+D" /></button>
+              <button type="button" onclick={removeSelected}>Delete <Kbd keys="Del" /></button>
+            </div>
+            <p class="note">Drag to move · handles to resize · arrows nudge (<Kbd keys="Shift" /> ×10)</p>
+          </section>
+        {:else}
+          <section class="tips">
+            <h3>Tips</h3>
+            <p class="note"><Kbd keys="Shift" /> while drawing: straight angles, squares, circles.</p>
+            <p class="note"><Kbd keys="Ctrl+wheel" /> zoom · <Kbd keys="Space" /> + drag to move around.</p>
+            <p class="note">Double-click a text to edit it.</p>
+          </section>
+        {/if}
+      {/if}
+    </aside>
   </div>
 </div>
 
@@ -922,30 +1009,120 @@
     flex-direction: column;
     height: 100vh;
   }
-  header,
-  .properties {
+  .topbar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
+    gap: 10px;
+    padding: 6px 12px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
   }
-  .properties {
-    padding: 4px 10px;
+  .title {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
   }
   .group {
     display: flex;
     align-items: center;
     gap: 2px;
-  }
-  .group + .group {
-    padding-left: 8px;
+    padding-left: 10px;
     border-left: 1px solid var(--border);
   }
   .spacer {
     flex: 1;
+  }
+  .body {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: auto 1fr 230px;
+  }
+  .tools {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 8px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+  }
+  .heading,
+  h3 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin: 0 0 4px;
+  }
+  .tool-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 40px);
+    gap: 4px;
+  }
+  .tool {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+  }
+  .tool:hover {
+    background: var(--control);
+    border-color: var(--border);
+  }
+  .tool.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+  .key {
+    position: absolute;
+    right: 3px;
+    bottom: 1px;
+    font-size: 9px;
+    font-weight: 700;
+    opacity: 0.7;
+  }
+  .panel {
+    padding: 12px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+  }
+  .panel section {
+    margin-bottom: 16px;
+  }
+  .panel button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .row,
+  .swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .column {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .column button {
+    justify-content: space-between;
+  }
+  .note {
+    margin: 6px 0;
+    font-size: 12px;
+    color: var(--text-muted);
   }
   button.icon {
     display: grid;
@@ -962,22 +1139,18 @@
     background: var(--control);
     border-color: var(--border);
   }
-  button.icon.active,
+  button.chip {
+    padding: 3px 9px;
+  }
   button.chip.active {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--on-accent);
   }
-  button.text,
-  button.chip {
+  button.action {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-  }
-  button.chip {
-    padding: 3px 9px;
-    border-color: transparent;
-    background: transparent;
   }
   button.link {
     border: none;
@@ -986,16 +1159,15 @@
     padding: 0 0 0 8px;
   }
   .swatch {
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     padding: 0;
-    margin: 0 2px;
     border-radius: 50%;
     background: var(--swatch);
     border: 2px solid var(--border);
   }
   .swatch.wide {
-    width: 34px;
+    width: 38px;
     border-radius: 6px;
   }
   .swatch.active {
@@ -1003,8 +1175,8 @@
     outline-offset: 2px;
   }
   .custom input {
-    width: 26px;
-    height: 26px;
+    width: 28px;
+    height: 28px;
     padding: 0;
     border: none;
     background: none;
@@ -1017,23 +1189,24 @@
     background: currentColor;
   }
   .check,
-  .range {
-    display: inline-flex;
+  .field {
+    display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    margin: 6px 0;
     font-size: 13px;
   }
-  .range input {
-    width: 110px;
+  .field input {
+    flex: 1;
   }
   .zoom .chip {
-    min-width: 64px;
+    min-width: 60px;
     justify-content: center;
     font-variant-numeric: tabular-nums;
   }
   .stage {
     position: relative;
-    flex: 1;
+    min-width: 0;
     overflow: hidden;
     background:
       repeating-conic-gradient(color-mix(in srgb, var(--bg) 92%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px

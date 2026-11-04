@@ -48,7 +48,11 @@ export interface Rect {
 }
 
 /** Shapes defined by two corners, which can be resized from them. */
-export const BOXED: ShapeKind[] = ["rect", "ellipse", "highlight", "pixelate", "blur", "spotlight"];
+export const BOXED: ShapeKind[] = ["rect", "ellipse", "pixelate", "blur", "spotlight"];
+/** Drawn freehand, as a list of points. */
+export const FREEHAND: ShapeKind[] = ["pen", "highlight"];
+/** Width of the highlighter stroke for a given size. */
+export const markerWidth = (size: number) => size * 5;
 /** Shapes defined by two end points. */
 export const LINEAR: ShapeKind[] = ["arrow", "line"];
 
@@ -90,10 +94,10 @@ export function bounds(ctx: CanvasRenderingContext2D, s: Shape): Rect {
     const r = badgeRadius(s.size);
     return { x: s.x1 - r, y: s.y1 - r, w: 2 * r, h: 2 * r };
   }
-  if (s.kind === "pen" && s.points?.length) {
+  if (FREEHAND.includes(s.kind) && s.points?.length) {
     const xs = s.points.map((p) => p.x);
     const ys = s.points.map((p) => p.y);
-    const pad = s.size / 2;
+    const pad = (s.kind === "highlight" ? markerWidth(s.size) : s.size) / 2;
     const x = Math.min(...xs) - pad;
     const y = Math.min(...ys) - pad;
     return { x, y, w: Math.max(...xs) + pad - x, h: Math.max(...ys) + pad - y };
@@ -116,9 +120,10 @@ export function hit(ctx: CanvasRenderingContext2D, s: Shape, p: Point, slack: nu
   if (LINEAR.includes(s.kind)) {
     return distanceToSegment(p, { x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }) <= s.size / 2 + slack;
   }
-  if (s.kind === "pen" && s.points) {
+  if (FREEHAND.includes(s.kind) && s.points) {
     const pts = s.points;
-    return pts.some((a, i) => i > 0 && distanceToSegment(p, pts[i - 1] ?? a, a) <= s.size / 2 + slack);
+    const half = (s.kind === "highlight" ? markerWidth(s.size) : s.size) / 2;
+    return pts.some((a, i) => i > 0 && distanceToSegment(p, pts[i - 1] ?? a, a) <= half + slack);
   }
   const b = bounds(ctx, s);
   return p.x >= b.x - slack && p.x <= b.x + b.w + slack && p.y >= b.y - slack && p.y <= b.y + b.h + slack;
@@ -243,7 +248,11 @@ export function render(
     ctx.fill("evenodd");
     ctx.restore();
   }
+  renderAnnotations(ctx, shapes);
+}
 
+/** Draws the annotations only (no image, no hiding tools): video overlays. */
+export function renderAnnotations(ctx: CanvasRenderingContext2D, shapes: Shape[]) {
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   for (const s of shapes) {
@@ -281,9 +290,16 @@ export function render(
         break;
       }
       case "highlight":
-        ctx.globalAlpha = 0.38;
-        ctx.globalCompositeOperation = "multiply";
-        ctx.fillRect(r.x, r.y, r.w, r.h);
+        // A felt marker: wide, flat-ended, see-through (visible on dark
+        // screens too, unlike a multiply blend).
+        ctx.globalAlpha = 0.45;
+        if (s.points?.length) {
+          ctx.lineWidth = markerWidth(s.size);
+          ctx.lineCap = "butt";
+          pen(ctx, s.points);
+        } else {
+          ctx.fillRect(r.x, r.y, r.w, r.h);
+        }
         break;
       case "text": {
         const size = fontSize(s.size);

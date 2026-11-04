@@ -29,6 +29,7 @@ export interface Config {
     microphone: boolean;
     countdown_secs: number;
     format: RecordingFormat;
+    editable_cursor: boolean;
   };
   gif: {
     fps: number;
@@ -110,17 +111,49 @@ export const editorSaveCopy = (path: string, png: Uint8Array) =>
 /** Copies an edited image (PNG bytes) to the clipboard. */
 export const editorCopy = (png: Uint8Array) => invoke<void>("editor_copy", png);
 
+/** Image drawn over the video between two times (source seconds). */
+export interface OverlayImage {
+  png: string;
+  x: number;
+  y: number;
+  start: number;
+  end: number;
+}
+
+/** What is drawn on the frames of an edited video. */
+export interface Composition {
+  overlays: OverlayImage[];
+  cursor: { visible: boolean; scale: number; image: { png: string; hotspot: [number, number] } | null; halo: [number, number, number, number] | null } | null;
+  clicks: { ring: boolean; color: [number, number, number]; sound: boolean } | null;
+  canvas: { ratio: [number, number]; colors: [number, number, number][]; padding: number } | null;
+}
+
 /** Edits made in the video editor (times in seconds, crop in video pixels). */
 export interface VideoEdit {
   segments: [number, number][];
   speed: number;
   crop: [number, number, number, number] | null;
+  composition: Composition;
 }
 
 export type ExportTask =
   | { kind: "mp4"; edit: VideoEdit; audio: boolean; quality: number | null }
   | { kind: "gif"; gif: Config["gif"]; edit: VideoEdit | null };
 
+/** Recorded cursor, as saved next to a recording. */
+export interface CursorTrack {
+  samples: { t: number; x: number; y: number; shape: number; visible: boolean }[];
+  clicks: { t: number; x: number; y: number; right: boolean }[];
+  shapes: { hotspot: [number, number]; png: string }[];
+}
+
+/** The copy without cursor (playable) and the cursor track, when kept. */
+export const editorVideoSources = (path: string) =>
+  invoke<{ clean: string | null; track: CursorTrack | null }>("editor_video_sources", { path });
+
+/** Puts a video file on the clipboard. */
+export const editorCopyFile = (path: string) => invoke<void>("editor_copy_file", { path });
+
 /** Exports part of a video; resolves to the job id. */
-export const editorExport = (path: string, task: ExportTask) =>
-  invoke<number>("editor_export", { path, task });
+export const editorExport = (path: string, task: ExportTask, copy = false) =>
+  invoke<number>("editor_export", { path, task, copy });
