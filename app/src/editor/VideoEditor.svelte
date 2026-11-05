@@ -25,6 +25,7 @@
     FREEHAND,
     LINEAR,
     type Point,
+    type Rect,
     type Shape,
     type ShapeKind,
     bounds,
@@ -32,6 +33,19 @@
     hit,
     renderAnnotations,
   } from "./shapes";
+  import {
+    type Layout,
+    clampRect,
+    corners,
+    dragCorner,
+    fitLayout,
+    packRows,
+    plainLayout,
+    playClick,
+    ratioCrop,
+    resizeShape,
+    shapeHandles,
+  } from "./stage";
   import {
     SPEEDS,
     type Segment,
@@ -56,7 +70,7 @@
 
   type Tool = "select" | "text" | "arrow" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number";
   const TOOLS: { tool: Tool; icon: IconName; label: string; key: string }[] = [
-    { tool: "select", icon: "select", label: "Select, move — click the video to play", key: "V" },
+    { tool: "select", icon: "select", label: "Select, move, resize — click the video to play", key: "V" },
     { tool: "text", icon: "text", label: "Text", key: "T" },
     { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
     { tool: "line", icon: "line", label: "Line", key: "L" },
@@ -85,13 +99,16 @@
     { label: "4:5", ratio: [4, 5] },
     { label: "4:3", ratio: [4, 3] },
   ];
-  /** Thumbnails per 100 px of timeline, and the most ever made. */
-  const FILMSTRIP_MAX = 40;
   /** How long a new text or shape stays on screen by default, in seconds. */
   const OVERLAY_LENGTH = 3;
   /** Distance under which handles snap, in pixels. */
   const SNAP_PX = 8;
   const MAX_ZOOM = 40;
+  /** Height of the filmstrip and of one row of time bars, in pixels. */
+  const TRACK_H = 56;
+  const ROW_H = 26;
+  /** Space around the picture in the player, in pixels. */
+  const STAGE_MARGIN = 28;
 
   interface Overlay {
     id: number;
@@ -102,22 +119,27 @@
 
   let video: HTMLVideoElement;
   let player: HTMLDivElement;
-  let preview: HTMLCanvasElement;
+  let stage: HTMLCanvasElement;
   let scroller: HTMLDivElement;
   let content: HTMLDivElement;
 
   let duration = $state(0);
   let time = $state(0);
   let playing = $state(false);
+  let vw = $state(0);
+  let vh = $state(0);
   let segments = $state<Segment[]>([]);
   let trim = $state<Trim>({ start: 0, end: 0 });
   let selectedSegment = $state<number | null>(null);
   let audio = $state(true);
   let quality = $state(18);
-  let crop = $state<{ x: number; y: number; w: number; h: number } | null>(null);
+  let crop = $state<Rect | null>(null);
+  /** Editing the crop: the whole frame shows, with the area kept. */
   let cropping = $state(false);
-  let cropDraft = $state<{ x: number; y: number; w: number; h: number } | null>(null);
+  let cropDraft = $state<Rect | null>(null);
   let ratio = $state<[number, number] | null>(null);
+  /** With a ratio: crop to it (fill) or show all on a background (fit). */
+  let fit = $state<"fill" | "fit">("fill");
   let background = $state(0);
   let margin = $state(0.05);
   let cursorVisible = $state(true);
@@ -134,12 +156,14 @@
   let tool = $state<Tool>("select");
   let color = $state("#e5484d");
   let level = $state(2);
+  /** Filmstrip frames, evenly spread over the video; empty until made. */
   let frames = $state<string[]>([]);
   let error = $state("");
   let toast = $state("");
   let config = $state<Config | null>(null);
   let gifFps = $state(15);
   let gifWidth = $state(0);
+  let gifOptions = $state(false);
   let jobs = $state<(JobProgress & { kind: string })[]>([]);
   let past = $state<string[]>([]);
   let future = $state<string[]>([]);
@@ -147,19 +171,24 @@
   let cursorTrack = $state<CursorTrack | null>(null);
   let shapes: { image: HTMLImageElement; hotspot: [number, number] }[] = [];
   let editing = $state<{ x: number; y: number; text: string; id: number | null } | null>(null);
-  /** Displayed picture inside the player, in CSS pixels. */
-  let box = $state({ left: 0, top: 0, width: 0, height: 0, scale: 1 });
+  let playerSize = $state({ w: 0, h: 0 });
   let draft = $state<Shape | null>(null);
   let zoom = $state(1);
   let viewWidth = $state(800);
-  let menu = $state<"export" | "speed" | null>(null);
+  let menu = $state<"speed" | null>(null);
+  /** Resize handle under the pointer (select tool), or -1. */
+  let hover = $state(-1);
   let nextId = 1;
+  let audioContext: AudioContext | null = null;
+  let lastClickCheck = 0;
   let drag:
     | { kind: "time" }
     | { kind: "trim"; edge: "start" | "end" }
-    | { kind: "crop"; start: Point }
+    | { kind: "cropCorner"; anchor: Point }
+    | { kind: "cropMove"; from: Point; rect: Rect }
     | { kind: "draw"; start: Point; moved: boolean }
     | { kind: "move"; last: Point; moved: boolean }
+    | { kind: "resize"; handle: number; original: Shape; moved: boolean }
     | { kind: "bar"; id: number; edge: "start" | "end" | "both"; from: number; start: number; end: number }
     | null = null;
 
@@ -169,8 +198,33 @@
   /** The cursor can only be changed with the recording's copy without cursor. */
   const cursorEditable = $derived(!!cleanSource && !!cursorTrack);
   /** Annotation sizes follow the video size, like in the image editor. */
-  let longSide = $state(0);
-  const unit = $derived(Math.max(1, Math.round(longSide / 1400)));
+  const unit = $derived(Math.max(1, Math.round(Math.max(vw, vh) / 1400)));
+  const full = $derived<Rect>({ x: 0, y: 0, w: vw || 1, h: vh || 1 });
+
+  /** What the export looks like (while cropping: the whole frame). */
+  const layout = $derived<Layout>(
+    cropping || !vw
+      ? plainLayout(full)
+      : ratio && fit === "fit"
+        ? fitLayout(crop ?? full, ratio, margin)
+        : plainLayout(crop ?? full),
+  );
+  /** CSS pixels per output pixel, and per source pixel. */
+  const k = $derived(
+    Math.max(
+      0.01,
+      Math.min((playerSize.w - 2 * STAGE_MARGIN) / layout.out.w, (playerSize.h - 2 * STAGE_MARGIN) / layout.out.h),
+    ),
+  );
+  const sourceScale = $derived(k * (layout.area.w / layout.crop.w));
+  const stageBox = $derived({
+    width: layout.out.w * k,
+    height: layout.out.h * k,
+    left: (playerSize.w - layout.out.w * k) / 2,
+    top: (playerSize.h - layout.out.h * k) / 2,
+  });
+  const lockedRatio = $derived(ratio && fit === "fill" ? ratio[0] / ratio[1] : null);
+
   const contentWidth = $derived(viewWidth * zoom);
   const pxPerSecond = $derived(duration ? contentWidth / duration : 1);
   const step = $derived(rulerStep(pxPerSecond));
@@ -180,7 +234,23 @@
     for (let t = 0; t <= duration + 1e-9 && out.length < 2000; t += step) out.push(t);
     return out;
   });
+  /** Filmstrip tiles at the video's own proportions, each showing the
+   * frame under its middle (the nearest one made so far). */
+  const tiles = $derived.by(() => {
+    if (!frames.some(Boolean) || !duration || !vw) return [];
+    const width = Math.max(24, (TRACK_H * vw) / vh);
+    const count = Math.min(600, Math.ceil(contentWidth / width));
+    return Array.from({ length: count }, (_, i) => {
+      const t = ((i + 0.5) * width) / pxPerSecond;
+      const index = Math.min(frames.length - 1, Math.floor((t / duration) * frames.length));
+      let src = "";
+      for (let d = 0; !src && d < frames.length; d++) src = frames[index - d] || frames[index + d] || "";
+      return { left: i * width, width, src };
+    });
+  });
+  const rows = $derived(packRows(overlays));
   const selected = $derived(selectedSegment === null ? null : (segments[selectedSegment] ?? null));
+  const current = $derived(selected ?? segments[indexAt(segments, time)] ?? null);
   const selectedItem = $derived(overlays.find((o) => o.id === selectedOverlay) ?? null);
 
   onMount(() => {
@@ -203,12 +273,10 @@
       if (old && p.output && p.output !== old.output) notify(old.kind === "copy" ? "Copied to the clipboard" : "Exported");
     });
     const observer = new ResizeObserver(() => {
-      measure();
+      playerSize = { w: player.clientWidth, h: player.clientHeight };
       viewWidth = scroller?.clientWidth || viewWidth;
     });
     observer.observe(player);
-    // The format (aspect ratio) resizes the video inside the player.
-    observer.observe(video);
     observer.observe(scroller);
     let frame = requestAnimationFrame(function loop() {
       follow();
@@ -224,38 +292,23 @@
       observer.disconnect();
       window.removeEventListener("pointerdown", closeMenu);
       unlisten.then((f) => f());
+      audioContext?.close();
     };
   });
 
   function loaded() {
-    longSide = Math.max(video.videoWidth, video.videoHeight);
+    vw = video.videoWidth;
+    vh = video.videoHeight;
     if (!segments.length) {
       duration = video.duration;
       segments = whole(duration);
       trim = { start: 0, end: duration };
       filmstrip();
     }
-    measure();
   }
 
-  /** Where the picture is drawn inside the video element (letterboxed). */
-  function measure() {
-    if (!video?.videoWidth) return;
-    const r = video.getBoundingClientRect();
-    const p = player.getBoundingClientRect();
-    const scale = Math.min(r.width / video.videoWidth, r.height / video.videoHeight);
-    const width = video.videoWidth * scale;
-    const height = video.videoHeight * scale;
-    box = {
-      left: r.left - p.left + (r.width - width) / 2,
-      top: r.top - p.top + (r.height - height) / 2,
-      width,
-      height,
-      scale,
-    };
-  }
-
-  /** Thumbnails along the timeline, from a second, hidden player. */
+  /** Frames for the timeline, from a second, hidden player: every 8th
+   * first so the strip looks complete quickly, then the ones between. */
   async function filmstrip() {
     const probe = document.createElement("video");
     probe.src = convertFileSrc(path);
@@ -263,63 +316,102 @@
     probe.preload = "auto";
     await new Promise((resolve) => probe.addEventListener("loadeddata", resolve, { once: true }));
     const canvas = document.createElement("canvas");
-    canvas.height = 56;
-    canvas.width = Math.round((56 * probe.videoWidth) / Math.max(1, probe.videoHeight));
+    canvas.height = 2 * TRACK_H;
+    canvas.width = Math.round((canvas.height * probe.videoWidth) / Math.max(1, probe.videoHeight));
     const ctx = canvas.getContext("2d");
-    const count = Math.min(FILMSTRIP_MAX, Math.max(8, Math.ceil(duration)));
-    const out: string[] = [];
-    for (let i = 0; i < count && ctx; i++) {
+    const count = Math.min(120, Math.max(16, Math.ceil(duration * 3)));
+    frames = new Array(count).fill("");
+    const order = [...Array(count).keys()].sort((a, b) => (a % 8 === 0 ? 0 : 1) - (b % 8 === 0 ? 0 : 1) || a - b);
+    for (const i of order) {
+      if (!ctx) break;
       probe.currentTime = ((i + 0.5) * duration) / count;
       await new Promise((resolve) => probe.addEventListener("seeked", resolve, { once: true }));
       ctx.drawImage(probe, 0, 0, canvas.width, canvas.height);
-      out.push(canvas.toDataURL("image/jpeg", 0.7));
-      frames = [...out];
+      frames[i] = canvas.toDataURL("image/jpeg", 0.75);
     }
     probe.removeAttribute("src");
     probe.load();
   }
 
-  // ── Preview ────────────────────────────────────────────────────────────
+  // ── Stage ──────────────────────────────────────────────────────────────
 
   function hexRgb(hex: string): [number, number, number] {
     const h = hex.replace("#", "");
     return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) || 0) as [number, number, number];
   }
 
-  /** Overlays, cursor and click marks drawn over the playing video. */
+  /** Pointer position in source pixels. */
+  function toSource(e: { clientX: number; clientY: number }): Point {
+    const r = stage.getBoundingClientRect();
+    const ox = (e.clientX - r.left) / k;
+    const oy = (e.clientY - r.top) / k;
+    const s = layout.area.w / layout.crop.w;
+    return {
+      x: Math.max(0, Math.min(vw, (ox - layout.area.x) / s + layout.crop.x)),
+      y: Math.max(0, Math.min(vh, (oy - layout.area.y) / s + layout.crop.y)),
+    };
+  }
+
+  /** Source pixels → CSS pixels in the player. */
+  function toPlayer(p: Point) {
+    const s = layout.area.w / layout.crop.w;
+    return {
+      x: stageBox.left + (layout.area.x + (p.x - layout.crop.x) * s) * k,
+      y: stageBox.top + (layout.area.y + (p.y - layout.crop.y) * s) * k,
+    };
+  }
+
+  /** The picture as it will be exported: crop, ratio, background, then
+   * overlays, cursor and click marks drawn in source pixels. */
   function paint() {
-    if (!preview || !video) return;
+    if (!stage || !video) return;
     const dpr = window.devicePixelRatio || 1;
-    const w = Math.round(box.width * dpr);
-    const h = Math.round(box.height * dpr);
-    if (preview.width !== w || preview.height !== h) {
-      preview.width = w;
-      preview.height = h;
+    const w = Math.round(stageBox.width * dpr);
+    const h = Math.round(stageBox.height * dpr);
+    if (stage.width !== w || stage.height !== h) {
+      stage.width = w;
+      stage.height = h;
     }
-    const ctx = preview.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    const s = box.scale * dpr;
-    ctx.setTransform(s, 0, 0, s, 0, 0);
+    const ctx = stage.getContext("2d");
+    if (!ctx || !vw) return;
+    const { out, crop: c, area } = layout;
+    ctx.setTransform(dpr * k, 0, 0, dpr * k, 0, 0);
+    ctx.clearRect(0, 0, out.w, out.h);
+    if (layout.background) {
+      const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
+      const gradient = ctx.createLinearGradient(0, 0, out.w, out.h);
+      stops.forEach((stop, i) => gradient.addColorStop(i / Math.max(1, stops.length - 1), stop));
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, out.w, out.h);
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(area.x, area.y, area.w, area.h);
+    ctx.clip();
+    ctx.imageSmoothingQuality = "high";
+    if (video.readyState >= 2) ctx.drawImage(video, c.x, c.y, c.w, c.h, area.x, area.y, area.w, area.h);
+    const s = area.w / c.w;
+    ctx.translate(area.x - c.x * s, area.y - c.y * s);
+    ctx.scale(s, s);
+    /** One CSS pixel, in source pixels. */
+    const px = 1 / (k * s);
     const t = video.currentTime;
 
     const active = overlays.filter((o) => t >= o.start && t < o.end && o.id !== editing?.id).map((o) => o.shape);
     renderAnnotations(ctx, draft ? [...active, draft] : active);
-    if (selectedItem && t >= selectedItem.start && t < selectedItem.end) outline(ctx, bounds(ctx, selectedItem.shape), s);
 
     if (cursorTrack && (clickRing || cursorEditable)) {
       const scale = cursorScale;
       if (clickRing) {
         const [r, g, b] = hexRgb(clickColor);
-        for (const c of cursorTrack.clicks) {
-          if (c.t > t || t - c.t >= CLICK_MARK) continue;
-          const p = (t - c.t) / CLICK_MARK;
+        for (const click of cursorTrack.clicks) {
+          if (click.t > t || t - click.t >= CLICK_MARK) continue;
+          const p = (t - click.t) / CLICK_MARK;
           const eased = 1 - (1 - p) ** 3;
           ctx.strokeStyle = `rgba(${r},${g},${b},${(1 - p) * 0.9})`;
           ctx.lineWidth = 3 * Math.max(1, scale);
           ctx.beginPath();
-          ctx.arc(c.x, c.y, (6 + 26 * eased) * Math.max(1, scale), 0, Math.PI * 2);
+          ctx.arc(click.x, click.y, (6 + 26 * eased) * Math.max(1, scale), 0, Math.PI * 2);
           ctx.stroke();
         }
       }
@@ -344,21 +436,50 @@
       }
     }
 
-    const area = cropDraft ?? crop;
-    if (area) {
-      ctx.fillStyle = cropping ? "rgba(0,0,0,0.55)" : "rgba(0,0,0,0.65)";
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      ctx.fillRect(0, 0, vw, area.y);
-      ctx.fillRect(0, area.y + area.h, vw, vh - area.y - area.h);
-      ctx.fillRect(0, area.y, area.x, area.h);
-      ctx.fillRect(area.x + area.w, area.y, vw - area.x - area.w, area.h);
-      outline(ctx, area, s);
+    // Selection: outline and resize handles.
+    if (selectedItem && !cropping && !editing && t >= selectedItem.start && t < selectedItem.end) {
+      dashed(ctx, bounds(ctx, selectedItem.shape), px);
+      for (const hp of shapeHandles(ctx, selectedItem.shape)) handleDot(ctx, hp, px);
+    }
+    ctx.restore();
+
+    // Crop frame: the rest dimmed, thirds, corner brackets.
+    if (cropping && cropDraft) {
+      const r = cropDraft;
+      ctx.fillStyle = "rgba(8,8,10,0.62)";
+      ctx.fillRect(0, 0, vw, r.y);
+      ctx.fillRect(0, r.y + r.h, vw, vh - r.y - r.h);
+      ctx.fillRect(0, r.y, r.x, r.h);
+      ctx.fillRect(r.x + r.w, r.y, vw - r.x - r.w, r.h);
+      const line = 1 / k;
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = line;
+      ctx.beginPath();
+      for (const f of [1 / 3, 2 / 3]) {
+        ctx.moveTo(r.x + r.w * f, r.y);
+        ctx.lineTo(r.x + r.w * f, r.y + r.h);
+        ctx.moveTo(r.x, r.y + r.h * f);
+        ctx.lineTo(r.x + r.w, r.y + r.h * f);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2 * line;
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      const arm = Math.min(24 / k, r.w / 3, r.h / 3);
+      ctx.lineWidth = 5 * line;
+      ctx.beginPath();
+      for (const [i, p] of corners(r).entries()) {
+        const sx = i === 0 || i === 3 ? 1 : -1;
+        const sy = i < 2 ? 1 : -1;
+        ctx.moveTo(p.x + sx * arm, p.y);
+        ctx.lineTo(p.x, p.y);
+        ctx.lineTo(p.x, p.y + sy * arm);
+      }
+      ctx.stroke();
     }
   }
 
-  function outline(ctx: CanvasRenderingContext2D, r: { x: number; y: number; w: number; h: number }, s: number) {
-    const px = 1 / s;
+  function dashed(ctx: CanvasRenderingContext2D, r: Rect, px: number) {
     ctx.save();
     ctx.lineWidth = 1.5 * px;
     ctx.setLineDash([6 * px, 4 * px]);
@@ -370,14 +491,29 @@
     ctx.restore();
   }
 
+  function handleDot(ctx: CanvasRenderingContext2D, p: Point, px: number) {
+    const size = 10 * px;
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#8b7cff";
+    ctx.lineWidth = 2 * px;
+    ctx.beginPath();
+    ctx.roundRect(p.x - size / 2, p.y - size / 2, size, size, 3 * px);
+    ctx.fill();
+    ctx.stroke();
+  }
+
   // ── Playback ───────────────────────────────────────────────────────────
 
   /** Every frame while playing: skip removed parts, stop at the out point,
-   * play each part at its speed, keep the playhead in view. */
+   * play each part at its speed, sound the clicks, keep the playhead in
+   * view. */
   function follow() {
     if (!video) return;
     time = video.currentTime;
-    if (!playing) return;
+    if (!playing) {
+      lastClickCheck = time;
+      return;
+    }
     const next = nextKept(kept, time);
     if (next === null) {
       video.pause();
@@ -387,6 +523,16 @@
     if (next > time + 0.01) video.currentTime = next;
     const rate = partAt(kept, next)?.speed ?? 1;
     if (video.playbackRate !== rate) video.playbackRate = rate;
+    // Clicks passed since the last frame (not across a jump).
+    if (clickSound && cursorTrack && time > lastClickCheck && time - lastClickCheck < 0.5) {
+      for (const c of cursorTrack.clicks) {
+        if (c.t > lastClickCheck && c.t <= time) {
+          audioContext ??= new AudioContext();
+          playClick(audioContext);
+        }
+      }
+    }
+    lastClickCheck = time;
     if (scroller && zoom > 1) {
       const x = time * pxPerSecond;
       if (x < scroller.scrollLeft || x > scroller.scrollLeft + scroller.clientWidth - 40) {
@@ -427,6 +573,8 @@
       segments: $state.snapshot(segments),
       trim: $state.snapshot(trim),
       crop: $state.snapshot(crop),
+      ratio: $state.snapshot(ratio),
+      fit,
       overlays: $state.snapshot(overlays),
     });
 
@@ -444,9 +592,12 @@
     segments = parsed.segments;
     trim = parsed.trim;
     crop = parsed.crop;
+    ratio = parsed.ratio;
+    fit = parsed.fit;
     overlays = parsed.overlays;
     selectedOverlay = null;
     selectedSegment = null;
+    cropping = false;
   }
 
   const undo = () => restore(past, future);
@@ -504,8 +655,7 @@
     const t = timeAt(e);
     seek(t);
     selectedOverlay = null;
-    const i = indexAt(segments, t);
-    selectedSegment = (e.target as HTMLElement).closest(".track") ? i : selectedSegment;
+    selectedSegment = (e.target as HTMLElement).closest(".track") ? indexAt(segments, t) : null;
   }
 
   function trimDown(e: PointerEvent, edge: "start" | "end") {
@@ -518,13 +668,14 @@
     drag = { kind: "trim", edge };
   }
 
-  /** Dragging a bar of the overlay lane changes when it shows. */
+  /** Dragging a bar of the overlay lanes changes when it shows. */
   function barDown(e: PointerEvent, o: Overlay, edge: "start" | "end" | "both") {
     e.stopPropagation();
     if (e.button !== 0) return;
     content.setPointerCapture(e.pointerId);
     selectedOverlay = o.id;
     selectedSegment = null;
+    tool = "select";
     past.push(snapshot());
     future = [];
     drag = { kind: "bar", id: o.id, edge, from: timeAt(e), start: o.start, end: o.end };
@@ -532,8 +683,7 @@
 
   function timelineMove(e: PointerEvent) {
     if (!drag) return;
-    const free = e.altKey;
-    const at = (t: number, exclude?: number) => (free ? t : snap(t, snapTargets(exclude), reach));
+    const at = (t: number, exclude?: number) => (e.altKey ? t : snap(t, snapTargets(exclude), reach));
     if (drag.kind === "time") {
       seek(timeAt(e));
     } else if (drag.kind === "trim") {
@@ -549,7 +699,6 @@
       else {
         const length = d.end - d.start;
         const start = at(d.start + delta, o.id);
-        // Snap either end.
         const end = at(start + length, o.id);
         o.start = Math.max(0, Math.min(duration - length, end !== start + length ? end - length : start));
         o.end = o.start + length;
@@ -583,15 +732,62 @@
     });
   }
 
-  // ── Overlays ───────────────────────────────────────────────────────────
+  // ── Format and crop ────────────────────────────────────────────────────
 
-  function toVideo(e: { clientX: number; clientY: number }): Point {
-    const r = player.getBoundingClientRect();
-    return {
-      x: Math.max(0, Math.min(video.videoWidth, (e.clientX - r.left - box.left) / box.scale)),
-      y: Math.max(0, Math.min(video.videoHeight, (e.clientY - r.top - box.top) / box.scale)),
-    };
+  function startCrop() {
+    video?.pause();
+    editing = null;
+    cropDraft = crop ? { ...crop } : lockedRatio && ratio ? ratioCrop(full, ratio) : { ...full };
+    cropping = true;
   }
+
+  /** Keeps the frame being edited; the whole frame means no crop. */
+  function applyCrop() {
+    const r = cropDraft;
+    cropping = false;
+    cropDraft = null;
+    if (!r) return;
+    const even = (v: number) => Math.round(v) & ~1;
+    const next = { x: even(r.x), y: even(r.y), w: even(r.w), h: even(r.h) };
+    const entire = next.x === 0 && next.y === 0 && next.w >= (vw & ~1) && next.h >= (vh & ~1);
+    const value = entire && !lockedRatio ? null : next;
+    if (JSON.stringify(value) !== JSON.stringify(crop)) commit(() => (crop = value));
+  }
+
+  function cancelCrop() {
+    cropping = false;
+    cropDraft = null;
+  }
+
+  function chooseRatio(r: [number, number] | null) {
+    if (JSON.stringify(r) === JSON.stringify(ratio)) return;
+    commit(() => {
+      const wasFill = ratio && fit === "fill";
+      ratio = r;
+      if (!r) {
+        if (wasFill) crop = null;
+        cropping = false;
+        return;
+      }
+      if (fit === "fill") {
+        const centre = crop ? { x: crop.x + crop.w / 2, y: crop.y + crop.h / 2 } : undefined;
+        crop = ratioCrop(full, r, centre);
+      }
+    });
+    if (r && fit === "fill") startCrop();
+  }
+
+  function chooseFit(mode: "fill" | "fit") {
+    if (mode === fit || !ratio) return;
+    commit(() => {
+      fit = mode;
+      crop = mode === "fill" && ratio ? ratioCrop(full, ratio) : null;
+    });
+    if (mode === "fill") startCrop();
+    else cancelCrop();
+  }
+
+  // ── Overlays ───────────────────────────────────────────────────────────
 
   function make(kind: ShapeKind, p: Point, extra: Partial<Shape> = {}): Shape {
     return {
@@ -616,33 +812,58 @@
     selectedSegment = null;
   }
 
+  const measureCtx = () => stage.getContext("2d");
+
   function topmost(p: Point): Overlay | undefined {
-    const ctx = preview.getContext("2d");
+    const ctx = measureCtx();
     if (!ctx) return undefined;
     return [...overlays]
       .reverse()
-      .find((o) => time >= o.start && time < o.end && hit(ctx, o.shape, p, 8 / box.scale));
+      .find((o) => time >= o.start && time < o.end && hit(ctx, o.shape, p, 8 / sourceScale));
+  }
+
+  /** Resize handle of the selected item under `p`, or -1. */
+  function handleAt(p: Point): number {
+    const ctx = measureCtx();
+    const o = selectedItem;
+    if (!ctx || !o || time < o.start || time >= o.end) return -1;
+    return shapeHandles(ctx, o.shape).findIndex((h) => Math.hypot(h.x - p.x, h.y - p.y) * sourceScale <= 10);
   }
 
   function chooseTool(t: Tool) {
     tool = t;
-    cropping = false;
+    if (cropping) applyCrop();
     if (t !== "select") video?.pause();
   }
 
   function stageDown(e: PointerEvent) {
-    if (!video?.videoWidth || e.button !== 0) return;
+    if (!vw || e.button !== 0) return;
     e.preventDefault();
     menu = null;
     if (editing) return commitText();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    const p = toVideo(e);
-    if (cropping) {
-      drag = { kind: "crop", start: p };
-      cropDraft = { ...p, w: 0, h: 0 };
+    const p = toSource(e);
+    if (cropping && cropDraft) {
+      const r = cropDraft;
+      const cs = corners(r);
+      const near = cs.findIndex((c) => Math.hypot(c.x - p.x, c.y - p.y) * k <= 16);
+      if (near >= 0) drag = { kind: "cropCorner", anchor: cs[(near + 2) % 4] as Point };
+      else if (p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h)
+        drag = { kind: "cropMove", from: p, rect: { ...r } };
+      else {
+        drag = { kind: "cropCorner", anchor: p };
+        cropDraft = { ...p, w: 1, h: 1 };
+      }
       return;
     }
     if (tool === "select") {
+      const handle = handleAt(p);
+      if (handle >= 0 && selectedItem) {
+        video.pause();
+        past.push(snapshot());
+        drag = { kind: "resize", handle, original: $state.snapshot(selectedItem.shape) as Shape, moved: false };
+        return;
+      }
       const found = topmost(p);
       selectedOverlay = found?.id ?? null;
       if (found) {
@@ -674,11 +895,23 @@
   }
 
   function stageMove(e: PointerEvent) {
-    if (!drag) return;
-    const p = toVideo(e);
-    if (drag.kind === "crop") {
-      const s = drag.start;
-      cropDraft = { x: Math.min(p.x, s.x), y: Math.min(p.y, s.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y) };
+    if (!vw) return;
+    const p = toSource(e);
+    if (!drag) {
+      hover = !cropping && tool === "select" ? handleAt(p) : -1;
+      return;
+    }
+    if (drag.kind === "cropCorner") {
+      cropDraft = dragCorner(drag.anchor, p, full, lockedRatio);
+    } else if (drag.kind === "cropMove") {
+      const r = drag.rect;
+      cropDraft = clampRect({ ...r, x: r.x + p.x - drag.from.x, y: r.y + p.y - drag.from.y }, full);
+    } else if (drag.kind === "resize") {
+      const ctx = measureCtx();
+      const o = selectedItem;
+      if (!ctx || !o) return;
+      drag.moved = true;
+      o.shape = resizeShape(ctx, drag.original, drag.handle, p);
     } else if (drag.kind === "move") {
       const o = selectedItem;
       if (!o) return;
@@ -692,7 +925,7 @@
       if (o.shape.points) o.shape.points = o.shape.points.map((q) => ({ x: q.x + dx, y: q.y + dy }));
       drag.last = p;
     } else if (drag.kind === "draw" && draft) {
-      drag.moved ||= Math.hypot(p.x - drag.start.x, p.y - drag.start.y) * box.scale > 3;
+      drag.moved ||= Math.hypot(p.x - drag.start.x, p.y - drag.start.y) * sourceScale > 3;
       if (FREEHAND.includes(draft.kind)) draft.points = [...(draft.points ?? []), p];
       else if (e.shiftKey && LINEAR.includes(draft.kind)) {
         const angle = Math.round(Math.atan2(p.y - draft.y1, p.x - draft.x1) / (Math.PI / 4)) * (Math.PI / 4);
@@ -710,14 +943,9 @@
     const current = drag;
     if (!current || current.kind === "time" || current.kind === "trim" || current.kind === "bar") return;
     drag = null;
-    if (current.kind === "crop") {
-      const area = cropDraft;
-      cropDraft = null;
-      if (area && area.w > 8 && area.h > 8) {
-        commit(() => (crop = { x: Math.round(area.x), y: Math.round(area.y), w: Math.round(area.w), h: Math.round(area.h) }));
-        cropping = false;
-      }
-    } else if (current.kind === "move") {
+    if (current.kind === "cropCorner" && cropDraft && (cropDraft.w < 16 || cropDraft.h < 16)) {
+      cropDraft = crop ? { ...crop } : { ...full };
+    } else if (current.kind === "move" || current.kind === "resize") {
       if (!current.moved) past.pop();
       else future = [];
     } else if (current.kind === "draw" && draft) {
@@ -728,7 +956,8 @@
   }
 
   function stageDouble(e: MouseEvent) {
-    const found = topmost(toVideo(e));
+    if (cropping) return applyCrop();
+    const found = topmost(toSource(e));
     if (found?.shape.kind === "text") {
       video.pause();
       selectedOverlay = found.id;
@@ -768,8 +997,10 @@
 
   const textStyle = $derived.by(() => {
     if (!editing) return "";
-    const size = fontSize((level + 1) * unit) * box.scale;
-    return `left:${box.left + editing.x * box.scale}px;top:${box.top + editing.y * box.scale}px;font-size:${size}px;color:${color}`;
+    const existing = overlays.find((o) => o.id === editing?.id);
+    const size = fontSize(existing?.shape.size ?? (level + 1) * unit) * sourceScale;
+    const at = toPlayer(editing);
+    return `left:${at.x}px;top:${at.y}px;font-size:${size}px;color:${existing?.shape.color ?? color}`;
   });
 
   function removeOverlay() {
@@ -842,7 +1073,7 @@
         ? { visible: cursorVisible, scale: cursorScale, image, halo: halo ? [...hexRgb(haloColor), 90] : null }
         : null,
       clicks: clickRing || clickSound ? { ring: clickRing, color: hexRgb(clickColor), sound: clickSound } : null,
-      canvas: ratio ? { ratio: [ratio[0], ratio[1]], colors: bg.map(hexRgb), padding: margin } : null,
+      canvas: ratio && fit === "fit" ? { ratio: [ratio[0], ratio[1]], colors: bg.map(hexRgb), padding: margin } : null,
     };
   }
 
@@ -862,7 +1093,7 @@
       kept[0]!.speed === 1 &&
       kept[0]!.end - kept[0]!.start >= duration - 0.01 &&
       !crop &&
-      !ratio &&
+      !(ratio && fit === "fit") &&
       !overlays.length &&
       !clickRing &&
       !clickSound &&
@@ -873,7 +1104,7 @@
   );
 
   async function exportAs(kind: "mp4" | "gif", copy = false) {
-    menu = null;
+    if (cropping) applyCrop();
     if (!config || !kept.length) return;
     try {
       const job = await editorExport(
@@ -904,6 +1135,11 @@
     toast = text;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => (toast = ""), 3000);
+  }
+
+  function listen() {
+    audioContext ??= new AudioContext();
+    playClick(audioContext);
   }
 
   // ── Keyboard ───────────────────────────────────────────────────────────
@@ -965,11 +1201,14 @@
         commit(() => trimTo("end", time));
         break;
       case "c":
-        cropping = !cropping;
-        if (cropping) video.pause();
+        if (cropping) applyCrop();
+        else startCrop();
+        break;
+      case "enter":
+        if (cropping) applyCrop();
         break;
       case "escape":
-        cropping = false;
+        if (cropping) cancelCrop();
         selectedOverlay = null;
         selectedSegment = null;
         draft = null;
@@ -983,158 +1222,102 @@
     bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
   const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
   const stageCursor = $derived(
-    cropping ? "crosshair" : tool === "select" ? "default" : tool === "text" ? "text" : "crosshair",
+    cropping
+      ? "crosshair"
+      : tool === "select"
+        ? hover === 0 || hover === 2
+          ? "nwse-resize"
+          : hover === 1 || hover === 3
+            ? "nesw-resize"
+            : "default"
+        : tool === "text"
+          ? "text"
+          : "crosshair",
   );
-  const frameStyle = $derived.by(() => {
-    if (!ratio) return "";
-    const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
-    return `aspect-ratio:${ratio[0]}/${ratio[1]};background:linear-gradient(135deg,${stops.join(",")});padding:${margin * 100}%`;
+  const outputSize = $derived.by(() => {
+    if (!vw) return "";
+    const fitted = ratio && fit === "fit" ? fitLayout(crop ?? full, ratio, margin).out : null;
+    const w = fitted?.w ?? crop?.w ?? vw;
+    const h = fitted?.h ?? crop?.h ?? vh;
+    return `${Math.round(w) & ~1}×${Math.round(h) & ~1}`;
   });
-  const resultSize = $derived.by(() => {
-    if (!video?.videoWidth && !crop) return "";
-    const w = crop?.w ?? video?.videoWidth ?? 0;
-    const h = crop?.h ?? video?.videoHeight ?? 0;
-    return w && h ? `${w & ~1}×${h & ~1}` : "";
-  });
-  const activeJobs = $derived(jobs.slice(0, 3));
+  const barIcon = (kind: ShapeKind): IconName =>
+    (["text", "arrow", "line", "rect", "ellipse", "pen", "highlight", "number"] as const).find((k) => k === kind) ?? "rect";
 </script>
 
 <svelte:window onkeydown={keyDown} />
 
 <div class="editor">
-  <header class="topbar">
-    <span class="title" title={path}>{name(path)}</span>
-    <div class="group">
-      <button type="button" class="icon" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}
-        ><Icon name="undo" /></button
-      >
-      <button type="button" class="icon" title="Redo (Ctrl+Y)" aria-label="Redo" disabled={!future.length} onclick={redo}
-        ><Icon name="redo" /></button
-      >
-    </div>
-    <span class="summary"
-      >Result <strong>{format(output)}</strong>{resultSize ? ` · ${resultSize}` : ""}{ratio ? ` · ${ratio[0]}:${ratio[1]}` : ""}</span
-    >
-    <div class="spacer"></div>
-    <button type="button" class="action" onclick={copyVideo} disabled={!duration} title="Copy the result to the clipboard (Ctrl+C)"
-      ><Icon name="copy" /> Copy</button
-    >
-    <div class="split-button">
-      <button type="button" class="action primary" onclick={() => exportAs("mp4")} disabled={!duration} title="Export MP4 (Ctrl+E)"
-        ><Icon name="export" /> Export</button
-      >
-      <button
-        type="button"
-        class="action primary caret opens-menu"
-        aria-label="Export options"
-        aria-expanded={menu === "export"}
-        onclick={() => (menu = menu === "export" ? null : "export")}><Icon name="chevron" /></button
-      >
-      {#if menu === "export"}
-        <div class="popover export-menu" role="dialog" aria-label="Export options">
-          <section>
-            <h3>MP4</h3>
-            <label class="field"
-              >Quality
-              <select bind:value={quality}>{#each QUALITIES as q (q.value)}<option value={q.value}>{q.label}</option>{/each}</select>
-            </label>
-            <label class="check"><input type="checkbox" bind:checked={audio} /> Keep the sound</label>
-            <button type="button" class="primary wide" onclick={() => exportAs("mp4")}>Export MP4 <Kbd keys="Ctrl+E" /></button>
-          </section>
-          <section>
-            <h3>GIF</h3>
-            <div class="pair">
-              <label class="field"
-                >Frame rate
-                <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
-              </label>
-              <label class="field"
-                >Width
-                <select bind:value={gifWidth}
-                  >{#each GIF_WIDTHS as w (w)}<option value={w}>{w === 0 ? "Original" : `${w} px`}</option>{/each}</select
-                >
-              </label>
-            </div>
-            <button type="button" class="wide" onclick={() => exportAs("gif")} disabled={!config}>Export GIF</button>
-          </section>
-        </div>
-      {/if}
-    </div>
-  </header>
-
-  <nav class="toolbox" aria-label="Tools">
-    <div class="tools" role="toolbar">
-      {#each TOOLS as t (t.tool)}
+  <div class="main">
+    <nav class="toolbox" aria-label="Tools">
+      <div class="cluster">
+        <button type="button" class="tool" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}
+          ><Icon name="undo" /></button
+        >
+        <button type="button" class="tool" title="Redo (Ctrl+Y)" aria-label="Redo" disabled={!future.length} onclick={redo}
+          ><Icon name="redo" /></button
+        >
+      </div>
+      <span class="sep"></span>
+      <div class="cluster" role="toolbar">
+        {#each TOOLS as t (t.tool)}
+          <button
+            type="button"
+            class="tool"
+            class:active={tool === t.tool && !cropping}
+            title="{t.label} ({t.key})"
+            aria-label={t.label}
+            aria-pressed={tool === t.tool && !cropping}
+            onclick={() => chooseTool(t.tool)}
+          >
+            <Icon name={t.icon} />
+            <span class="key">{t.key}</span>
+          </button>
+        {/each}
         <button
           type="button"
           class="tool"
-          class:active={tool === t.tool && !cropping}
-          title="{t.label} ({t.key})"
-          aria-label={t.label}
-          aria-pressed={tool === t.tool && !cropping}
-          onclick={() => chooseTool(t.tool)}
+          class:active={cropping}
+          title="Crop: choose the area to keep (C)"
+          aria-label="Crop"
+          aria-pressed={cropping}
+          onclick={() => (cropping ? applyCrop() : startCrop())}
         >
-          <Icon name={t.icon} />
-          <span class="key">{t.key}</span>
+          <Icon name="crop" />
+          <span class="key">C</span>
         </button>
-      {/each}
+      </div>
       <span class="sep"></span>
-      <button
-        type="button"
-        class="tool"
-        class:active={cropping}
-        title="Crop: draw the area to keep (C)"
-        aria-label="Crop"
-        aria-pressed={cropping}
-        onclick={() => {
-          cropping = !cropping;
-          if (cropping) video.pause();
-        }}
-      >
-        <Icon name="crop" />
-        <span class="key">C</span>
-      </button>
-    </div>
-    <span class="sep"></span>
-    <div class="colors" role="group" aria-label="Colour">
-      {#each COLORS as c (c)}
-        <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}
-        ></button>
-      {/each}
-      <label class="custom" title="Any colour" style="--swatch:{color}"
-        ><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label
-      >
-    </div>
-    <span class="sep"></span>
-    <div class="levels" role="group" aria-label="Thickness">
-      {#each LEVELS as l (l.level)}
-        <button type="button" class="tool" class:active={level === l.level} title={l.label} aria-label={l.label} onclick={() => setLevel(l.level)}
-          ><span class="dot" style="--d:{3 + l.level * 2}px"></span></button
+      <div class="cluster colors" role="group" aria-label="Colour">
+        {#each COLORS as c (c)}
+          <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}
+          ></button>
+        {/each}
+        <label class="custom" title="Any colour"
+          ><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label
         >
-      {/each}
-    </div>
-    <div class="spacer"></div>
-    {#if selectedItem}
-      <span class="context">
-        {selectedItem.shape.kind === "text" ? "Text" : selectedItem.shape.kind} · {format(selectedItem.start)} → {format(selectedItem.end)}
-      </span>
-      <button type="button" class="tool" title="Delete the selected item (Del)" aria-label="Delete the selected item" onclick={removeOverlay}
-        ><Icon name="trash" /></button
-      >
-    {:else if cropping}
-      <span class="context">Drag over the video to keep only that area · <Kbd keys="Esc" /> cancel</span>
-    {:else if tool !== "select"}
-      <span class="context">Click or drag on the video · shows for {OVERLAY_LENGTH} s, adjust it on the timeline</span>
-    {:else}
-      <span class="context">Click the video to play · click an item to select it</span>
-    {/if}
-  </nav>
+      </div>
+      <span class="sep"></span>
+      <div class="cluster" role="group" aria-label="Thickness">
+        {#each LEVELS as l (l.level)}
+          <button type="button" class="tool" class:active={level === l.level} title={l.label} aria-label={l.label} onclick={() => setLevel(l.level)}
+            ><span class="dot" style="--d:{3 + l.level * 2}px"></span></button
+          >
+        {/each}
+      </div>
+      <div class="spacer"></div>
+      {#if cropping}
+        <span class="context">Drag the frame or its corners{lockedRatio ? ` · ${ratio?.join(":")} kept` : ""}</span>
+      {:else if selectedItem}
+        <span class="context">Drag to move · corners to resize · double-click a text to edit</span>
+      {:else if tool !== "select"}
+        <span class="context">Click or drag on the video · shows {OVERLAY_LENGTH} s</span>
+      {/if}
+    </nav>
 
-  <div class="body">
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="player"
-      class:framed={!!ratio}
       bind:this={player}
       onpointerdown={stageDown}
       onpointermove={stageMove}
@@ -1142,23 +1325,22 @@
       ondblclick={stageDouble}
       style="cursor:{stageCursor}"
     >
-      <div class="frame" style={frameStyle}>
-        <!-- svelte-ignore a11y_media_has_caption -->
-        <video
-          bind:this={video}
-          src={source}
-          preload="auto"
-          onloadedmetadata={loaded}
-          onresize={measure}
-          onplay={() => (playing = true)}
-          onpause={() => (playing = false)}
-          onerror={() => (error = "This video cannot be played here, but it can still be exported.")}
-        ></video>
-      </div>
+      <!-- Plays the sound and feeds the stage; never shown itself. -->
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video
+        bind:this={video}
+        src={source}
+        preload="auto"
+        onloadedmetadata={loaded}
+        onplay={() => (playing = true)}
+        onpause={() => (playing = false)}
+        onerror={() => (error = "This video cannot be played here, but it can still be exported.")}
+      ></video>
       <canvas
-        bind:this={preview}
-        class="preview"
-        style="left:{box.left}px;top:{box.top}px;width:{box.width}px;height:{box.height}px"
+        bind:this={stage}
+        class="stage"
+        class:framed={layout.background}
+        style="left:{stageBox.left}px;top:{stageBox.top}px;width:{stageBox.width}px;height:{stageBox.height}px"
       ></canvas>
       {#if editing}
         <textarea
@@ -1173,83 +1355,271 @@
           onpointerdown={(e) => e.stopPropagation()}
         ></textarea>
       {/if}
-      {#if error}<p class="error">{error}</p>{/if}
-      {#if toast}<div class="toast" role="status">{toast}</div>{/if}
-      {#if activeJobs.length}
-        <div class="jobs" onpointerdown={(e) => e.stopPropagation()} role="status">
-          {#each activeJobs as j (j.job)}
-            <div class="job">
-              <span class="kind">{j.kind === "copy" ? "Copy" : j.kind.toUpperCase()}</span>
-              {#if j.error}
-                <span class="failed" title={j.error}>{j.error}</span>
-              {:else if j.output}
-                <span class="name" title={j.output}>{name(j.output)} · {size(j.bytes ?? 0)}</span>
-                <button type="button" class="icon small" title="Show in folder" aria-label="Show in folder" onclick={() => j.output && showInFolder(j.output)}
-                  ><Icon name="folder" /></button
-                >
-              {:else}
-                <progress max="1" value={j.done}></progress>
-                <span class="pct">{Math.round(j.done * 100)}%</span>
-              {/if}
-            </div>
-          {/each}
+      {#if cropping}
+        <div class="crop-bar" onpointerdown={(e) => e.stopPropagation()} role="toolbar" aria-label="Crop" tabindex="-1">
+          <span>{cropDraft ? `${Math.round(cropDraft.w) & ~1} × ${Math.round(cropDraft.h) & ~1}` : ""}</span>
+          <button type="button" class="ghost" onclick={() => (cropDraft = lockedRatio && ratio ? ratioCrop(full, ratio) : { ...full })}
+            >Reset</button
+          >
+          <button type="button" class="ghost" onclick={cancelCrop}>Cancel <Kbd keys="Esc" /></button>
+          <button type="button" class="pill" onclick={applyCrop}><Icon name="check" /> Done <Kbd keys="Enter" /></button>
         </div>
       {/if}
+      {#if error}<p class="error">{error}</p>{/if}
+      {#if toast}<div class="toast" role="status">{toast}</div>{/if}
     </div>
 
-    <aside class="inspector">
+    <footer class="dock">
+      <div class="controls">
+        <div class="side left">
+          <button type="button" class="act" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)"
+            ><Icon name="split" /> Split <Kbd keys="S" /></button
+          >
+          <button
+            type="button"
+            class="act"
+            class:danger={current?.kept !== false}
+            onclick={() => removePart()}
+            disabled={!duration}
+            title={current?.kept === false ? "Restore this part (Del)" : "Delete this part (Del)"}
+            ><Icon name={current?.kept === false ? "restore" : "trash"} />
+            {current?.kept === false ? "Restore" : "Delete"} <Kbd keys="Del" /></button
+          >
+          <div class="anchor">
+            <button
+              type="button"
+              class="act opens-menu"
+              class:on={(current?.speed ?? 1) !== 1}
+              disabled={!duration}
+              aria-expanded={menu === "speed"}
+              title="Speed of this part"
+              onclick={() => (menu = menu === "speed" ? null : "speed")}
+              ><Icon name="speed" /> {speedLabel(current?.speed ?? 1)} <Icon name="chevron" /></button
+            >
+            {#if menu === "speed"}
+              <div class="popover speeds" role="menu">
+                {#each SPEEDS as sp (sp)}
+                  <button type="button" role="menuitem" class:active={(current?.speed ?? 1) === sp} onclick={() => speedPart(sp)}
+                    >{speedLabel(sp)}</button
+                  >
+                {/each}
+                <div class="all">
+                  All parts
+                  {#each [1, 1.5, 2] as sp (sp)}<button type="button" class="chip" onclick={() => allSpeeds(sp)}>{speedLabel(sp)}</button>{/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+        </div>
+
+        <div class="center">
+          <button type="button" class="round" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
+            ><Icon name="start" /></button
+          >
+          <button type="button" class="round play" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
+            <Icon name={playing ? "pause" : "play"} />
+          </button>
+          <button type="button" class="round" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
+            ><Icon name="end" /></button
+          >
+          <span class="time">{format(time)} <span class="muted">/ {format(output)}</span></span>
+        </div>
+
+        <div class="side right">
+          <span class="hint-keys"><Kbd keys="I" /><Kbd keys="O" /> trim · <Kbd keys="Alt" /> free</span>
+          <div class="zoom">
+            <button type="button" class="round small" aria-label="Zoom out" title="Zoom out (Ctrl+-)" disabled={zoom <= 1} onclick={() => zoomBy(1 / 1.5)}
+              ><Icon name="minus" /></button
+            >
+            <input
+              type="range"
+              min="0"
+              max={Math.log(MAX_ZOOM)}
+              step="0.01"
+              value={Math.log(zoom)}
+              aria-label="Timeline zoom"
+              oninput={(e) => (zoom = Math.exp(Number(e.currentTarget.value)))}
+            />
+            <button type="button" class="round small" aria-label="Zoom in" title="Zoom in (Ctrl++)" disabled={zoom >= MAX_ZOOM} onclick={() => zoomBy(1.5)}
+              ><Icon name="plus" /></button
+            >
+          </div>
+        </div>
+      </div>
+
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="scroller" bind:this={scroller} onwheel={wheel}>
+        <div
+          class="content"
+          bind:this={content}
+          style="width:{zoom * 100}%"
+          onpointerdown={scrubDown}
+          onpointermove={timelineMove}
+          onpointerup={timelineUp}
+          onpointercancel={timelineUp}
+        >
+          <div class="ruler">
+            {#each ticks as t (t)}
+              <span class="tick" style="left:{percent(t)}%">{label(t, step)}</span>
+            {/each}
+          </div>
+
+          <div class="track" style="height:{TRACK_H}px">
+            <div class="filmstrip">
+              {#each tiles as tile, i (i)}
+                {#if tile.src}<img src={tile.src} alt="" draggable="false" style="left:{tile.left}px;width:{tile.width}px" />{/if}
+              {/each}
+            </div>
+            {#each segments as sg, i (sg.start)}
+              <div
+                class="segment"
+                class:removed={!sg.kept}
+                class:selected={selectedSegment === i}
+                class:cut={i > 0}
+                style="left:{percent(sg.start)}%;width:{percent(sg.end) - percent(sg.start)}%"
+              >
+                {#if sg.kept && sg.speed !== 1}<span class="badge">{speedLabel(sg.speed)}</span>{/if}
+                <div class="part-tools">
+                  <button
+                    type="button"
+                    title={sg.kept ? "Delete this part" : "Restore this part"}
+                    aria-label={sg.kept ? "Delete this part" : "Restore this part"}
+                    onpointerdown={(e) => e.stopPropagation()}
+                    onclick={() => removePart(i)}><Icon name={sg.kept ? "trash" : "restore"} /></button
+                  >
+                  {#if sg.kept}
+                    <button
+                      type="button"
+                      class="opens-menu"
+                      title="Speed of this part"
+                      onpointerdown={(e) => e.stopPropagation()}
+                      onclick={() => {
+                        selectedSegment = i;
+                        menu = "speed";
+                      }}>{speedLabel(sg.speed)}</button
+                    >
+                  {/if}
+                </div>
+              </div>
+            {/each}
+            <div class="outside" style="left:0;width:{percent(trim.start)}%"></div>
+            <div class="outside" style="left:{percent(trim.end)}%;right:0"></div>
+            <div class="trim-frame" style="left:{percent(trim.start)}%;width:{percent(trim.end) - percent(trim.start)}%"></div>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="handle start" style="left:{percent(trim.start)}%" title="Drag to trim the start (I)" onpointerdown={(e) => trimDown(e, "start")}></div>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="handle end" style="left:{percent(trim.end)}%" title="Drag to trim the end (O)" onpointerdown={(e) => trimDown(e, "end")}></div>
+          </div>
+
+          <div class="lanes" style="height:{rows.count * ROW_H + 6}px">
+            {#if !overlays.length}
+              <span class="lane-hint">Texts and shapes appear here — drag a bar to choose when it shows</span>
+            {/if}
+            {#each overlays as o (o.id)}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="bar"
+                class:selected={selectedOverlay === o.id}
+                style="left:{percent(o.start)}%;width:{percent(o.end) - percent(o.start)}%;top:{3 + (rows.row.get(o.id) ?? 0) * ROW_H}px;--bar:{o.shape.color}"
+                onpointerdown={(e) => barDown(e, o, "both")}
+              >
+                <span class="edge left" onpointerdown={(e) => barDown(e, o, "start")}></span>
+                <span class="label"
+                  ><Icon name={barIcon(o.shape.kind)} />{o.shape.kind === "text"
+                    ? o.shape.text
+                    : o.shape.kind === "number"
+                      ? `Step ${o.shape.n}`
+                      : o.shape.kind}</span
+                >
+                <span class="edge right" onpointerdown={(e) => barDown(e, o, "end")}></span>
+              </div>
+            {/each}
+          </div>
+
+          <div class="playhead" style="left:{percent(time)}%"><span class="knob"></span></div>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <aside class="side-panel">
+    <header class="panel-head">
+      <div class="file" title={path}><span class="glyph"><Icon name="play" /></span>{name(path)}</div>
+      <div class="sub">{format(output)}{outputSize ? ` · ${outputSize}` : ""}{kept.length > 1 ? ` · ${kept.length} parts` : ""}</div>
+    </header>
+
+    <div class="panel-scroll">
       {#if selectedItem}
         <details open>
-          <summary>Selected item</summary>
-          <p class="note">Shows {format(selectedItem.start)} → {format(selectedItem.end)}. Drag its bar on the timeline to move it in time.</p>
+          <summary><span class="ic sel"></span>Selected item</summary>
+          <p class="note">Shows {format(selectedItem.start)} → {format(selectedItem.end)}.</p>
           <div class="pair">
             <button type="button" onclick={() => setOverlayTime("start")}>From playhead</button>
             <button type="button" onclick={() => setOverlayTime("end")}>Until playhead</button>
           </div>
-          <button type="button" class="wide" onclick={removeOverlay}><Icon name="trash" /> Delete <Kbd keys="Del" /></button>
+          <button type="button" class="wide danger-text" onclick={removeOverlay}><Icon name="trash" /> Delete <Kbd keys="Del" /></button>
         </details>
       {/if}
       <details open>
-        <summary>Format</summary>
-        <div class="chips">
+        <summary><span class="ic fmt"></span>Format</summary>
+        <div class="ratios">
           {#each RATIOS as r (r.label)}
-            <button
-              type="button"
-              class="chip"
-              class:active={(ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)}
-              onclick={() => (ratio = r.ratio)}>{r.label}</button
-            >
+            {@const active = (ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)}
+            <button type="button" class="ratio" class:active onclick={() => chooseRatio(r.ratio)} aria-pressed={active}>
+              <span
+                class="shape"
+                style={r.ratio
+                  ? `aspect-ratio:${r.ratio[0]}/${r.ratio[1]};${r.ratio[0] >= r.ratio[1] ? "width:22px" : "height:22px"}`
+                  : "width:22px;height:15px;border-style:dashed"}
+              ></span>
+              {r.label}
+            </button>
           {/each}
         </div>
         {#if ratio}
-          <div class="chips">
-            {#each BACKGROUNDS as b, i (b.name)}
-              <button
-                type="button"
-                class="swatch wide-swatch"
-                class:active={background === i}
-                style="--swatch:linear-gradient(135deg,{b.stops.join(',')})"
-                title={b.name}
-                aria-label={b.name}
-                onclick={() => (background = i)}
-              ></button>
-            {/each}
+          <div class="segmented" role="radiogroup" aria-label="How the video fills the format">
+            <button type="button" class:active={fit === "fill"} role="radio" aria-checked={fit === "fill"} onclick={() => chooseFit("fill")}
+              >Fill · crop</button
+            >
+            <button type="button" class:active={fit === "fit"} role="radio" aria-checked={fit === "fit"} onclick={() => chooseFit("fit")}
+              >Fit · background</button
+            >
           </div>
-          <label class="field">Margin <input type="range" min="0" max="0.2" step="0.01" bind:value={margin} /></label>
+          {#if fit === "fit"}
+            <div class="chips">
+              {#each BACKGROUNDS as b, i (b.name)}
+                <button
+                  type="button"
+                  class="swatch wide-swatch"
+                  class:active={background === i}
+                  style="--swatch:linear-gradient(135deg,{b.stops.join(',')})"
+                  title={b.name}
+                  aria-label={b.name}
+                  onclick={() => (background = i)}
+                ></button>
+              {/each}
+            </div>
+            <label class="field">Margin <input type="range" min="0" max="0.2" step="0.01" bind:value={margin} /></label>
+          {:else}
+            <p class="note">The video fills the {ratio.join(":")} frame, no borders: drag it to choose what stays visible.</p>
+          {/if}
         {/if}
         <div class="pair">
-          <button type="button" class:active={cropping} onclick={() => (cropping = !cropping)}><Icon name="crop" /> Crop</button>
-          <button type="button" disabled={!crop} onclick={() => commit(() => (crop = null))}>Reset crop</button>
+          <button type="button" class:active={cropping} onclick={() => (cropping ? applyCrop() : startCrop())}
+            ><Icon name="crop" /> {ratio && fit === "fill" ? "Reframe" : "Crop"}</button
+          >
+          <button type="button" disabled={!crop || !!(ratio && fit === "fill")} onclick={() => commit(() => (crop = null))}>Reset</button>
         </div>
       </details>
       <details open>
-        <summary>Cursor</summary>
+        <summary><span class="ic cur"></span>Cursor</summary>
         {#if !cursorTrack}
           <p class="note">Needs a Kadra recording made with “editable cursor” on (Settings › Recording).</p>
         {:else if cursorEditable}
           <label class="check"><input type="checkbox" bind:checked={cursorVisible} /> Show the pointer</label>
           <label class="field"
-            >Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} /> <span class="value">{cursorScale}×</span></label
+            >Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} />
+            <span class="value">{cursorScale}×</span></label
           >
           <label class="field"
             >Style
@@ -1265,234 +1635,121 @@
       </details>
       {#if cursorTrack}
         <details open>
-          <summary>Clicks ({cursorTrack.clicks.length})</summary>
+          <summary><span class="ic clk"></span>Clicks — {cursorTrack.clicks.length}</summary>
           <label class="check"
-            ><input type="checkbox" bind:checked={clickRing} /> Ring <input type="color" bind:value={clickColor} class="mini" title="Ring colour" /></label
+            ><input type="checkbox" bind:checked={clickRing} /> Ring
+            <input type="color" bind:value={clickColor} class="mini" title="Ring colour" /></label
           >
-          <label class="check"><input type="checkbox" bind:checked={clickSound} /> Click sound</label>
+          <div class="check">
+            <label><input type="checkbox" bind:checked={clickSound} /> Soft click sound</label>
+            <button type="button" class="ghost tiny" onclick={listen}>Listen</button>
+          </div>
         </details>
       {/if}
-    </aside>
-  </div>
-
-  <footer class="timeline">
-    <div class="transport">
-      <button type="button" class="icon" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
-        ><Icon name="start" /></button
-      >
-      <button type="button" class="icon play" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
-        <Icon name={playing ? "pause" : "play"} />
-      </button>
-      <button type="button" class="icon" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
-        ><Icon name="end" /></button
-      >
-      <span class="time">{format(time)} <span class="muted">/ {format(duration)}</span></span>
-      <span class="sep"></span>
-      <button type="button" class="tbtn" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)"
-        ><Icon name="split" /> Split <Kbd keys="S" /></button
-      >
-      <button
-        type="button"
-        class="tbtn"
-        onclick={() => removePart()}
-        disabled={!duration}
-        title={selected?.kept === false ? "Restore the selected part (Del)" : "Delete the selected part (Del)"}
-        ><Icon name={selected?.kept === false ? "restore" : "trash"} />
-        {selected?.kept === false ? "Restore" : "Delete"} <Kbd keys="Del" /></button
-      >
-      <div class="speed-menu">
-        <button
-          type="button"
-          class="tbtn opens-menu"
-          disabled={!duration}
-          aria-expanded={menu === "speed"}
-          title="Speed of the selected part"
-          onclick={() => (menu = menu === "speed" ? null : "speed")}
-          ><Icon name="speed" /> Speed {speedLabel((selected ?? segments[indexAt(segments, time)])?.speed ?? 1)}
-          <Icon name="chevron" /></button
-        >
-        {#if menu === "speed"}
-          <div class="popover speeds" role="menu">
-            {#each SPEEDS as sp (sp)}
-              <button
-                type="button"
-                role="menuitem"
-                class:active={((selected ?? segments[indexAt(segments, time)])?.speed ?? 1) === sp}
-                onclick={() => speedPart(sp)}>{speedLabel(sp)}</button
-              >
-            {/each}
-            <hr />
-            <div class="all">
-              All parts:
-              {#each [1, 1.5, 2] as sp (sp)}<button type="button" class="chip" onclick={() => allSpeeds(sp)}>{speedLabel(sp)}</button>{/each}
-            </div>
-          </div>
-        {/if}
-      </div>
-      <div class="spacer"></div>
-      <span class="hint-keys"
-        ><Kbd keys="I" />/<Kbd keys="O" /> trim · <Kbd keys="Alt" /> no snapping · <Kbd keys="Ctrl" /> + wheel zoom</span
-      >
-      <div class="zoom">
-        <button type="button" class="icon small" aria-label="Zoom out" title="Zoom out (Ctrl+-)" disabled={zoom <= 1} onclick={() => zoomBy(1 / 1.5)}
-          ><Icon name="minus" /></button
-        >
-        <input
-          type="range"
-          min="0"
-          max={Math.log(MAX_ZOOM)}
-          step="0.01"
-          value={Math.log(zoom)}
-          aria-label="Timeline zoom"
-          oninput={(e) => (zoom = Math.exp(Number(e.currentTarget.value)))}
-        />
-        <button type="button" class="icon small" aria-label="Zoom in" title="Zoom in (Ctrl++)" disabled={zoom >= MAX_ZOOM} onclick={() => zoomBy(1.5)}
-          ><Icon name="plus" /></button
-        >
-      </div>
     </div>
 
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="scroller" bind:this={scroller} onwheel={wheel}>
-      <div
-        class="content"
-        bind:this={content}
-        style="width:{zoom * 100}%"
-        onpointerdown={scrubDown}
-        onpointermove={timelineMove}
-        onpointerup={timelineUp}
-        onpointercancel={timelineUp}
+    <div class="export-card">
+      <div class="card-title">Export</div>
+      <div class="segmented" role="radiogroup" aria-label="Quality">
+        {#each QUALITIES as q (q.value)}
+          <button type="button" role="radio" aria-checked={quality === q.value} class:active={quality === q.value} onclick={() => (quality = q.value)}
+            >{q.label}</button
+          >
+        {/each}
+      </div>
+      <label class="check"><input type="checkbox" bind:checked={audio} /> Keep the sound</label>
+      <button type="button" class="pill big" onclick={() => exportAs("mp4")} disabled={!duration}
+        ><Icon name="check" /> Export MP4 <Kbd keys="Ctrl+E" /></button
       >
-        <div class="ruler">
-          {#each ticks as t (t)}
-            <span class="tick" style="left:{percent(t)}%">{label(t, step)}</span>
-          {/each}
+      <div class="pair">
+        <button type="button" class="ghost" onclick={copyVideo} disabled={!duration} title="Copy the result to the clipboard (Ctrl+C)"
+          ><Icon name="copy" /> Copy</button
+        >
+        <button type="button" class="ghost" onclick={() => exportAs("gif")} disabled={!config || !duration}><Icon name="export" /> GIF</button>
+      </div>
+      <button type="button" class="link" aria-expanded={gifOptions} onclick={() => (gifOptions = !gifOptions)}
+        >GIF settings <Icon name="chevron" /></button
+      >
+      {#if gifOptions}
+        <div class="pair">
+          <select bind:value={gifFps} aria-label="GIF frame rate">{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
+          <select bind:value={gifWidth} aria-label="GIF width"
+            >{#each GIF_WIDTHS as w (w)}<option value={w}>{w === 0 ? "Original size" : `${w} px wide`}</option>{/each}</select
+          >
         </div>
-
-        <div class="track">
-          <div class="filmstrip">
-            {#each frames as src, i (i)}<img {src} alt="" draggable="false" />{/each}
-          </div>
-          {#each segments as sg, i (sg.start)}
-            <div
-              class="segment"
-              class:removed={!sg.kept}
-              class:selected={selectedSegment === i}
-              style="left:{percent(sg.start)}%;width:{percent(sg.end) - percent(sg.start)}%"
+      {/if}
+      {#each jobs.slice(0, 3) as j (j.job)}
+        <div class="job">
+          <span class="kind">{j.kind === "copy" ? "Copy" : j.kind.toUpperCase()}</span>
+          {#if j.error}
+            <span class="failed" title={j.error}>{j.error}</span>
+          {:else if j.output}
+            <span class="name" title={j.output}>{name(j.output)} · {size(j.bytes ?? 0)}</span>
+            <button type="button" class="round small" title="Show in folder" aria-label="Show in folder" onclick={() => j.output && showInFolder(j.output)}
+              ><Icon name="folder" /></button
             >
-              {#if sg.kept && sg.speed !== 1}<span class="badge">{speedLabel(sg.speed)}</span>{/if}
-              <div class="part-tools">
-                <button
-                  type="button"
-                  title={sg.kept ? "Delete this part" : "Restore this part"}
-                  aria-label={sg.kept ? "Delete this part" : "Restore this part"}
-                  onpointerdown={(e) => e.stopPropagation()}
-                  onclick={() => removePart(i)}><Icon name={sg.kept ? "trash" : "restore"} /></button
-                >
-                {#if sg.kept}
-                  <button
-                    type="button"
-                    class="opens-menu"
-                    title="Speed of this part"
-                    onpointerdown={(e) => e.stopPropagation()}
-                    onclick={() => {
-                      selectedSegment = i;
-                      menu = "speed";
-                    }}>{speedLabel(sg.speed)}</button
-                  >
-                {/if}
-              </div>
-            </div>
-          {/each}
-          <!-- Outside the trim: dimmed. -->
-          <div class="outside" style="left:0;width:{percent(trim.start)}%"></div>
-          <div class="outside" style="left:{percent(trim.end)}%;right:0"></div>
-          <div class="trim-frame" style="left:{percent(trim.start)}%;width:{percent(trim.end) - percent(trim.start)}%"></div>
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="handle start"
-            style="left:{percent(trim.start)}%"
-            title="Drag to trim the start (I)"
-            onpointerdown={(e) => trimDown(e, "start")}
-          ></div>
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="handle end"
-            style="left:{percent(trim.end)}%"
-            title="Drag to trim the end (O)"
-            onpointerdown={(e) => trimDown(e, "end")}
-          ></div>
-        </div>
-
-        <div class="lane">
-          {#if !overlays.length}
-            <span class="lane-hint">Texts and shapes appear here — drag a bar to choose when it shows</span>
+          {:else}
+            <span class="bar-progress"><span style="width:{Math.round(j.done * 100)}%"></span></span>
+            <span class="pct">{Math.round(j.done * 100)}%</span>
           {/if}
-          {#each overlays as o (o.id)}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-              class="bar"
-              class:selected={selectedOverlay === o.id}
-              style="left:{percent(o.start)}%;width:{percent(o.end) - percent(o.start)}%;--bar:{o.shape.color}"
-              onpointerdown={(e) => barDown(e, o, "both")}
-            >
-              <span class="edge left" onpointerdown={(e) => barDown(e, o, "start")}></span>
-              <span class="label">{o.shape.kind === "text" ? o.shape.text : o.shape.kind}</span>
-              <span class="edge right" onpointerdown={(e) => barDown(e, o, "end")}></span>
-            </div>
-          {/each}
         </div>
-
-        <div class="playhead" style="left:{percent(time)}%"><span class="knob"></span></div>
-      </div>
+      {/each}
     </div>
-  </footer>
+  </aside>
 </div>
 
 <style>
+  /* Dark, soft and rounded whatever the system theme: an editing room. */
   .editor {
-    display: flex;
-    flex-direction: column;
+    --bg: #131316;
+    --surface: #1a1a1e;
+    --raised: #212126;
+    --control: #26262c;
+    --hover: #2d2d34;
+    --border: #2b2b31;
+    --border-strong: #3a3a42;
+    --text: #ececf1;
+    --text-muted: #8e8e98;
+    --accent: #8b7cff;
+    --accent-soft: rgb(139 124 255 / 0.18);
+    --on-accent: #ffffff;
+    --trim: #f5c542;
+    --danger: #ff8a8a;
+    color-scheme: dark;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
     height: 100vh;
-  }
-  .topbar,
-  .toolbox {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 12px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-  }
-  .toolbox {
-    gap: 8px;
-    padding: 4px 12px;
-  }
-  .title {
-    max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 600;
-  }
-  .group {
-    display: flex;
-    gap: 2px;
-    padding-left: 10px;
-    border-left: 1px solid var(--border);
-  }
-  .summary,
-  .time {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .summary strong,
-  .time {
+    background: var(--bg);
     color: var(--text);
   }
-  .muted {
-    color: var(--text-muted);
+  .main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    padding: 10px 0 10px 10px;
+    gap: 10px;
+  }
+  .editor :global(button),
+  .editor :global(select),
+  .editor :global(input) {
+    color: var(--text);
+    background: var(--control);
+    border-color: var(--border);
+  }
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 8px;
+  }
+  button:hover:not(:disabled) {
+    background: var(--hover);
+  }
+  button.active {
+    background: var(--accent-soft) !important;
+    border-color: var(--accent) !important;
+    color: #fff;
   }
   .spacer {
     flex: 1;
@@ -1500,166 +1757,84 @@
   .sep {
     width: 1px;
     align-self: stretch;
-    margin: 4px 2px;
+    margin: 6px 4px;
     background: var(--border);
   }
-  button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-  button.icon {
-    display: grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border-color: transparent;
-    background: transparent;
-  }
-  button.icon.small {
-    width: 26px;
-    height: 26px;
-  }
-  button.icon:hover:not(:disabled),
-  .tbtn:hover:not(:disabled) {
-    background: var(--control);
-    border-color: var(--border);
-  }
-  button.active,
-  button.chip.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--on-accent);
-  }
-  button.chip {
-    padding: 3px 9px;
-  }
-  button.wide {
-    width: 100%;
-    justify-content: center;
-    margin-top: 6px;
-  }
-  .primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--on-accent);
-  }
-
-  /* Export split button and menus */
-  .split-button,
-  .speed-menu {
-    position: relative;
-    display: flex;
-  }
-  .split-button .action.primary:first-child {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-  }
-  .split-button .caret {
-    padding: 5px 4px;
-    border-top-left-radius: 0;
-    border-bottom-left-radius: 0;
-    border-left: 1px solid color-mix(in srgb, var(--on-accent) 30%, transparent);
-  }
-  .popover {
-    position: absolute;
-    z-index: 20;
-    padding: 10px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
-    box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
-  }
-  .export-menu {
-    top: calc(100% + 6px);
-    right: 0;
-    width: 280px;
-  }
-  .speeds {
-    bottom: calc(100% + 6px);
-    left: 0;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 4px;
-    width: 220px;
-  }
-  .speeds hr {
-    grid-column: 1 / -1;
-    width: 100%;
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 4px 0;
-  }
-  .speeds .all {
-    grid-column: 1 / -1;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 12px;
+  .muted {
     color: var(--text-muted);
-  }
-  .speeds > button {
-    justify-content: center;
-    font-family: var(--font-mono);
   }
 
   /* Toolbox */
-  .tools,
-  .colors,
-  .levels {
+  .toolbox {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+  }
+  .cluster {
     display: flex;
     align-items: center;
     gap: 2px;
   }
   .colors {
-    gap: 5px;
+    gap: 6px;
+    padding: 0 4px;
   }
   .tool {
     position: relative;
     display: grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     padding: 0;
-    border-color: transparent;
-    background: transparent;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    border-radius: 10px;
   }
-  .tool:hover:not(.active) {
-    background: var(--control);
-    border-color: var(--border);
+  .tool:hover:not(:disabled):not(.active) {
+    background: var(--hover) !important;
+  }
+  .tool.active {
+    background: var(--accent-soft) !important;
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent) !important;
   }
   .tool .key {
     position: absolute;
-    right: 2px;
-    bottom: 0;
+    right: 3px;
+    bottom: 1px;
     font-size: 8px;
     font-weight: 700;
     font-family: var(--font-mono);
-    opacity: 0.55;
+    opacity: 0.5;
   }
   .context {
+    padding-right: 6px;
     font-size: 12px;
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .swatch,
-  .custom {
-    width: 22px;
-    height: 22px;
+  .swatch {
+    width: 20px;
+    height: 20px;
     padding: 0;
     border-radius: 50%;
-    background: var(--swatch);
-    border: 2px solid var(--border);
+    background: var(--swatch) !important;
+    border: 2px solid rgb(255 255 255 / 0.12) !important;
   }
   .swatch.active {
-    outline: 2px solid var(--accent);
+    outline: 2px solid #fff;
     outline-offset: 2px;
   }
   .custom {
     position: relative;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
     overflow: hidden;
     background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
   }
@@ -1677,43 +1852,30 @@
   }
 
   /* Player */
-  .body {
-    flex: 1;
-    min-height: 0;
-    display: grid;
-    grid-template-columns: 1fr 260px;
-  }
   .player {
     position: relative;
-    min-width: 0;
+    flex: 1;
+    min-height: 0;
     overflow: hidden;
-    background: #000;
-    display: grid;
-    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: radial-gradient(circle at 50% 40%, #1d1d22, #101013 70%);
     touch-action: none;
   }
-  .frame {
-    width: 100%;
-    height: 100%;
-    display: grid;
-    place-items: center;
-    min-height: 0;
-  }
-  .player.framed .frame {
-    width: auto;
-    height: 100%;
-    max-width: 100%;
-  }
   video {
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-    object-fit: contain;
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    opacity: 0;
     pointer-events: none;
   }
-  .preview {
+  .stage {
     position: absolute;
-    pointer-events: none;
+    border-radius: 4px;
+    box-shadow: 0 10px 40px rgb(0 0 0 / 0.45);
+  }
+  .stage.framed {
+    border-radius: 8px;
   }
   .text-input {
     position: absolute;
@@ -1730,201 +1892,233 @@
     field-sizing: content;
     outline: none;
   }
+  .crop-bar {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 6px 6px 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: rgb(26 26 30 / 0.92);
+    backdrop-filter: blur(8px);
+    cursor: default;
+  }
+  .crop-bar span {
+    font: 12px var(--font-mono);
+    color: var(--text-muted);
+    margin-right: 6px;
+  }
   .toast,
   .error {
     position: absolute;
     left: 50%;
+    top: 14px;
     transform: translateX(-50%);
-    padding: 6px 12px;
-    border-radius: 6px;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: var(--raised);
+    border: 1px solid var(--border-strong);
     font-size: 13px;
     pointer-events: none;
   }
-  .toast {
-    bottom: 14px;
-  }
   .error {
-    bottom: 50px;
-    color: var(--danger);
-  }
-  .jobs {
-    position: absolute;
-    right: 10px;
-    bottom: 10px;
-    width: 280px;
-    padding: 6px 8px;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
-    border: 1px solid var(--border);
-    cursor: default;
-  }
-  .job {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 26px;
-    font-size: 12px;
-  }
-  .job .kind {
-    font-weight: 600;
-    min-width: 36px;
-  }
-  .job .name,
-  .failed {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .job progress {
-    flex: 1;
-  }
-  .pct {
-    font-family: var(--font-mono);
-    color: var(--text-muted);
-  }
-  .failed {
     color: var(--danger);
   }
 
-  /* Inspector */
-  .inspector {
-    overflow-y: auto;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-  }
-  details {
-    padding: 8px 12px 12px;
-    border-bottom: 1px solid var(--border);
-  }
-  summary {
-    margin: 0 -4px 6px;
-    padding: 2px 4px;
-    font-size: 11px;
+  .pill {
+    justify-content: center;
+    padding: 6px 14px;
+    border: none !important;
+    border-radius: 999px;
+    background: #f4f4f6 !important;
+    color: #141416 !important;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: 4px;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.3);
   }
-  summary:hover {
+  .pill:hover:not(:disabled) {
+    background: #ffffff !important;
+  }
+  .pill.big {
+    width: 100%;
+    padding: 9px 14px;
+    margin: 4px 0 8px;
+  }
+  .ghost {
+    justify-content: center;
+    padding: 6px 12px;
+    border: 1px solid var(--border-strong) !important;
+    border-radius: 999px;
+    background: transparent !important;
+  }
+  .ghost:hover:not(:disabled) {
+    background: var(--hover) !important;
+  }
+  .ghost.tiny {
+    padding: 1px 10px;
+    margin-left: auto;
+    font-size: 12px;
+  }
+  .link {
+    border: none !important;
+    background: none !important;
+    color: var(--text-muted);
+    padding: 2px 0;
+    margin-bottom: 4px;
+    font-size: 12px;
+  }
+  .link:hover {
     color: var(--text);
   }
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-    margin: 4px 0 8px;
+
+  /* Dock: transport and timeline */
+  .dock {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
   }
-  .wide-swatch {
-    width: 34px;
-    border-radius: 6px;
-  }
-  .pair {
+  .controls {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .side {
+    display: flex;
+    align-items: center;
     gap: 6px;
+    min-width: 0;
   }
-  .pair button {
-    justify-content: center;
+  .side.right {
+    justify-content: flex-end;
   }
-  section + section {
-    margin-top: 12px;
+  .act {
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid var(--border-strong) !important;
+    background: var(--raised) !important;
+    border-radius: 10px;
+    font-weight: 500;
+    white-space: nowrap;
   }
-  h3 {
-    margin: 0 0 6px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
+  .act:hover:not(:disabled) {
+    background: var(--hover) !important;
   }
-  .note {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin: 4px 0 8px;
+  .act.danger:hover:not(:disabled) {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 50%, transparent) !important;
   }
-  .check,
-  .field {
+  .act.on {
+    color: var(--trim);
+    border-color: color-mix(in srgb, var(--trim) 50%, transparent) !important;
+  }
+  .center {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin: 6px 0;
-    font-size: 13px;
   }
-  .field input[type="range"],
-  .field select {
-    flex: 1;
-    min-width: 0;
-  }
-  .value {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    min-width: 32px;
-  }
-  .mini {
-    width: 26px;
-    height: 22px;
+  .round {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
     padding: 0;
-    border: none;
-    background: none;
-    margin-left: auto;
+    border-radius: 50% !important;
+    border: 1px solid var(--border-strong) !important;
+    background: var(--raised) !important;
   }
-
-  /* Timeline */
-  .timeline {
-    padding: 6px 12px 10px;
-    background: var(--surface);
-    border-top: 1px solid var(--border);
+  .round.small {
+    width: 26px;
+    height: 26px;
   }
-  .transport {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 6px;
+  .round:hover:not(:disabled) {
+    background: var(--hover) !important;
   }
-  .transport .play {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: var(--on-accent);
+  .round.play {
+    width: 44px;
+    height: 44px;
+    border: none !important;
+    background: #f4f4f6 !important;
+    color: #141416 !important;
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.35);
   }
-  .transport .play:hover:not(:disabled) {
-    background: var(--accent);
-    filter: brightness(1.1);
+  .round.play:hover {
+    background: #fff !important;
   }
   .time {
-    min-width: 128px;
-    margin-left: 4px;
-  }
-  .tbtn {
-    border-color: transparent;
-    background: transparent;
-    padding: 4px 8px;
+    min-width: 140px;
+    font: 500 13px var(--font-mono);
   }
   .hint-keys {
     font-size: 11px;
     color: var(--text-muted);
     white-space: nowrap;
+    overflow: hidden;
   }
   .zoom {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: 4px;
   }
   .zoom input {
-    width: 110px;
+    width: 100px;
     padding: 0;
+    accent-color: var(--accent);
+    background: transparent !important;
   }
+  .anchor {
+    position: relative;
+  }
+  .popover {
+    position: absolute;
+    z-index: 20;
+    padding: 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    background: var(--raised);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.5);
+  }
+  .speeds {
+    bottom: calc(100% + 8px);
+    left: 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    width: 230px;
+  }
+  .speeds > button {
+    justify-content: center;
+    font-family: var(--font-mono);
+    border-color: transparent;
+  }
+  .speeds .all {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .chip {
+    padding: 2px 9px;
+    border-radius: 999px;
+  }
+
+  /* Timeline */
   .scroller {
     overflow-x: auto;
     overflow-y: hidden;
-    padding: 0 10px;
+    padding: 0 12px;
     scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
   }
   .content {
     position: relative;
@@ -1940,8 +2134,8 @@
   .tick {
     position: absolute;
     top: 0;
-    padding-left: 3px;
-    border-left: 1px solid color-mix(in srgb, var(--text) 30%, transparent);
+    padding-left: 4px;
+    border-left: 1px solid var(--border-strong);
     height: 10px;
     font-size: 10px;
     line-height: 10px;
@@ -1950,77 +2144,64 @@
     white-space: nowrap;
     pointer-events: none;
   }
-  .track,
-  .lane {
-    position: relative;
-    border-radius: 6px;
-  }
   .track {
-    height: 58px;
-    background: color-mix(in srgb, var(--text) 10%, transparent);
+    position: relative;
+    border-radius: 10px;
+    background: #0d0d10;
     cursor: pointer;
-  }
-  .lane {
-    height: 28px;
-    margin-top: 4px;
-    background: color-mix(in srgb, var(--text) 5%, transparent);
-    overflow: hidden;
-  }
-  .lane-hint {
-    position: absolute;
-    left: 10px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 11px;
-    color: var(--text-muted);
-    pointer-events: none;
-    white-space: nowrap;
   }
   .filmstrip {
     position: absolute;
     inset: 0;
-    display: flex;
     overflow: hidden;
-    border-radius: 6px;
-    opacity: 0.9;
+    border-radius: 10px;
     pointer-events: none;
   }
   .filmstrip img {
-    flex: 1;
-    min-width: 0;
+    position: absolute;
+    top: 0;
     height: 100%;
     object-fit: cover;
+    border-right: 1px solid rgb(0 0 0 / 0.35);
   }
   .segment {
     position: absolute;
     top: 0;
     bottom: 0;
-    border-left: 2px solid color-mix(in srgb, var(--surface) 80%, transparent);
+  }
+  .segment.cut::before {
+    content: "";
+    position: absolute;
+    left: -1.5px;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--surface);
   }
   .segment.removed {
-    background: repeating-linear-gradient(135deg, rgb(0 0 0 / 0.7) 0 6px, rgb(0 0 0 / 0.5) 6px 12px);
+    background: repeating-linear-gradient(135deg, rgb(10 10 12 / 0.82) 0 6px, rgb(10 10 12 / 0.62) 6px 12px);
   }
   .segment.selected {
     box-shadow: inset 0 0 0 2px var(--accent);
-    background-color: color-mix(in srgb, var(--accent) 14%, transparent);
+    background-color: rgb(139 124 255 / 0.12);
   }
   .badge {
     position: absolute;
-    left: 6px;
-    bottom: 4px;
-    padding: 0 5px;
-    border-radius: 4px;
-    background: rgb(0 0 0 / 0.7);
-    color: #fff;
-    font: 600 11px/16px var(--font-mono);
+    left: 8px;
+    bottom: 5px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--trim);
+    color: #1a1400;
+    font: 700 11px/17px var(--font-mono);
     pointer-events: none;
   }
   .part-tools {
     position: absolute;
-    top: 4px;
-    right: 4px;
+    top: 5px;
+    right: 5px;
     display: none;
-    gap: 2px;
+    gap: 3px;
     z-index: 3;
   }
   .segment:hover .part-tools,
@@ -2028,19 +2209,19 @@
     display: flex;
   }
   .part-tools button {
-    height: 22px;
-    min-width: 22px;
-    padding: 0 4px;
+    height: 24px;
+    min-width: 24px;
+    padding: 0 6px;
     justify-content: center;
-    border: none;
-    border-radius: 4px;
-    background: rgb(0 0 0 / 0.72);
+    border: none !important;
+    border-radius: 999px;
+    background: rgb(15 15 18 / 0.85) !important;
     color: #fff;
     font: 600 11px var(--font-mono);
   }
   .part-tools button:hover {
-    background: var(--accent);
-    color: var(--on-accent);
+    background: #f4f4f6 !important;
+    color: #141416;
   }
   .part-tools :global(svg) {
     width: 14px;
@@ -2050,15 +2231,15 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    background: rgb(0 0 0 / 0.62);
+    background: rgb(8 8 10 / 0.72);
     pointer-events: none;
   }
   .trim-frame {
     position: absolute;
     top: 0;
     bottom: 0;
-    border-top: 3px solid #ffc531;
-    border-bottom: 3px solid #ffc531;
+    border-top: 3px solid var(--trim);
+    border-bottom: 3px solid var(--trim);
     pointer-events: none;
   }
   .handle {
@@ -2066,18 +2247,17 @@
     top: 0;
     bottom: 0;
     width: 14px;
-    background: #ffc531;
+    background: var(--trim);
     cursor: ew-resize;
     z-index: 4;
   }
   .handle.start {
-    margin-left: -2px;
-    border-radius: 6px 0 0 6px;
+    border-radius: 8px 0 0 8px;
     transform: translateX(-12px);
   }
   .handle.end {
-    margin-left: 2px;
-    border-radius: 0 6px 6px 0;
+    border-radius: 0 8px 8px 0;
+    transform: translateX(-2px);
   }
   .handle::after {
     content: "";
@@ -2087,43 +2267,69 @@
     width: 4px;
     height: 18px;
     margin-top: -9px;
-    border-left: 1.5px solid #6b4e00;
-    border-right: 1.5px solid #6b4e00;
+    border-left: 1.5px solid #5c4300;
+    border-right: 1.5px solid #5c4300;
   }
   .handle:hover {
     filter: brightness(1.08);
   }
+  .lanes {
+    position: relative;
+    margin-top: 6px;
+    border-radius: 10px;
+    background: rgb(255 255 255 / 0.03);
+    transition: height 0.15s;
+  }
+  .lane-hint {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 11px;
+    color: var(--text-muted);
+    pointer-events: none;
+    white-space: nowrap;
+  }
   .bar {
     position: absolute;
-    top: 3px;
-    bottom: 3px;
+    height: 22px;
     display: flex;
     align-items: center;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--bar) 55%, transparent);
-    border: 1px solid var(--bar);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bar) 30%, #1b1b20);
+    border: 1px solid color-mix(in srgb, var(--bar) 70%, transparent);
     cursor: grab;
     overflow: hidden;
   }
   .bar.selected {
-    outline: 2px solid var(--accent);
+    outline: 2px solid #fff;
+    outline-offset: 1px;
   }
   .bar .label {
     flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 5px;
     padding: 0 6px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 11px;
     color: #fff;
-    text-shadow: 0 0 2px #000;
     pointer-events: none;
+  }
+  .bar .label :global(svg) {
+    flex: none;
+    width: 12px;
+    height: 12px;
+    opacity: 0.8;
   }
   .edge {
     width: 6px;
     align-self: stretch;
     cursor: ew-resize;
-    background: rgb(255 255 255 / 0.5);
+    background: color-mix(in srgb, var(--bar) 80%, white);
+    opacity: 0.6;
   }
   .playhead {
     position: absolute;
@@ -2132,7 +2338,7 @@
     width: 2px;
     margin-left: -1px;
     background: #fff;
-    box-shadow: 0 0 2px #000;
+    box-shadow: 0 0 3px rgb(0 0 0 / 0.8);
     pointer-events: none;
     z-index: 5;
   }
@@ -2142,8 +2348,283 @@
     left: -5px;
     width: 12px;
     height: 12px;
-    border-radius: 2px 2px 6px 6px;
+    border-radius: 3px 3px 7px 7px;
     background: #fff;
-    box-shadow: 0 0 2px #000;
+  }
+
+  /* Right panel */
+  .side-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    margin: 10px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .panel-head {
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .glyph {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .glyph :global(svg) {
+    width: 12px;
+    height: 12px;
+  }
+  .sub {
+    margin-top: 4px;
+    font: 12px var(--font-mono);
+    color: var(--text-muted);
+  }
+  .panel-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  details {
+    padding: 10px 16px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    cursor: pointer;
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary::after {
+    content: "";
+    margin-left: auto;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(45deg);
+  }
+  details:not([open]) summary {
+    margin-bottom: 0;
+  }
+  details:not([open]) summary::after {
+    transform: rotate(-45deg);
+  }
+  summary:hover {
+    color: var(--text);
+  }
+  .ic {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+  }
+  .ic.sel {
+    background: #8b7cff;
+  }
+  .ic.fmt {
+    background: linear-gradient(135deg, #5ad1c9, #3aa0a0);
+  }
+  .ic.cur {
+    background: linear-gradient(135deg, #ff9fb3, #e5484d);
+  }
+  .ic.clk {
+    background: linear-gradient(135deg, #ffd60a, #f5a524);
+  }
+  .ratios {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .ratio {
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    height: 56px;
+    padding: 4px;
+    font-size: 12px;
+    border-radius: 10px;
+  }
+  .ratio .shape {
+    display: block;
+    border: 1.5px solid currentColor;
+    border-radius: 3px;
+    opacity: 0.8;
+  }
+  .segmented {
+    display: flex;
+    padding: 3px;
+    gap: 3px;
+    margin-bottom: 10px;
+    border-radius: 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .segmented button {
+    flex: 1;
+    justify-content: center;
+    padding: 4px 6px;
+    font-size: 12px;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    border-radius: 7px;
+  }
+  .segmented button.active {
+    background: var(--hover) !important;
+    border-color: var(--border-strong) !important;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 4px 0 8px;
+  }
+  .wide-swatch {
+    width: 36px;
+    border-radius: 8px;
+  }
+  .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .pair button {
+    justify-content: center;
+  }
+  .pair select {
+    min-width: 0;
+  }
+  button.wide {
+    width: 100%;
+    justify-content: center;
+    margin-top: 6px;
+  }
+  .danger-text:hover {
+    color: var(--danger);
+  }
+  .note {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0 0 8px;
+  }
+  .check,
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 7px 0;
+    font-size: 13px;
+  }
+  .check label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .editor input[type="checkbox"] {
+    accent-color: var(--accent);
+  }
+  .field input[type="range"] {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    accent-color: var(--accent);
+    background: transparent !important;
+  }
+  .field select {
+    flex: 1;
+    min-width: 0;
+  }
+  .value {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    min-width: 32px;
+  }
+  .mini {
+    width: 26px;
+    height: 22px;
+    padding: 0;
+    border: none !important;
+    background: none !important;
+    margin-left: auto;
+  }
+
+  /* Export card */
+  .export-card {
+    padding: 12px 14px 14px;
+    border-top: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--raised), var(--surface));
+  }
+  .card-title {
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .job {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 28px;
+    margin-top: 6px;
+    font-size: 12px;
+  }
+  .job .kind {
+    font-weight: 600;
+    min-width: 34px;
+  }
+  .job .name,
+  .failed {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bar-progress {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .bar-progress span {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, #b8860b, var(--trim));
+    transition: width 0.2s;
+  }
+  .pct {
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+  }
+  .failed {
+    color: var(--danger);
   }
 </style>

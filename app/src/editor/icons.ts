@@ -31,6 +31,7 @@ export const ICONS = {
   pause: "M6 4h3v12H6zM11 4h3v12h-3z",
   folder: "M2.5 5.5h5l1.5 1.5h8.5v9h-15z",
   plus: "M10 4v12M4 10h12",
+  check: "M4.5 10.5l3.5 3.5 7.5-8",
   minus: "M4 10h12",
   chevron: "M6 8l4 4 4-4",
   restore: "M4.5 8.5a6 6 0 111 5M4.5 3.5v5h5",
