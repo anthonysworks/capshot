@@ -20,6 +20,7 @@ pub mod cursor;
 mod decode;
 mod encoder;
 mod pacer;
+mod paint;
 mod source;
 pub mod stretch;
 mod trim;

@@ -2,8 +2,9 @@
 //! recorded cursor (hidden, enlarged or replaced), click marks, cropping
 //! and an output canvas with another aspect ratio.
 //!
-//! Frames are composited on the CPU in BGRA, then converted to NV12 for the
-//! hardware encoder.
+//! This is the CPU version, used for GIF exports (whose frames end up in
+//! system memory anyway); MP4 exports draw the same things on the GPU, see
+//! [`crate::paint`].
 
 use kadra_core::{BgraImage, Point, Rect};
 use serde::{Deserialize, Serialize};
@@ -94,7 +95,7 @@ impl Composition {
     }
 }
 
-fn decode_png(base64: &str) -> Option<BgraImage> {
+pub(crate) fn decode_png(base64: &str) -> Option<BgraImage> {
     kadra_encode::decode(&kadra_core::base64::decode(base64)?).ok()
 }
 
@@ -214,7 +215,7 @@ fn circle(dst: &mut BgraImage, cx: f32, cy: f32, radius: f32, thickness: f32, rg
 }
 
 /// How long a click mark lasts, in seconds.
-const CLICK_MARK: f64 = 0.45;
+pub(crate) const CLICK_MARK: f64 = 0.45;
 
 #[derive(Debug)]
 struct Overlay {
@@ -312,7 +313,7 @@ impl Composer {
 
     /// Canvas of the requested aspect ratio around a `w` × `h` video, and
     /// the area the video occupies (scaled to fit inside the margin).
-    fn canvas(style: &CanvasStyle, w: u32, h: u32) -> (BgraImage, Rect) {
+    pub(crate) fn canvas(style: &CanvasStyle, w: u32, h: u32) -> (BgraImage, Rect) {
         let [rw, rh] = [style.ratio[0].max(1), style.ratio[1].max(1)];
         let ratio = rw as f32 / rh as f32;
         let pad = style.padding.clamp(0.0, 0.3);
@@ -453,49 +454,6 @@ impl Composer {
     }
 }
 
-/// BGRA → NV12 (BT.709, limited range), the encoder's input format.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::many_single_char_names
-)]
-pub fn to_nv12(image: &BgraImage) -> Vec<u8> {
-    let (w, h) = (image.width() as usize & !1, image.height() as usize & !1);
-    let stride = image.width() as usize * 4;
-    let src = image.as_bytes();
-    let mut out = vec![0u8; w * h * 3 / 2];
-    let (luma, chroma) = out.split_at_mut(w * h);
-    for y in 0..h {
-        let row = &src[y * stride..];
-        for x in 0..w {
-            let (b, g, r) = (
-                i32::from(row[x * 4]),
-                i32::from(row[x * 4 + 1]),
-                i32::from(row[x * 4 + 2]),
-            );
-            luma[y * w + x] = ((47 * r + 157 * g + 16 * b + 128) / 256 + 16).clamp(0, 255) as u8;
-        }
-    }
-    for y in (0..h).step_by(2) {
-        for x in (0..w).step_by(2) {
-            let mut sum = [0i32; 3];
-            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                let i = (y + dy) * stride + (x + dx) * 4;
-                sum[0] += i32::from(src[i]);
-                sum[1] += i32::from(src[i + 1]);
-                sum[2] += i32::from(src[i + 2]);
-            }
-            let (b, g, r) = (sum[0] / 4, sum[1] / 4, sum[2] / 4);
-            let u = (-26 * r - 87 * g + 112 * b + 128) / 256 + 128;
-            let v = (112 * r - 102 * g - 10 * b + 128) / 256 + 128;
-            let at = (y / 2) * w + x;
-            chroma[at] = u.clamp(0, 255) as u8;
-            chroma[at + 1] = v.clamp(0, 255) as u8;
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,13 +575,5 @@ mod tests {
         // Background above the video, video in the middle.
         assert_eq!(out.pixel(Point::new(45, 5)), Some([0, 0, 255, 255]));
         assert_eq!(out.pixel(Point::new(45, 80)), Some([0, 255, 0, 255]));
-    }
-
-    #[test]
-    fn nv12_matches_known_values() {
-        let white = to_nv12(&solid(2, 2, [255, 255, 255, 255]));
-        assert_eq!(white, vec![235, 235, 235, 235, 128, 128]);
-        let black = to_nv12(&solid(2, 2, [0, 0, 0, 255]));
-        assert_eq!(black, vec![16, 16, 16, 16, 128, 128]);
     }
 }

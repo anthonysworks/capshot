@@ -11,21 +11,33 @@ use kadra_capture::Gpu;
 use kadra_core::VideoCodec;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMFAttributes, IMFDXGIDeviceManager, IMFMediaType, IMFSinkWriter,
-    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
-    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE,
-    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
-    MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_SINK_WRITER_D3D_MANAGER, MF_VERSION, MFAudioFormat_AAC, MFAudioFormat_PCM,
-    MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
-    MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown, MFStartup,
-    MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
-    MFVideoTransferMatrix_BT709, eAVEncH264VProfile_High,
+    CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonQualityVsSpeed,
+    CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize, IMF2DBuffer, IMFAttributes,
+    IMFDXGIDeviceManager, IMFMediaType, IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+    MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
+    MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES,
+    MF_MT_YUV_MATRIX, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_D3D_MANAGER,
+    MF_VERSION, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video,
+    MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoFormat_AV1,
+    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MFVideoPrimaries_BT709, MFVideoTransFunc_709, MFVideoTransferMatrix_BT709,
+    eAVEncCommonRateControlMode_UnconstrainedVBR, eAVEncH264VProfile_High,
 };
 use windows::core::{GUID, HSTRING, Interface, Result};
+
+/// Encoder quality-vs-speed while recording, which must keep up in real
+/// time (twice, with the copy without cursor). 33 gives the quality of the
+/// slowest preset at ~290 frames/s of 1080p on an RTX 3080; above 1440p60
+/// the fastest preset leaves room for both copies.
+fn recording_effort(settings: &VideoSettings) -> u32 {
+    let pixel_rate =
+        u64::from(settings.width) * u64::from(settings.height) * u64::from(settings.fps);
+    if pixel_rate > 2560 * 1440 * 60 { 0 } else { 33 }
+}
 
 /// Media Foundation time unit: 100 ns.
 pub const TICKS_PER_SECOND: i64 = 10_000_000;
@@ -63,7 +75,7 @@ impl VideoSettings {
         bits.clamp(1_000_000.0, 200_000_000.0) as u32
     }
 
-    fn subtype(&self) -> GUID {
+    pub(crate) fn subtype(&self) -> GUID {
         match self.codec {
             VideoCodec::H264 => MFVideoFormat_H264,
             VideoCodec::Hevc => MFVideoFormat_HEVC,
@@ -95,6 +107,50 @@ pub(crate) fn video_type(settings: &VideoSettings, subtype: &GUID) -> Result<IMF
             t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
         }
         Ok(t)
+    }
+}
+
+/// Encoder tuning, passed with the input type: the best quality the
+/// encoder can deliver for the bitrate (`effort` 0–100: speed → quality),
+/// and a key frame every two seconds so edits seek quickly.
+fn tuning(settings: &VideoSettings, bitrate: u32, effort: u32) -> Result<IMFAttributes> {
+    // SAFETY: attribute setters on a fresh store.
+    unsafe {
+        let mut attributes: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attributes, 4)?;
+        let attributes = attributes.ok_or_else(windows::core::Error::empty)?;
+        #[allow(clippy::cast_sign_loss)]
+        attributes.SetUINT32(
+            &CODECAPI_AVEncCommonRateControlMode,
+            eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32,
+        )?;
+        attributes.SetUINT32(&CODECAPI_AVEncCommonMeanBitRate, bitrate)?;
+        attributes.SetUINT32(&CODECAPI_AVEncCommonQualityVsSpeed, effort.min(100))?;
+        attributes.SetUINT32(&CODECAPI_AVEncMPVGOPSize, settings.fps.max(1) * 2)?;
+        Ok(attributes)
+    }
+}
+
+/// Sets the encoder input, with [`tuning`] when the encoder accepts it.
+pub(crate) fn set_input(
+    writer: &IMFSinkWriter,
+    stream: u32,
+    settings: &VideoSettings,
+    bitrate: u32,
+    effort: u32,
+) -> Result<()> {
+    let input = video_type(settings, &MFVideoFormat_NV12)?;
+    // SAFETY: plain calls with valid media types.
+    unsafe {
+        match tuning(settings, bitrate, effort)
+            .and_then(|params| writer.SetInputMediaType(stream, &input, &params))
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                tracing::debug!("encoder tuning refused: {err}");
+                writer.SetInputMediaType(stream, &input, None)
+            }
+        }
     }
 }
 
@@ -160,8 +216,8 @@ impl Encoder {
                 output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
             }
             let video = writer.AddStream(&output)?;
-            let input = video_type(settings, &MFVideoFormat_NV12)?;
-            writer.SetInputMediaType(video, &input, None)?;
+            let effort = recording_effort(settings);
+            set_input(&writer, video, settings, settings.bitrate(), effort)?;
 
             let audio = if audio {
                 let output = audio_type(&MFAudioFormat_AAC)?;
