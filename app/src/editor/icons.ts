@@ -30,6 +30,12 @@ export const ICONS = {
   play: "M6 4l10 6-10 6z",
   pause: "M6 4h3v12H6zM11 4h3v12h-3z",
   folder: "M2.5 5.5h5l1.5 1.5h8.5v9h-15z",
+  plus: "M10 4v12M4 10h12",
+  minus: "M4 10h12",
+  chevron: "M6 8l4 4 4-4",
+  restore: "M4.5 8.5a6 6 0 111 5M4.5 3.5v5h5",
+  start: "M5 4v12M15 4l-7 6 7 6z",
+  end: "M15 4v12M5 4l7 6-7 6z",
 } as const;
 
 export type IconName = keyof typeof ICONS;

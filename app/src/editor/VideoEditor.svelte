@@ -33,31 +33,30 @@
     renderAnnotations,
   } from "./shapes";
   import {
+    SPEEDS,
     type Segment,
+    type Trim,
     format,
     indexAt,
-    keptLength,
-    keptRanges,
+    label,
     nextKept,
+    outputLength,
+    partAt,
+    parts,
+    rulerStep,
+    setSpeed,
+    snap,
+    speedLabel,
     split,
     toggle,
-    trimAt,
     whole,
   } from "./timeline";
 
   let { path }: { path: string } = $props();
 
-  type Tab = "cut" | "annotate" | "cursor" | "frame" | "export";
-  const TABS: { tab: Tab; icon: IconName; label: string; key: string }[] = [
-    { tab: "cut", icon: "scissors", label: "Cut & speed", key: "1" },
-    { tab: "annotate", icon: "text", label: "Text & shapes", key: "2" },
-    { tab: "cursor", icon: "cursor", label: "Cursor & clicks", key: "3" },
-    { tab: "frame", icon: "aspect", label: "Crop & format", key: "4" },
-    { tab: "export", icon: "export", label: "Export", key: "5" },
-  ];
-  type OverlayTool = "select" | "text" | "arrow" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number";
-  const OVERLAY_TOOLS: { tool: OverlayTool; icon: IconName; label: string; key: string }[] = [
-    { tool: "select", icon: "select", label: "Select and move", key: "V" },
+  type Tool = "select" | "text" | "arrow" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number";
+  const TOOLS: { tool: Tool; icon: IconName; label: string; key: string }[] = [
+    { tool: "select", icon: "select", label: "Select, move — click the video to play", key: "V" },
     { tool: "text", icon: "text", label: "Text", key: "T" },
     { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
     { tool: "line", icon: "line", label: "Line", key: "L" },
@@ -68,7 +67,11 @@
     { tool: "number", icon: "number", label: "Numbered step", key: "N" },
   ];
   const COLORS = ["#e5484d", "#f5a524", "#ffd60a", "#30a46c", "#3b82f6", "#ffffff", "#111111"];
-  const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+  const LEVELS = [
+    { level: 1, label: "Thin" },
+    { level: 2, label: "Medium" },
+    { level: 4, label: "Thick" },
+  ];
   const QUALITIES = [
     { value: 18, label: "High" },
     { value: 23, label: "Balanced" },
@@ -82,9 +85,13 @@
     { label: "4:5", ratio: [4, 5] },
     { label: "4:3", ratio: [4, 3] },
   ];
-  const FILMSTRIP = 12;
+  /** Thumbnails per 100 px of timeline, and the most ever made. */
+  const FILMSTRIP_MAX = 40;
   /** How long a new text or shape stays on screen by default, in seconds. */
   const OVERLAY_LENGTH = 3;
+  /** Distance under which handles snap, in pixels. */
+  const SNAP_PX = 8;
+  const MAX_ZOOM = 40;
 
   interface Overlay {
     id: number;
@@ -96,15 +103,15 @@
   let video: HTMLVideoElement;
   let player: HTMLDivElement;
   let preview: HTMLCanvasElement;
-  let track: HTMLDivElement;
-  let lane: HTMLDivElement;
+  let scroller: HTMLDivElement;
+  let content: HTMLDivElement;
 
   let duration = $state(0);
   let time = $state(0);
   let playing = $state(false);
   let segments = $state<Segment[]>([]);
-  let selectedSegment = $state(0);
-  let speed = $state(1);
+  let trim = $state<Trim>({ start: 0, end: 0 });
+  let selectedSegment = $state<number | null>(null);
   let audio = $state(true);
   let quality = $state(18);
   let crop = $state<{ x: number; y: number; w: number; h: number } | null>(null);
@@ -116,6 +123,7 @@
   let cursorVisible = $state(true);
   let cursorScale = $state(1);
   let cursorStyle = $state<CursorStyle>("original");
+  let cursorColor = $state("#e5484d");
   let halo = $state(false);
   let haloColor = $state("#ffd60a");
   let clickRing = $state(false);
@@ -123,10 +131,9 @@
   let clickSound = $state(false);
   let overlays = $state<Overlay[]>([]);
   let selectedOverlay = $state<number | null>(null);
-  let tool = $state<OverlayTool>("text");
+  let tool = $state<Tool>("select");
   let color = $state("#e5484d");
   let level = $state(2);
-  let tab = $state<Tab>("cut");
   let frames = $state<string[]>([]);
   let error = $state("");
   let toast = $state("");
@@ -143,9 +150,13 @@
   /** Displayed picture inside the player, in CSS pixels. */
   let box = $state({ left: 0, top: 0, width: 0, height: 0, scale: 1 });
   let draft = $state<Shape | null>(null);
+  let zoom = $state(1);
+  let viewWidth = $state(800);
+  let menu = $state<"export" | "speed" | null>(null);
   let nextId = 1;
   let drag:
     | { kind: "time" }
+    | { kind: "trim"; edge: "start" | "end" }
     | { kind: "crop"; start: Point }
     | { kind: "draw"; start: Point; moved: boolean }
     | { kind: "move"; last: Point; moved: boolean }
@@ -153,12 +164,24 @@
     | null = null;
 
   const source = $derived(convertFileSrc(cleanSource ?? path));
-  const output = $derived(keptLength(segments) / speed);
+  const kept = $derived(parts(segments, trim));
+  const output = $derived(outputLength(kept));
   /** The cursor can only be changed with the recording's copy without cursor. */
   const cursorEditable = $derived(!!cleanSource && !!cursorTrack);
   /** Annotation sizes follow the video size, like in the image editor. */
   let longSide = $state(0);
   const unit = $derived(Math.max(1, Math.round(longSide / 1400)));
+  const contentWidth = $derived(viewWidth * zoom);
+  const pxPerSecond = $derived(duration ? contentWidth / duration : 1);
+  const step = $derived(rulerStep(pxPerSecond));
+  const ticks = $derived.by(() => {
+    if (!duration) return [];
+    const out: number[] = [];
+    for (let t = 0; t <= duration + 1e-9 && out.length < 2000; t += step) out.push(t);
+    return out;
+  });
+  const selected = $derived(selectedSegment === null ? null : (segments[selectedSegment] ?? null));
+  const selectedItem = $derived(overlays.find((o) => o.id === selectedOverlay) ?? null);
 
   onMount(() => {
     getConfig().then((c) => {
@@ -179,17 +202,27 @@
       if (old) jobs[i] = { ...p, kind: old.kind };
       if (old && p.output && p.output !== old.output) notify(old.kind === "copy" ? "Copied to the clipboard" : "Exported");
     });
-    const observer = new ResizeObserver(measure);
+    const observer = new ResizeObserver(() => {
+      measure();
+      viewWidth = scroller?.clientWidth || viewWidth;
+    });
     observer.observe(player);
     // The format (aspect ratio) resizes the video inside the player.
     observer.observe(video);
+    observer.observe(scroller);
     let frame = requestAnimationFrame(function loop() {
+      follow();
       paint();
       frame = requestAnimationFrame(loop);
     });
+    const closeMenu = (e: PointerEvent) => {
+      if (!(e.target as HTMLElement)?.closest?.(".popover, .opens-menu")) menu = null;
+    };
+    window.addEventListener("pointerdown", closeMenu);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
+      window.removeEventListener("pointerdown", closeMenu);
       unlisten.then((f) => f());
     };
   });
@@ -199,6 +232,7 @@
     if (!segments.length) {
       duration = video.duration;
       segments = whole(duration);
+      trim = { start: 0, end: duration };
       filmstrip();
     }
     measure();
@@ -229,12 +263,13 @@
     probe.preload = "auto";
     await new Promise((resolve) => probe.addEventListener("loadeddata", resolve, { once: true }));
     const canvas = document.createElement("canvas");
-    canvas.height = 48;
-    canvas.width = Math.round((48 * probe.videoWidth) / Math.max(1, probe.videoHeight));
+    canvas.height = 56;
+    canvas.width = Math.round((56 * probe.videoWidth) / Math.max(1, probe.videoHeight));
     const ctx = canvas.getContext("2d");
+    const count = Math.min(FILMSTRIP_MAX, Math.max(8, Math.ceil(duration)));
     const out: string[] = [];
-    for (let i = 0; i < FILMSTRIP && ctx; i++) {
-      probe.currentTime = ((i + 0.5) * duration) / FILMSTRIP;
+    for (let i = 0; i < count && ctx; i++) {
+      probe.currentTime = ((i + 0.5) * duration) / count;
       await new Promise((resolve) => probe.addEventListener("seeked", resolve, { once: true }));
       ctx.drawImage(probe, 0, 0, canvas.width, canvas.height);
       out.push(canvas.toDataURL("image/jpeg", 0.7));
@@ -271,8 +306,7 @@
 
     const active = overlays.filter((o) => t >= o.start && t < o.end && o.id !== editing?.id).map((o) => o.shape);
     renderAnnotations(ctx, draft ? [...active, draft] : active);
-    const chosen = overlays.find((o) => o.id === selectedOverlay);
-    if (chosen && tab === "annotate") outline(ctx, bounds(ctx, chosen.shape), s);
+    if (selectedItem && t >= selectedItem.start && t < selectedItem.end) outline(ctx, bounds(ctx, selectedItem.shape), s);
 
     if (cursorTrack && (clickRing || cursorEditable)) {
       const scale = cursorScale;
@@ -299,7 +333,7 @@
           ctx.arc(at.x, at.y, 22 * Math.max(1, scale), 0, Math.PI * 2);
           ctx.fill();
         }
-        const custom = cursorStyle !== "original" ? drawCursor(cursorStyle, color) : null;
+        const custom = cursorStyle !== "original" ? drawCursor(cursorStyle, cursorColor) : null;
         const img = custom?.canvas ?? shapes[at.shape]?.image;
         const hot = custom?.hotspot ?? shapes[at.shape]?.hotspot ?? [0, 0];
         if (img && (custom || (img as HTMLImageElement).complete)) {
@@ -310,7 +344,7 @@
       }
     }
 
-    const area = cropDraft ?? (cropping ? crop : crop);
+    const area = cropDraft ?? crop;
     if (area) {
       ctx.fillStyle = cropping ? "rgba(0,0,0,0.55)" : "rgba(0,0,0,0.65)";
       const vw = video.videoWidth;
@@ -338,19 +372,34 @@
 
   // ── Playback ───────────────────────────────────────────────────────────
 
-  /** Playback skips removed parts and loops over the kept ones. */
-  function timeUpdate() {
+  /** Every frame while playing: skip removed parts, stop at the out point,
+   * play each part at its speed, keep the playhead in view. */
+  function follow() {
+    if (!video) return;
     time = video.currentTime;
     if (!playing) return;
-    const next = nextKept(segments, time);
-    if (next === null) video.currentTime = keptRanges(segments)[0]?.[0] ?? 0;
-    else if (next > time + 0.01) video.currentTime = next;
+    const next = nextKept(kept, time);
+    if (next === null) {
+      video.pause();
+      video.currentTime = trim.end;
+      return;
+    }
+    if (next > time + 0.01) video.currentTime = next;
+    const rate = partAt(kept, next)?.speed ?? 1;
+    if (video.playbackRate !== rate) video.playbackRate = rate;
+    if (scroller && zoom > 1) {
+      const x = time * pxPerSecond;
+      if (x < scroller.scrollLeft || x > scroller.scrollLeft + scroller.clientWidth - 40) {
+        scroller.scrollLeft = x - scroller.clientWidth * 0.2;
+      }
+    }
   }
 
   function togglePlay() {
     if (video.paused) {
-      if (nextKept(segments, video.currentTime) === null) video.currentTime = keptRanges(segments)[0]?.[0] ?? 0;
-      video.playbackRate = speed;
+      if (nextKept(kept, video.currentTime) === null || video.currentTime >= trim.end - 0.02) {
+        video.currentTime = kept[0]?.start ?? 0;
+      }
       video.play();
     } else {
       video.pause();
@@ -360,12 +409,7 @@
   function seek(t: number) {
     video.currentTime = Math.max(0, Math.min(duration, t));
     time = video.currentTime;
-    selectedSegment = indexAt(segments, time);
   }
-
-  $effect(() => {
-    if (video) video.playbackRate = speed;
-  });
 
   // Swapping to the copy without cursor keeps the position.
   $effect(() => {
@@ -381,6 +425,7 @@
   const snapshot = () =>
     JSON.stringify({
       segments: $state.snapshot(segments),
+      trim: $state.snapshot(trim),
       crop: $state.snapshot(crop),
       overlays: $state.snapshot(overlays),
     });
@@ -397,9 +442,11 @@
     to.push(snapshot());
     const parsed = JSON.parse(state);
     segments = parsed.segments;
+    trim = parsed.trim;
     crop = parsed.crop;
     overlays = parsed.overlays;
     selectedOverlay = null;
+    selectedSegment = null;
   }
 
   const undo = () => restore(past, future);
@@ -407,20 +454,133 @@
 
   // ── Cutting ────────────────────────────────────────────────────────────
 
-  const splitHere = () => commit(() => (segments = split(segments, time)));
-  const removeSegment = () => commit(() => (segments = toggle(segments, selectedSegment)));
-  const startHere = () => commit(() => (segments = trimAt(segments, time, true)));
-  const endHere = () => commit(() => (segments = trimAt(segments, time, false)));
+  function splitHere() {
+    commit(() => (segments = split(segments, time)));
+    selectedSegment = indexAt(segments, time);
+  }
 
-  function trackPos(e: PointerEvent, el: HTMLElement) {
-    const r = el.getBoundingClientRect();
+  function removePart(i = selectedSegment ?? indexAt(segments, time)) {
+    commit(() => (segments = toggle(segments, i)));
+    selectedSegment = i;
+  }
+
+  function speedPart(speed: number, i = selectedSegment ?? indexAt(segments, time)) {
+    menu = null;
+    if (segments[i]?.speed === speed) return;
+    commit(() => (segments = setSpeed(segments, i, speed)));
+    selectedSegment = i;
+  }
+
+  const allSpeeds = (speed: number) => {
+    menu = null;
+    commit(() => (segments = segments.map((s) => ({ ...s, speed }))));
+  };
+
+  function trimTo(edge: "start" | "end", t: number) {
+    if (edge === "start") trim.start = Math.max(0, Math.min(t, trim.end - 0.1));
+    else trim.end = Math.min(duration, Math.max(t, trim.start + 0.1));
+  }
+
+  /** Cut points, trim and playhead: where dragged things snap to. */
+  function snapTargets(exclude?: number) {
+    const out = [0, duration, trim.start, trim.end, ...segments.map((s) => s.start)];
+    if (!drag || drag.kind !== "time") out.push(time);
+    for (const o of overlays) if (o.id !== exclude) out.push(o.start, o.end);
+    return out;
+  }
+
+  /** Time under the pointer on the timeline. */
+  function timeAt(e: PointerEvent | WheelEvent | MouseEvent) {
+    const r = content.getBoundingClientRect();
     return (Math.max(0, Math.min(r.width, e.clientX - r.left)) / r.width) * duration;
   }
 
-  function trackDown(e: PointerEvent) {
+  const reach = $derived(SNAP_PX / Math.max(1e-6, pxPerSecond));
+
+  function scrubDown(e: PointerEvent) {
+    if (e.button !== 0) return;
     drag = { kind: "time" };
-    track.setPointerCapture(e.pointerId);
-    seek(trackPos(e, track));
+    content.setPointerCapture(e.pointerId);
+    const t = timeAt(e);
+    seek(t);
+    selectedOverlay = null;
+    const i = indexAt(segments, t);
+    selectedSegment = (e.target as HTMLElement).closest(".track") ? i : selectedSegment;
+  }
+
+  function trimDown(e: PointerEvent, edge: "start" | "end") {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    content.setPointerCapture(e.pointerId);
+    past.push(snapshot());
+    future = [];
+    video.pause();
+    drag = { kind: "trim", edge };
+  }
+
+  /** Dragging a bar of the overlay lane changes when it shows. */
+  function barDown(e: PointerEvent, o: Overlay, edge: "start" | "end" | "both") {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    content.setPointerCapture(e.pointerId);
+    selectedOverlay = o.id;
+    selectedSegment = null;
+    past.push(snapshot());
+    future = [];
+    drag = { kind: "bar", id: o.id, edge, from: timeAt(e), start: o.start, end: o.end };
+  }
+
+  function timelineMove(e: PointerEvent) {
+    if (!drag) return;
+    const free = e.altKey;
+    const at = (t: number, exclude?: number) => (free ? t : snap(t, snapTargets(exclude), reach));
+    if (drag.kind === "time") {
+      seek(timeAt(e));
+    } else if (drag.kind === "trim") {
+      trimTo(drag.edge, at(timeAt(e)));
+      seek(drag.edge === "start" ? trim.start : trim.end - 0.001);
+    } else if (drag.kind === "bar") {
+      const d = drag;
+      const o = overlays.find((x) => x.id === d.id);
+      if (!o) return;
+      const delta = timeAt(e) - d.from;
+      if (d.edge === "start") o.start = Math.max(0, Math.min(d.end - 0.1, at(d.start + delta, o.id)));
+      else if (d.edge === "end") o.end = Math.min(duration, Math.max(d.start + 0.1, at(d.end + delta, o.id)));
+      else {
+        const length = d.end - d.start;
+        const start = at(d.start + delta, o.id);
+        // Snap either end.
+        const end = at(start + length, o.id);
+        o.start = Math.max(0, Math.min(duration - length, end !== start + length ? end - length : start));
+        o.end = o.start + length;
+      }
+      seek(d.edge === "end" ? o.end - 0.01 : o.start);
+    }
+  }
+
+  function timelineUp() {
+    if (drag?.kind === "time" || drag?.kind === "trim" || drag?.kind === "bar") drag = null;
+  }
+
+  /** Ctrl+wheel zooms around the pointer; the wheel alone scrolls. */
+  function wheel(e: WheelEvent) {
+    if (!duration) return;
+    if (e.ctrlKey) {
+      e.preventDefault();
+      zoomBy(e.deltaY < 0 ? 1.25 : 0.8, e);
+    } else if (zoom > 1 && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      scroller.scrollLeft += e.deltaY;
+    }
+  }
+
+  function zoomBy(factor: number, around?: MouseEvent) {
+    const anchor = around ? timeAt(around) : time;
+    const offset = around ? around.clientX - scroller.getBoundingClientRect().left : scroller.clientWidth / 2;
+    zoom = Math.max(1, Math.min(MAX_ZOOM, zoom * factor));
+    requestAnimationFrame(() => {
+      scroller.scrollLeft = anchor * (contentWidth / duration) - offset;
+    });
   }
 
   // ── Overlays ───────────────────────────────────────────────────────────
@@ -453,6 +613,7 @@
     const overlay = { id: shape.id, shape, start, end: Math.min(duration, start + OVERLAY_LENGTH) };
     commit(() => overlays.push(overlay));
     selectedOverlay = overlay.id;
+    selectedSegment = null;
   }
 
   function topmost(p: Point): Overlay | undefined {
@@ -463,9 +624,16 @@
       .find((o) => time >= o.start && time < o.end && hit(ctx, o.shape, p, 8 / box.scale));
   }
 
+  function chooseTool(t: Tool) {
+    tool = t;
+    cropping = false;
+    if (t !== "select") video?.pause();
+  }
+
   function stageDown(e: PointerEvent) {
     if (!video?.videoWidth || e.button !== 0) return;
     e.preventDefault();
+    menu = null;
     if (editing) return commitText();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const p = toVideo(e);
@@ -474,20 +642,20 @@
       cropDraft = { ...p, w: 0, h: 0 };
       return;
     }
-    if (tab !== "annotate") {
-      togglePlay();
-      return;
-    }
-    video.pause();
     if (tool === "select") {
       const found = topmost(p);
       selectedOverlay = found?.id ?? null;
       if (found) {
+        video.pause();
+        selectedSegment = null;
         past.push(snapshot());
         drag = { kind: "move", last: p, moved: false };
+      } else {
+        togglePlay();
       }
       return;
     }
+    video.pause();
     if (tool === "text") {
       const found = topmost(p);
       editing =
@@ -512,7 +680,7 @@
       const s = drag.start;
       cropDraft = { x: Math.min(p.x, s.x), y: Math.min(p.y, s.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y) };
     } else if (drag.kind === "move") {
-      const o = overlays.find((x) => x.id === selectedOverlay);
+      const o = selectedItem;
       if (!o) return;
       const dx = p.x - drag.last.x;
       const dy = p.y - drag.last.y;
@@ -540,8 +708,8 @@
 
   function stageUp() {
     const current = drag;
+    if (!current || current.kind === "time" || current.kind === "trim" || current.kind === "bar") return;
     drag = null;
-    if (!current) return;
     if (current.kind === "crop") {
       const area = cropDraft;
       cropDraft = null;
@@ -551,6 +719,7 @@
       }
     } else if (current.kind === "move") {
       if (!current.moved) past.pop();
+      else future = [];
     } else if (current.kind === "draw" && draft) {
       const shape = draft;
       draft = null;
@@ -559,9 +728,9 @@
   }
 
   function stageDouble(e: MouseEvent) {
-    if (tab !== "annotate") return;
     const found = topmost(toVideo(e));
     if (found?.shape.kind === "text") {
+      video.pause();
       selectedOverlay = found.id;
       editing = { x: found.shape.x1, y: found.shape.y1, text: found.shape.text ?? "", id: found.id };
     }
@@ -611,7 +780,7 @@
   }
 
   function setOverlayTime(edge: "start" | "end") {
-    const o = overlays.find((x) => x.id === selectedOverlay);
+    const o = selectedItem;
     if (!o) return;
     commit(() => {
       if (edge === "start") o.start = Math.min(time, o.end - 0.1);
@@ -619,41 +788,19 @@
     });
   }
 
+  /** Toolbox colour and thickness also apply to the selected item. */
   function setColor(c: string) {
     color = c;
-    const o = overlays.find((x) => x.id === selectedOverlay);
-    if (o) commit(() => (o.shape.color = c));
+    const o = selectedItem;
+    if (o && o.shape.color !== c) commit(() => (o.shape.color = c));
   }
 
-  /** Dragging a bar of the overlay lane changes when it shows. */
-  function barDown(e: PointerEvent, o: Overlay, edge: "start" | "end" | "both") {
-    e.stopPropagation();
-    lane.setPointerCapture(e.pointerId);
-    selectedOverlay = o.id;
-    tab = "annotate";
-    past.push(snapshot());
-    drag = { kind: "bar", id: o.id, edge, from: trackPos(e, lane), start: o.start, end: o.end };
-  }
-
-  function laneMove(e: PointerEvent) {
-    if (drag?.kind === "time") return seek(trackPos(e, track));
-    if (drag?.kind !== "bar") return;
-    const d = drag;
-    const o = overlays.find((x) => x.id === d.id);
+  function setLevel(l: number) {
+    level = l;
+    const o = selectedItem;
     if (!o) return;
-    const delta = trackPos(e, lane) - d.from;
-    if (d.edge === "start") o.start = Math.max(0, Math.min(d.end - 0.1, d.start + delta));
-    else if (d.edge === "end") o.end = Math.min(duration, Math.max(d.start + 0.1, d.end + delta));
-    else {
-      const length = d.end - d.start;
-      o.start = Math.max(0, Math.min(duration - length, d.start + delta));
-      o.end = o.start + length;
-    }
-    seek(d.edge === "end" ? o.end - 0.01 : o.start);
-  }
-
-  function laneUp() {
-    drag = null;
+    const size = o.shape.kind === "text" ? (l + 1) * unit : (l + 2) * unit;
+    if (o.shape.size !== size) commit(() => (o.shape.size = size));
   }
 
   // ── Export ─────────────────────────────────────────────────────────────
@@ -685,7 +832,7 @@
     const customCursor = cursorEditable && (cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible || halo);
     let image: { png: string; hotspot: [number, number] } | null = null;
     if (customCursor && cursorStyle !== "original") {
-      const drawn = drawCursor(cursorStyle, color);
+      const drawn = drawCursor(cursorStyle, cursorColor);
       image = { png: drawn.canvas.toDataURL("image/png"), hotspot: drawn.hotspot };
     }
     const bg = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
@@ -701,8 +848,9 @@
 
   function edit(): VideoEdit {
     return {
-      segments: keptRanges(segments),
-      speed,
+      segments: kept.map((p) => [p.start, p.end]),
+      speed: 1,
+      speeds: kept.map((p) => p.speed),
       crop: crop ? [crop.x, crop.y, crop.w, crop.h] : null,
       composition: composition(),
     };
@@ -710,9 +858,9 @@
 
   /** Nothing changed: the file can be copied as it is. */
   const untouched = $derived(
-    keptRanges(segments).length === 1 &&
-      keptLength(segments) >= duration - 0.01 &&
-      speed === 1 &&
+    kept.length === 1 &&
+      kept[0]!.speed === 1 &&
+      kept[0]!.end - kept[0]!.start >= duration - 0.01 &&
       !crop &&
       !ratio &&
       !overlays.length &&
@@ -725,7 +873,8 @@
   );
 
   async function exportAs(kind: "mp4" | "gif", copy = false) {
-    if (!config || !keptRanges(segments).length) return;
+    menu = null;
+    if (!config || !kept.length) return;
     try {
       const job = await editorExport(
         path,
@@ -771,20 +920,17 @@
       else if (key === "y") redo();
       else if (key === "c") copyVideo();
       else if (key === "e") exportAs("mp4");
+      else if (key === "=" || key === "+") zoomBy(1.5);
+      else if (key === "-") zoomBy(1 / 1.5);
+      else if (key === "0") zoom = 1;
       else return;
       e.preventDefault();
       return;
     }
     const step = e.shiftKey ? 1 : 1 / 30;
-    const tabKey = TABS.find((t) => t.key === key);
-    if (tabKey) {
-      tab = tabKey.tab;
-      return;
-    }
-    const overlayKey = OVERLAY_TOOLS.find((t) => t.key.toLowerCase() === key);
-    if (overlayKey && key !== "s") {
-      tab = "annotate";
-      tool = overlayKey.tool;
+    const toolKey = TOOLS.find((t) => t.key.toLowerCase() === key);
+    if (toolKey) {
+      chooseTool(toolKey.tool);
       return;
     }
     switch (key) {
@@ -798,28 +944,36 @@
       case "arrowright":
         seek(time + step);
         break;
+      case "home":
+        seek(trim.start);
+        break;
+      case "end":
+        seek(trim.end - 0.001);
+        break;
       case "s":
         splitHere();
         break;
       case "delete":
       case "backspace":
         if (selectedOverlay !== null) removeOverlay();
-        else removeSegment();
+        else removePart();
         break;
       case "i":
-        startHere();
+        commit(() => trimTo("start", time));
         break;
       case "o":
-        endHere();
+        commit(() => trimTo("end", time));
         break;
       case "c":
-        tab = "frame";
         cropping = !cropping;
+        if (cropping) video.pause();
         break;
       case "escape":
         cropping = false;
         selectedOverlay = null;
+        selectedSegment = null;
         draft = null;
+        menu = null;
         break;
     }
   }
@@ -829,13 +983,20 @@
     bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
   const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
   const stageCursor = $derived(
-    cropping ? "crosshair" : tab === "annotate" ? (tool === "select" ? "default" : tool === "text" ? "text" : "crosshair") : "pointer",
+    cropping ? "crosshair" : tool === "select" ? "default" : tool === "text" ? "text" : "crosshair",
   );
   const frameStyle = $derived.by(() => {
     if (!ratio) return "";
     const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
     return `aspect-ratio:${ratio[0]}/${ratio[1]};background:linear-gradient(135deg,${stops.join(",")});padding:${margin * 100}%`;
   });
+  const resultSize = $derived.by(() => {
+    if (!video?.videoWidth && !crop) return "";
+    const w = crop?.w ?? video?.videoWidth ?? 0;
+    const h = crop?.h ?? video?.videoHeight ?? 0;
+    return w && h ? `${w & ~1}×${h & ~1}` : "";
+  });
+  const activeJobs = $derived(jobs.slice(0, 3));
 </script>
 
 <svelte:window onkeydown={keyDown} />
@@ -851,16 +1012,123 @@
         ><Icon name="redo" /></button
       >
     </div>
-    <span class="summary">Result {format(output)}{crop ? ` · ${crop.w}×${crop.h}` : ""}{ratio ? ` · ${ratio[0]}:${ratio[1]}` : ""}</span>
+    <span class="summary"
+      >Result <strong>{format(output)}</strong>{resultSize ? ` · ${resultSize}` : ""}{ratio ? ` · ${ratio[0]}:${ratio[1]}` : ""}</span
+    >
     <div class="spacer"></div>
-    <button type="button" class="action" onclick={copyVideo} disabled={!duration}
-      ><Icon name="copy" /> Copy <Kbd keys="Ctrl+C" /></button
+    <button type="button" class="action" onclick={copyVideo} disabled={!duration} title="Copy the result to the clipboard (Ctrl+C)"
+      ><Icon name="copy" /> Copy</button
     >
-    <button type="button" class="action" onclick={() => exportAs("gif")} disabled={!config || !duration}>GIF</button>
-    <button type="button" class="action primary" onclick={() => exportAs("mp4")} disabled={!duration}
-      ><Icon name="export" /> Export MP4 <Kbd keys="Ctrl+E" /></button
-    >
+    <div class="split-button">
+      <button type="button" class="action primary" onclick={() => exportAs("mp4")} disabled={!duration} title="Export MP4 (Ctrl+E)"
+        ><Icon name="export" /> Export</button
+      >
+      <button
+        type="button"
+        class="action primary caret opens-menu"
+        aria-label="Export options"
+        aria-expanded={menu === "export"}
+        onclick={() => (menu = menu === "export" ? null : "export")}><Icon name="chevron" /></button
+      >
+      {#if menu === "export"}
+        <div class="popover export-menu" role="dialog" aria-label="Export options">
+          <section>
+            <h3>MP4</h3>
+            <label class="field"
+              >Quality
+              <select bind:value={quality}>{#each QUALITIES as q (q.value)}<option value={q.value}>{q.label}</option>{/each}</select>
+            </label>
+            <label class="check"><input type="checkbox" bind:checked={audio} /> Keep the sound</label>
+            <button type="button" class="primary wide" onclick={() => exportAs("mp4")}>Export MP4 <Kbd keys="Ctrl+E" /></button>
+          </section>
+          <section>
+            <h3>GIF</h3>
+            <div class="pair">
+              <label class="field"
+                >Frame rate
+                <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
+              </label>
+              <label class="field"
+                >Width
+                <select bind:value={gifWidth}
+                  >{#each GIF_WIDTHS as w (w)}<option value={w}>{w === 0 ? "Original" : `${w} px`}</option>{/each}</select
+                >
+              </label>
+            </div>
+            <button type="button" class="wide" onclick={() => exportAs("gif")} disabled={!config}>Export GIF</button>
+          </section>
+        </div>
+      {/if}
+    </div>
   </header>
+
+  <nav class="toolbox" aria-label="Tools">
+    <div class="tools" role="toolbar">
+      {#each TOOLS as t (t.tool)}
+        <button
+          type="button"
+          class="tool"
+          class:active={tool === t.tool && !cropping}
+          title="{t.label} ({t.key})"
+          aria-label={t.label}
+          aria-pressed={tool === t.tool && !cropping}
+          onclick={() => chooseTool(t.tool)}
+        >
+          <Icon name={t.icon} />
+          <span class="key">{t.key}</span>
+        </button>
+      {/each}
+      <span class="sep"></span>
+      <button
+        type="button"
+        class="tool"
+        class:active={cropping}
+        title="Crop: draw the area to keep (C)"
+        aria-label="Crop"
+        aria-pressed={cropping}
+        onclick={() => {
+          cropping = !cropping;
+          if (cropping) video.pause();
+        }}
+      >
+        <Icon name="crop" />
+        <span class="key">C</span>
+      </button>
+    </div>
+    <span class="sep"></span>
+    <div class="colors" role="group" aria-label="Colour">
+      {#each COLORS as c (c)}
+        <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}
+        ></button>
+      {/each}
+      <label class="custom" title="Any colour" style="--swatch:{color}"
+        ><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label
+      >
+    </div>
+    <span class="sep"></span>
+    <div class="levels" role="group" aria-label="Thickness">
+      {#each LEVELS as l (l.level)}
+        <button type="button" class="tool" class:active={level === l.level} title={l.label} aria-label={l.label} onclick={() => setLevel(l.level)}
+          ><span class="dot" style="--d:{3 + l.level * 2}px"></span></button
+        >
+      {/each}
+    </div>
+    <div class="spacer"></div>
+    {#if selectedItem}
+      <span class="context">
+        {selectedItem.shape.kind === "text" ? "Text" : selectedItem.shape.kind} · {format(selectedItem.start)} → {format(selectedItem.end)}
+      </span>
+      <button type="button" class="tool" title="Delete the selected item (Del)" aria-label="Delete the selected item" onclick={removeOverlay}
+        ><Icon name="trash" /></button
+      >
+    {:else if cropping}
+      <span class="context">Drag over the video to keep only that area · <Kbd keys="Esc" /> cancel</span>
+    {:else if tool !== "select"}
+      <span class="context">Click or drag on the video · shows for {OVERLAY_LENGTH} s, adjust it on the timeline</span>
+    {:else}
+      <span class="context">Click the video to play · click an item to select it</span>
+    {/if}
+  </nav>
 
   <div class="body">
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -881,7 +1149,6 @@
           src={source}
           preload="auto"
           onloadedmetadata={loaded}
-          ontimeupdate={timeUpdate}
           onresize={measure}
           onplay={() => (playing = true)}
           onpause={() => (playing = false)}
@@ -906,239 +1173,277 @@
           onpointerdown={(e) => e.stopPropagation()}
         ></textarea>
       {/if}
-      {#if cropping}
-        <div class="hint">Drag over the video to keep only that area · <Kbd keys="Esc" /> leave</div>
-      {:else if tab === "annotate" && tool !== "select"}
-        <div class="hint">Click or drag on the video · shows for {OVERLAY_LENGTH} s from the playhead, adjust it on the timeline</div>
-      {/if}
       {#if error}<p class="error">{error}</p>{/if}
       {#if toast}<div class="toast" role="status">{toast}</div>{/if}
-    </div>
-
-    <aside class="panel">
-      <nav class="tabs" aria-label="Editing">
-        {#each TABS as t (t.tab)}
-          <button type="button" class:active={tab === t.tab} title="{t.label} ({t.key})" onclick={() => (tab = t.tab)}>
-            <Icon name={t.icon} />
-            <span>{t.label}</span>
-            <span class="key">{t.key}</span>
-          </button>
-        {/each}
-      </nav>
-
-      <div class="content">
-        {#if tab === "cut"}
-          <section>
-            <h3>Cut</h3>
-            <div class="column">
-              <button type="button" onclick={splitHere}><Icon name="split" /> Split at the playhead <Kbd keys="S" /></button>
-              <button type="button" onclick={removeSegment}
-                ><Icon name="trash" />
-                {segments[selectedSegment]?.kept === false ? "Restore the selected part" : "Remove the selected part"}
-                <Kbd keys="Del" /></button
-              >
-              <button type="button" onclick={startHere}>Start here <Kbd keys="I" /></button>
-              <button type="button" onclick={endHere}>End here <Kbd keys="O" /></button>
-              <button type="button" class="link" onclick={() => commit(() => (segments = whole(duration)))}>Keep everything</button>
-            </div>
-            <p class="note">Click the timeline to place the playhead and select a part.</p>
-          </section>
-          <section>
-            <h3>Speed</h3>
-            <div class="row">
-              {#each SPEEDS as sp (sp)}
-                <button type="button" class="chip" class:active={speed === sp} onclick={() => (speed = sp)}>{sp}×</button>
-              {/each}
-            </div>
-            <p class="note">The sound follows the speed without changing pitch.</p>
-          </section>
-        {:else if tab === "annotate"}
-          <section>
-            <h3>Add</h3>
-            <div class="tool-grid">
-              {#each OVERLAY_TOOLS as t (t.tool)}
-                <button type="button" class="tool" class:active={tool === t.tool} title="{t.label} ({t.key})" onclick={() => (tool = t.tool)}>
-                  <Icon name={t.icon} />
-                  <span class="key">{t.key}</span>
-                </button>
-              {/each}
-            </div>
-          </section>
-          <section>
-            <h3>Colour</h3>
-            <div class="row">
-              {#each COLORS as c (c)}
-                <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
-              {/each}
-              <label class="custom" title="Any colour"><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label>
-            </div>
-            <div class="row">
-              {#each [1, 2, 4] as l (l)}
-                <button type="button" class="chip" class:active={level === l} onclick={() => (level = l)}
-                  ><span class="dot" style="--d:{3 + l * 2}px"></span> {l === 1 ? "Thin" : l === 2 ? "Medium" : "Thick"}</button
-                >
-              {/each}
-            </div>
-          </section>
-          {#if selectedOverlay !== null}
-            {@const o = overlays.find((x) => x.id === selectedOverlay)}
-            {#if o}
-              <section>
-                <h3>Selected · {format(o.start)} → {format(o.end)}</h3>
-                <div class="column">
-                  <button type="button" onclick={() => setOverlayTime("start")}>Show from the playhead</button>
-                  <button type="button" onclick={() => setOverlayTime("end")}>Hide at the playhead</button>
-                  <button type="button" onclick={removeOverlay}><Icon name="trash" /> Delete <Kbd keys="Del" /></button>
-                </div>
-              </section>
-            {/if}
-          {/if}
-          <p class="note">Each item has a bar under the timeline: drag it, or its ends, to choose when it shows. Double-click a text to edit it.</p>
-        {:else if tab === "cursor"}
-          {#if !cursorTrack}
-            <p class="note">
-              Cursor effects need a recording made with Kadra with “editable cursor” on (Settings › Recording). This video
-              has no cursor track.
-            </p>
-          {:else}
-            <section>
-              <h3>Pointer</h3>
-              {#if cursorEditable}
-                <label class="check"><input type="checkbox" bind:checked={cursorVisible} /> Show the pointer</label>
-                <label class="field">Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} /> <span class="value">{cursorScale}×</span></label>
-                <div class="column">
-                  {#each CURSOR_STYLES as cs (cs.value)}
-                    <label class="check"><input type="radio" name="cursor" value={cs.value} bind:group={cursorStyle} /> {cs.label}</label>
-                  {/each}
-                </div>
-                <label class="check"><input type="checkbox" bind:checked={halo} /> Halo around the pointer
-                  <input type="color" bind:value={haloColor} class="mini" /></label
+      {#if activeJobs.length}
+        <div class="jobs" onpointerdown={(e) => e.stopPropagation()} role="status">
+          {#each activeJobs as j (j.job)}
+            <div class="job">
+              <span class="kind">{j.kind === "copy" ? "Copy" : j.kind.toUpperCase()}</span>
+              {#if j.error}
+                <span class="failed" title={j.error}>{j.error}</span>
+              {:else if j.output}
+                <span class="name" title={j.output}>{name(j.output)} · {size(j.bytes ?? 0)}</span>
+                <button type="button" class="icon small" title="Show in folder" aria-label="Show in folder" onclick={() => j.output && showInFolder(j.output)}
+                  ><Icon name="folder" /></button
                 >
               {:else}
-                <p class="note">The copy without cursor of this recording is gone: only clicks can be marked.</p>
-              {/if}
-            </section>
-            <section>
-              <h3>Clicks ({cursorTrack.clicks.length})</h3>
-              <label class="check"><input type="checkbox" bind:checked={clickRing} /> Mark clicks with a ring
-                <input type="color" bind:value={clickColor} class="mini" /></label
-              >
-              <label class="check"><input type="checkbox" bind:checked={clickSound} /> Click sound</label>
-            </section>
-          {/if}
-        {:else if tab === "frame"}
-          <section>
-            <h3>Crop</h3>
-            <div class="column">
-              <button type="button" class:active={cropping} onclick={() => (cropping = !cropping)}><Icon name="crop" /> Draw the area to keep <Kbd keys="C" /></button>
-              {#if crop}
-                <button type="button" class="link" onclick={() => commit(() => (crop = null))}>Reset crop ({crop.w}×{crop.h})</button>
+                <progress max="1" value={j.done}></progress>
+                <span class="pct">{Math.round(j.done * 100)}%</span>
               {/if}
             </div>
-          </section>
-          <section>
-            <h3>Format</h3>
-            <div class="row">
-              {#each RATIOS as r (r.label)}
-                <button type="button" class="chip" class:active={(ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)} onclick={() => (ratio = r.ratio)}
-                  >{r.label}</button
-                >
-              {/each}
-            </div>
-            {#if ratio}
-              <div class="row">
-                {#each BACKGROUNDS as b, i (b.name)}
-                  <button type="button" class="swatch wide" class:active={background === i} style="--swatch:linear-gradient(135deg,{b.stops.join(',')})" title={b.name} aria-label={b.name} onclick={() => (background = i)}></button>
-                {/each}
-              </div>
-              <label class="field">Margin <input type="range" min="0" max="0.2" step="0.01" bind:value={margin} /></label>
-            {/if}
-            <p class="note">For Shorts, Reels and TikTok use 9:16; the video is centred on the background.</p>
-          </section>
-        {:else}
-          <section>
-            <h3>MP4</h3>
-            <label class="field">Quality
-              <select bind:value={quality}>{#each QUALITIES as q (q.value)}<option value={q.value}>{q.label}</option>{/each}</select>
-            </label>
-            <label class="check"><input type="checkbox" bind:checked={audio} /> Keep the sound</label>
-            <button type="button" class="primary" onclick={() => exportAs("mp4")} disabled={!duration}>Export MP4 <Kbd keys="Ctrl+E" /></button>
-          </section>
-          <section>
-            <h3>GIF</h3>
-            <label class="field">Frame rate
-              <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
-            </label>
-            <label class="field">Width
-              <select bind:value={gifWidth}>{#each GIF_WIDTHS as w (w)}<option value={w}>{w === 0 ? "Original" : `${w} px`}</option>{/each}</select>
-            </label>
-            <button type="button" onclick={() => exportAs("gif")} disabled={!config || !duration}>Export GIF</button>
-          </section>
-        {/if}
+          {/each}
+        </div>
+      {/if}
+    </div>
 
-        {#if jobs.length}
-          <section class="jobs">
-            <h3>Exports</h3>
-            {#each jobs as j (j.job)}
-              <div class="job">
-                <span class="kind">{j.kind === "copy" ? "Copy" : j.kind.toUpperCase()}</span>
-                {#if j.error}
-                  <span class="failed">{j.error}</span>
-                {:else if j.output}
-                  <span class="name" title={j.output}>{name(j.output)} · {size(j.bytes ?? 0)}</span>
-                  <button type="button" class="icon" title="Show in folder" aria-label="Show in folder" onclick={() => j.output && showInFolder(j.output)}><Icon name="folder" /></button>
-                {:else}
-                  <progress max="1" value={j.done}></progress>
-                {/if}
-              </div>
+    <aside class="inspector">
+      {#if selectedItem}
+        <details open>
+          <summary>Selected item</summary>
+          <p class="note">Shows {format(selectedItem.start)} → {format(selectedItem.end)}. Drag its bar on the timeline to move it in time.</p>
+          <div class="pair">
+            <button type="button" onclick={() => setOverlayTime("start")}>From playhead</button>
+            <button type="button" onclick={() => setOverlayTime("end")}>Until playhead</button>
+          </div>
+          <button type="button" class="wide" onclick={removeOverlay}><Icon name="trash" /> Delete <Kbd keys="Del" /></button>
+        </details>
+      {/if}
+      <details open>
+        <summary>Format</summary>
+        <div class="chips">
+          {#each RATIOS as r (r.label)}
+            <button
+              type="button"
+              class="chip"
+              class:active={(ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)}
+              onclick={() => (ratio = r.ratio)}>{r.label}</button
+            >
+          {/each}
+        </div>
+        {#if ratio}
+          <div class="chips">
+            {#each BACKGROUNDS as b, i (b.name)}
+              <button
+                type="button"
+                class="swatch wide-swatch"
+                class:active={background === i}
+                style="--swatch:linear-gradient(135deg,{b.stops.join(',')})"
+                title={b.name}
+                aria-label={b.name}
+                onclick={() => (background = i)}
+              ></button>
             {/each}
-          </section>
+          </div>
+          <label class="field">Margin <input type="range" min="0" max="0.2" step="0.01" bind:value={margin} /></label>
         {/if}
-      </div>
+        <div class="pair">
+          <button type="button" class:active={cropping} onclick={() => (cropping = !cropping)}><Icon name="crop" /> Crop</button>
+          <button type="button" disabled={!crop} onclick={() => commit(() => (crop = null))}>Reset crop</button>
+        </div>
+      </details>
+      <details open>
+        <summary>Cursor</summary>
+        {#if !cursorTrack}
+          <p class="note">Needs a Kadra recording made with “editable cursor” on (Settings › Recording).</p>
+        {:else if cursorEditable}
+          <label class="check"><input type="checkbox" bind:checked={cursorVisible} /> Show the pointer</label>
+          <label class="field"
+            >Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} /> <span class="value">{cursorScale}×</span></label
+          >
+          <label class="field"
+            >Style
+            <select bind:value={cursorStyle}>{#each CURSOR_STYLES as cs (cs.value)}<option value={cs.value}>{cs.label}</option>{/each}</select>
+            {#if cursorStyle !== "original"}<input type="color" bind:value={cursorColor} class="mini" title="Pointer colour" />{/if}
+          </label>
+          <label class="check"
+            ><input type="checkbox" bind:checked={halo} /> Halo <input type="color" bind:value={haloColor} class="mini" title="Halo colour" /></label
+          >
+        {:else}
+          <p class="note">The copy without cursor of this recording is gone: only clicks can be marked.</p>
+        {/if}
+      </details>
+      {#if cursorTrack}
+        <details open>
+          <summary>Clicks ({cursorTrack.clicks.length})</summary>
+          <label class="check"
+            ><input type="checkbox" bind:checked={clickRing} /> Ring <input type="color" bind:value={clickColor} class="mini" title="Ring colour" /></label
+          >
+          <label class="check"><input type="checkbox" bind:checked={clickSound} /> Click sound</label>
+        </details>
+      {/if}
     </aside>
   </div>
 
   <footer class="timeline">
     <div class="transport">
-      <button type="button" class="icon" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
+      <button type="button" class="icon" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
+        ><Icon name="start" /></button
+      >
+      <button type="button" class="icon play" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
         <Icon name={playing ? "pause" : "play"} />
       </button>
-      <span class="time">{format(time)} / {format(duration)}</span>
-      <span class="note">
-        <Kbd keys="Space" /> play · <Kbd keys="←" /><Kbd keys="→" /> frame · <Kbd keys="S" /> split · <Kbd keys="Del" /> remove ·
-        <Kbd keys="I" />/<Kbd keys="O" /> start/end
-      </span>
-    </div>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="tracks" onpointermove={laneMove} onpointerup={laneUp}>
-      <div class="track" bind:this={track} onpointerdown={trackDown}>
-        <div class="filmstrip">
-          {#each frames as src, i (i)}<img {src} alt="" />{/each}
-        </div>
-        {#each segments as sg, i (sg.start)}
-          <div
-            class="segment"
-            class:removed={!sg.kept}
-            class:selected={selectedSegment === i}
-            style="left:{percent(sg.start)}%;width:{percent(sg.end) - percent(sg.start)}%"
-          ></div>
-        {/each}
-        <div class="playhead" style="left:{percent(time)}%"></div>
-      </div>
-      <div class="lane" bind:this={lane}>
-        {#each overlays as o (o.id)}
-          <div
-            class="bar"
-            class:selected={selectedOverlay === o.id}
-            style="left:{percent(o.start)}%;width:{percent(o.end) - percent(o.start)}%;--bar:{o.shape.color}"
-            onpointerdown={(e) => barDown(e, o, "both")}
-          >
-            <span class="edge left" onpointerdown={(e) => barDown(e, o, "start")}></span>
-            <span class="label">{o.shape.kind === "text" ? o.shape.text : o.shape.kind}</span>
-            <span class="edge right" onpointerdown={(e) => barDown(e, o, "end")}></span>
+      <button type="button" class="icon" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
+        ><Icon name="end" /></button
+      >
+      <span class="time">{format(time)} <span class="muted">/ {format(duration)}</span></span>
+      <span class="sep"></span>
+      <button type="button" class="tbtn" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)"
+        ><Icon name="split" /> Split <Kbd keys="S" /></button
+      >
+      <button
+        type="button"
+        class="tbtn"
+        onclick={() => removePart()}
+        disabled={!duration}
+        title={selected?.kept === false ? "Restore the selected part (Del)" : "Delete the selected part (Del)"}
+        ><Icon name={selected?.kept === false ? "restore" : "trash"} />
+        {selected?.kept === false ? "Restore" : "Delete"} <Kbd keys="Del" /></button
+      >
+      <div class="speed-menu">
+        <button
+          type="button"
+          class="tbtn opens-menu"
+          disabled={!duration}
+          aria-expanded={menu === "speed"}
+          title="Speed of the selected part"
+          onclick={() => (menu = menu === "speed" ? null : "speed")}
+          ><Icon name="speed" /> Speed {speedLabel((selected ?? segments[indexAt(segments, time)])?.speed ?? 1)}
+          <Icon name="chevron" /></button
+        >
+        {#if menu === "speed"}
+          <div class="popover speeds" role="menu">
+            {#each SPEEDS as sp (sp)}
+              <button
+                type="button"
+                role="menuitem"
+                class:active={((selected ?? segments[indexAt(segments, time)])?.speed ?? 1) === sp}
+                onclick={() => speedPart(sp)}>{speedLabel(sp)}</button
+              >
+            {/each}
+            <hr />
+            <div class="all">
+              All parts:
+              {#each [1, 1.5, 2] as sp (sp)}<button type="button" class="chip" onclick={() => allSpeeds(sp)}>{speedLabel(sp)}</button>{/each}
+            </div>
           </div>
-        {/each}
-        <div class="playhead" style="left:{percent(time)}%"></div>
+        {/if}
+      </div>
+      <div class="spacer"></div>
+      <span class="hint-keys"
+        ><Kbd keys="I" />/<Kbd keys="O" /> trim · <Kbd keys="Alt" /> no snapping · <Kbd keys="Ctrl" /> + wheel zoom</span
+      >
+      <div class="zoom">
+        <button type="button" class="icon small" aria-label="Zoom out" title="Zoom out (Ctrl+-)" disabled={zoom <= 1} onclick={() => zoomBy(1 / 1.5)}
+          ><Icon name="minus" /></button
+        >
+        <input
+          type="range"
+          min="0"
+          max={Math.log(MAX_ZOOM)}
+          step="0.01"
+          value={Math.log(zoom)}
+          aria-label="Timeline zoom"
+          oninput={(e) => (zoom = Math.exp(Number(e.currentTarget.value)))}
+        />
+        <button type="button" class="icon small" aria-label="Zoom in" title="Zoom in (Ctrl++)" disabled={zoom >= MAX_ZOOM} onclick={() => zoomBy(1.5)}
+          ><Icon name="plus" /></button
+        >
+      </div>
+    </div>
+
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="scroller" bind:this={scroller} onwheel={wheel}>
+      <div
+        class="content"
+        bind:this={content}
+        style="width:{zoom * 100}%"
+        onpointerdown={scrubDown}
+        onpointermove={timelineMove}
+        onpointerup={timelineUp}
+        onpointercancel={timelineUp}
+      >
+        <div class="ruler">
+          {#each ticks as t (t)}
+            <span class="tick" style="left:{percent(t)}%">{label(t, step)}</span>
+          {/each}
+        </div>
+
+        <div class="track">
+          <div class="filmstrip">
+            {#each frames as src, i (i)}<img {src} alt="" draggable="false" />{/each}
+          </div>
+          {#each segments as sg, i (sg.start)}
+            <div
+              class="segment"
+              class:removed={!sg.kept}
+              class:selected={selectedSegment === i}
+              style="left:{percent(sg.start)}%;width:{percent(sg.end) - percent(sg.start)}%"
+            >
+              {#if sg.kept && sg.speed !== 1}<span class="badge">{speedLabel(sg.speed)}</span>{/if}
+              <div class="part-tools">
+                <button
+                  type="button"
+                  title={sg.kept ? "Delete this part" : "Restore this part"}
+                  aria-label={sg.kept ? "Delete this part" : "Restore this part"}
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onclick={() => removePart(i)}><Icon name={sg.kept ? "trash" : "restore"} /></button
+                >
+                {#if sg.kept}
+                  <button
+                    type="button"
+                    class="opens-menu"
+                    title="Speed of this part"
+                    onpointerdown={(e) => e.stopPropagation()}
+                    onclick={() => {
+                      selectedSegment = i;
+                      menu = "speed";
+                    }}>{speedLabel(sg.speed)}</button
+                  >
+                {/if}
+              </div>
+            </div>
+          {/each}
+          <!-- Outside the trim: dimmed. -->
+          <div class="outside" style="left:0;width:{percent(trim.start)}%"></div>
+          <div class="outside" style="left:{percent(trim.end)}%;right:0"></div>
+          <div class="trim-frame" style="left:{percent(trim.start)}%;width:{percent(trim.end) - percent(trim.start)}%"></div>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="handle start"
+            style="left:{percent(trim.start)}%"
+            title="Drag to trim the start (I)"
+            onpointerdown={(e) => trimDown(e, "start")}
+          ></div>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="handle end"
+            style="left:{percent(trim.end)}%"
+            title="Drag to trim the end (O)"
+            onpointerdown={(e) => trimDown(e, "end")}
+          ></div>
+        </div>
+
+        <div class="lane">
+          {#if !overlays.length}
+            <span class="lane-hint">Texts and shapes appear here — drag a bar to choose when it shows</span>
+          {/if}
+          {#each overlays as o (o.id)}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="bar"
+              class:selected={selectedOverlay === o.id}
+              style="left:{percent(o.start)}%;width:{percent(o.end) - percent(o.start)}%;--bar:{o.shape.color}"
+              onpointerdown={(e) => barDown(e, o, "both")}
+            >
+              <span class="edge left" onpointerdown={(e) => barDown(e, o, "start")}></span>
+              <span class="label">{o.shape.kind === "text" ? o.shape.text : o.shape.kind}</span>
+              <span class="edge right" onpointerdown={(e) => barDown(e, o, "end")}></span>
+            </div>
+          {/each}
+        </div>
+
+        <div class="playhead" style="left:{percent(time)}%"><span class="knob"></span></div>
       </div>
     </div>
   </footer>
@@ -1150,13 +1455,18 @@
     flex-direction: column;
     height: 100vh;
   }
-  .topbar {
+  .topbar,
+  .toolbox {
     display: flex;
     align-items: center;
     gap: 10px;
     padding: 6px 12px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+  }
+  .toolbox {
+    gap: 8px;
+    padding: 4px 12px;
   }
   .title {
     max-width: 260px;
@@ -1177,8 +1487,21 @@
     font-size: 12px;
     color: var(--text-muted);
   }
+  .summary strong,
+  .time {
+    color: var(--text);
+  }
+  .muted {
+    color: var(--text-muted);
+  }
   .spacer {
     flex: 1;
+  }
+  .sep {
+    width: 1px;
+    align-self: stretch;
+    margin: 4px 2px;
+    background: var(--border);
   }
   button {
     display: inline-flex;
@@ -1194,7 +1517,12 @@
     border-color: transparent;
     background: transparent;
   }
-  button.icon:hover:not(:disabled) {
+  button.icon.small {
+    width: 26px;
+    height: 26px;
+  }
+  button.icon:hover:not(:disabled),
+  .tbtn:hover:not(:disabled) {
     background: var(--control);
     border-color: var(--border);
   }
@@ -1207,17 +1535,153 @@
   button.chip {
     padding: 3px 9px;
   }
-  button.link {
-    border: none;
-    background: none;
-    color: var(--accent);
-    padding: 2px 0;
+  button.wide {
+    width: 100%;
+    justify-content: center;
+    margin-top: 6px;
   }
+  .primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+
+  /* Export split button and menus */
+  .split-button,
+  .speed-menu {
+    position: relative;
+    display: flex;
+  }
+  .split-button .action.primary:first-child {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .split-button .caret {
+    padding: 5px 4px;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid color-mix(in srgb, var(--on-accent) 30%, transparent);
+  }
+  .popover {
+    position: absolute;
+    z-index: 20;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
+  }
+  .export-menu {
+    top: calc(100% + 6px);
+    right: 0;
+    width: 280px;
+  }
+  .speeds {
+    bottom: calc(100% + 6px);
+    left: 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    width: 220px;
+  }
+  .speeds hr {
+    grid-column: 1 / -1;
+    width: 100%;
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 4px 0;
+  }
+  .speeds .all {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .speeds > button {
+    justify-content: center;
+    font-family: var(--font-mono);
+  }
+
+  /* Toolbox */
+  .tools,
+  .colors,
+  .levels {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .colors {
+    gap: 5px;
+  }
+  .tool {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+  }
+  .tool:hover:not(.active) {
+    background: var(--control);
+    border-color: var(--border);
+  }
+  .tool .key {
+    position: absolute;
+    right: 2px;
+    bottom: 0;
+    font-size: 8px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    opacity: 0.55;
+  }
+  .context {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .swatch,
+  .custom {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 50%;
+    background: var(--swatch);
+    border: 2px solid var(--border);
+  }
+  .swatch.active {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .custom {
+    position: relative;
+    overflow: hidden;
+    background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+  }
+  .custom input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .dot {
+    width: var(--d);
+    height: var(--d);
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  /* Player */
   .body {
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 1fr 300px;
+    grid-template-columns: 1fr 260px;
   }
   .player {
     position: relative;
@@ -1233,7 +1697,6 @@
     height: 100%;
     display: grid;
     place-items: center;
-    box-sizing: border-box;
     min-height: 0;
   }
   .player.framed .frame {
@@ -1267,7 +1730,6 @@
     field-sizing: content;
     outline: none;
   }
-  .hint,
   .toast,
   .error {
     position: absolute;
@@ -1280,10 +1742,6 @@
     font-size: 13px;
     pointer-events: none;
   }
-  .hint {
-    top: 10px;
-    color: var(--text-muted);
-  }
   .toast {
     bottom: 14px;
   }
@@ -1291,48 +1749,90 @@
     bottom: 50px;
     color: var(--danger);
   }
-  .panel {
+  .jobs {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    width: 280px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    border: 1px solid var(--border);
+    cursor: default;
+  }
+  .job {
     display: flex;
-    flex-direction: column;
-    min-height: 0;
+    align-items: center;
+    gap: 8px;
+    min-height: 26px;
+    font-size: 12px;
+  }
+  .job .kind {
+    font-weight: 600;
+    min-width: 36px;
+  }
+  .job .name,
+  .failed {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .job progress {
+    flex: 1;
+  }
+  .pct {
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+  }
+  .failed {
+    color: var(--danger);
+  }
+
+  /* Inspector */
+  .inspector {
+    overflow-y: auto;
     background: var(--surface);
     border-left: 1px solid var(--border);
   }
-  .tabs {
-    display: flex;
-    flex-direction: column;
-    padding: 6px;
-    gap: 2px;
+  details {
+    padding: 8px 12px 12px;
     border-bottom: 1px solid var(--border);
   }
-  .tabs button {
-    position: relative;
-    justify-content: flex-start;
-    border-color: transparent;
-    background: transparent;
-    padding: 6px 10px;
+  summary {
+    margin: 0 -4px 6px;
+    padding: 2px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 4px;
   }
-  .tabs button:hover {
-    background: var(--control);
-  }
-  .tabs button.active {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+  summary:hover {
     color: var(--text);
-    border-color: var(--accent);
   }
-  .key {
-    margin-left: auto;
-    font-size: 10px;
-    font-family: var(--font-mono);
-    opacity: 0.6;
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin: 4px 0 8px;
   }
-  .content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
+  .wide-swatch {
+    width: 34px;
+    border-radius: 6px;
   }
-  section {
-    margin-bottom: 16px;
+  .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .pair button {
+    justify-content: center;
+  }
+  section + section {
+    margin-top: 12px;
   }
   h3 {
     margin: 0 0 6px;
@@ -1342,24 +1842,10 @@
     letter-spacing: 0.04em;
     color: var(--text-muted);
   }
-  .row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin: 4px 0;
-  }
-  .column {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .column button {
-    justify-content: flex-start;
-  }
   .note {
     font-size: 12px;
     color: var(--text-muted);
-    margin: 6px 0;
+    margin: 4px 0 8px;
   }
   .check,
   .field {
@@ -1372,6 +1858,12 @@
   .field input[type="range"],
   .field select {
     flex: 1;
+    min-width: 0;
+  }
+  .value {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    min-width: 32px;
   }
   .mini {
     width: 26px;
@@ -1379,118 +1871,118 @@
     padding: 0;
     border: none;
     background: none;
+    margin-left: auto;
   }
-  .tool-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 40px);
-    gap: 4px;
-  }
-  .tool {
-    position: relative;
-    display: grid;
-    place-items: center;
-    width: 40px;
-    height: 40px;
-    padding: 0;
-  }
-  .tool .key {
-    position: absolute;
-    right: 3px;
-    bottom: 1px;
-    font-size: 9px;
-    font-weight: 700;
-  }
-  .swatch {
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    border-radius: 50%;
-    background: var(--swatch);
-    border: 2px solid var(--border);
-  }
-  .swatch.wide {
-    width: 38px;
-    border-radius: 6px;
-  }
-  .swatch.active {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-  .custom input {
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: none;
-    background: none;
-  }
-  .dot {
-    width: var(--d);
-    height: var(--d);
-    border-radius: 50%;
-    background: currentColor;
-  }
-  .jobs .job {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-  }
-  .job .kind {
-    font-weight: 600;
-    min-width: 36px;
-  }
-  .job .name {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .job progress {
-    flex: 1;
-  }
-  .failed {
-    color: var(--danger);
-  }
+
+  /* Timeline */
   .timeline {
-    padding: 8px 12px 12px;
+    padding: 6px 12px 10px;
     background: var(--surface);
     border-top: 1px solid var(--border);
   }
   .transport {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     margin-bottom: 6px;
   }
-  .transport .note {
-    margin: 0 0 0 auto;
+  .transport .play {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--on-accent);
   }
-  .tracks {
+  .transport .play:hover:not(:disabled) {
+    background: var(--accent);
+    filter: brightness(1.1);
+  }
+  .time {
+    min-width: 128px;
+    margin-left: 4px;
+  }
+  .tbtn {
+    border-color: transparent;
+    background: transparent;
+    padding: 4px 8px;
+  }
+  .hint-keys {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .zoom {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    gap: 2px;
+  }
+  .zoom input {
+    width: 110px;
+    padding: 0;
+  }
+  .scroller {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0 10px;
+    scrollbar-width: thin;
+  }
+  .content {
+    position: relative;
+    min-width: 100%;
+    touch-action: none;
+    padding-bottom: 4px;
+  }
+  .ruler {
+    position: relative;
+    height: 18px;
+    cursor: ew-resize;
+  }
+  .tick {
+    position: absolute;
+    top: 0;
+    padding-left: 3px;
+    border-left: 1px solid color-mix(in srgb, var(--text) 30%, transparent);
+    height: 10px;
+    font-size: 10px;
+    line-height: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    white-space: nowrap;
+    pointer-events: none;
   }
   .track,
   .lane {
     position: relative;
     border-radius: 6px;
-    overflow: hidden;
-    touch-action: none;
   }
   .track {
-    height: 52px;
+    height: 58px;
     background: color-mix(in srgb, var(--text) 10%, transparent);
     cursor: pointer;
   }
   .lane {
-    height: 26px;
+    height: 28px;
+    margin-top: 4px;
     background: color-mix(in srgb, var(--text) 5%, transparent);
+    overflow: hidden;
+  }
+  .lane-hint {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 11px;
+    color: var(--text-muted);
+    pointer-events: none;
+    white-space: nowrap;
   }
   .filmstrip {
     position: absolute;
     inset: 0;
     display: flex;
-    opacity: 0.85;
+    overflow: hidden;
+    border-radius: 6px;
+    opacity: 0.9;
     pointer-events: none;
   }
   .filmstrip img {
@@ -1503,17 +1995,103 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    border: 2px solid var(--accent);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    pointer-events: none;
+    border-left: 2px solid color-mix(in srgb, var(--surface) 80%, transparent);
   }
   .segment.removed {
-    border-color: transparent;
-    background: repeating-linear-gradient(135deg, rgb(0 0 0 / 0.65) 0 6px, rgb(0 0 0 / 0.45) 6px 12px);
+    background: repeating-linear-gradient(135deg, rgb(0 0 0 / 0.7) 0 6px, rgb(0 0 0 / 0.5) 6px 12px);
   }
   .segment.selected {
-    box-shadow: inset 0 0 0 2px #fff;
+    box-shadow: inset 0 0 0 2px var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .badge {
+    position: absolute;
+    left: 6px;
+    bottom: 4px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: rgb(0 0 0 / 0.7);
+    color: #fff;
+    font: 600 11px/16px var(--font-mono);
+    pointer-events: none;
+  }
+  .part-tools {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: none;
+    gap: 2px;
+    z-index: 3;
+  }
+  .segment:hover .part-tools,
+  .segment.selected .part-tools {
+    display: flex;
+  }
+  .part-tools button {
+    height: 22px;
+    min-width: 22px;
+    padding: 0 4px;
+    justify-content: center;
+    border: none;
+    border-radius: 4px;
+    background: rgb(0 0 0 / 0.72);
+    color: #fff;
+    font: 600 11px var(--font-mono);
+  }
+  .part-tools button:hover {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .part-tools :global(svg) {
+    width: 14px;
+    height: 14px;
+  }
+  .outside {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgb(0 0 0 / 0.62);
+    pointer-events: none;
+  }
+  .trim-frame {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-top: 3px solid #ffc531;
+    border-bottom: 3px solid #ffc531;
+    pointer-events: none;
+  }
+  .handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 14px;
+    background: #ffc531;
+    cursor: ew-resize;
+    z-index: 4;
+  }
+  .handle.start {
+    margin-left: -2px;
+    border-radius: 6px 0 0 6px;
+    transform: translateX(-12px);
+  }
+  .handle.end {
+    margin-left: 2px;
+    border-radius: 0 6px 6px 0;
+  }
+  .handle::after {
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 50%;
+    width: 4px;
+    height: 18px;
+    margin-top: -9px;
+    border-left: 1.5px solid #6b4e00;
+    border-right: 1.5px solid #6b4e00;
+  }
+  .handle:hover {
+    filter: brightness(1.08);
   }
   .bar {
     position: absolute;
@@ -1528,7 +2106,7 @@
     overflow: hidden;
   }
   .bar.selected {
-    outline: 2px solid #fff;
+    outline: 2px solid var(--accent);
   }
   .bar .label {
     flex: 1;
@@ -1556,5 +2134,16 @@
     background: #fff;
     box-shadow: 0 0 2px #000;
     pointer-events: none;
+    z-index: 5;
+  }
+  .knob {
+    position: absolute;
+    top: 0;
+    left: -5px;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px 2px 6px 6px;
+    background: #fff;
+    box-shadow: 0 0 2px #000;
   }
 </style>

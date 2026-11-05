@@ -131,7 +131,10 @@ export interface Composition {
 /** Edits made in the video editor (times in seconds, crop in video pixels). */
 export interface VideoEdit {
   segments: [number, number][];
+  /** Multiplies every part's speed. */
   speed: number;
+  /** Speed of each part, in the order of `segments`. */
+  speeds: number[];
   crop: [number, number, number, number] | null;
   composition: Composition;
 }
