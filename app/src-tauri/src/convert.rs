@@ -15,7 +15,7 @@ use std::time::Duration;
 use kadra_core::{GifSettings, Rect};
 use kadra_record::compose::Composition;
 use kadra_record::cursor::CursorTrack;
-use kadra_record::{GifOptions, TrimOptions, VideoEdit, trim_video, video_to_gif};
+use kadra_record::{GifOptions, Part, TrimOptions, VideoEdit, trim_video, video_to_gif};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -40,8 +40,12 @@ const EDIT_QUALITY: u8 = 18;
 pub struct Edit {
     /// Parts kept, in order.
     pub segments: Vec<(f64, f64)>,
-    /// 2.0 plays twice as fast.
+    /// 2.0 plays twice as fast; multiplies the speed of each part.
+    #[serde(default = "one")]
     pub speed: f64,
+    /// Speed of each part, in order (missing: 1).
+    #[serde(default)]
+    pub speeds: Vec<f64>,
     /// `[x, y, width, height]` in video pixels.
     pub crop: Option<[i32; 4]>,
     /// Overlays, cursor and click effects, aspect ratio.
@@ -49,11 +53,20 @@ pub struct Edit {
     pub composition: Composition,
 }
 
+fn one() -> f64 {
+    1.0
+}
+
 impl Edit {
-    fn segments(&self) -> Vec<(Duration, Duration)> {
+    fn segments(&self) -> Vec<Part> {
         self.segments
             .iter()
-            .map(|&(a, b)| (seconds(a), seconds(b)))
+            .enumerate()
+            .map(|(i, &(a, b))| Part {
+                start: seconds(a),
+                end: seconds(b),
+                speed: self.speeds.get(i).copied().unwrap_or(1.0) * self.speed,
+            })
             .collect()
     }
 
@@ -209,7 +222,6 @@ pub fn run_host() -> i32 {
                 },
                 &edit.as_ref().map_or_else(VideoEdit::whole, |e| VideoEdit {
                     segments: e.segments(),
-                    speed: e.speed,
                     crop: e.crop(),
                     composition,
                     track,
@@ -231,7 +243,6 @@ pub fn run_host() -> i32 {
                     segments: edit.segments(),
                     audio: *audio,
                     quality: quality.unwrap_or(EDIT_QUALITY).min(51),
-                    speed: edit.speed,
                     crop: edit.crop(),
                     composition,
                     track,
@@ -423,7 +434,9 @@ mod tests {
         let Task::Mp4 { edit, .. } = task else {
             panic!("expected an MP4 task");
         };
-        assert_eq!(edit.segments().len(), 2);
+        let parts = edit.segments();
+        assert_eq!(parts.len(), 2);
+        assert!((parts[1].speed - 2.0).abs() < 1e-9);
         assert_eq!(edit.crop(), Some(Rect::new(10, 20, 310, 220)));
         let json = serde_json::to_string(&Event::Progress { done: 0.5 }).unwrap();
         assert_eq!(json, r#"{"event":"progress","done":0.5}"#);

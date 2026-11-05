@@ -44,6 +44,40 @@ pub use encoder::VideoSettings;
 pub use kadra_gif::{GifOptions, GifSummary};
 pub use trim::{TrimOptions, TrimStats, trim_video};
 
+/// A part of a video kept by an edit, played at its own speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Part {
+    pub start: Duration,
+    /// `Duration::MAX`: until the end.
+    pub end: Duration,
+    /// 2.0 plays twice as fast.
+    pub speed: f64,
+}
+
+impl Part {
+    pub fn new(start: Duration, end: Duration) -> Self {
+        Self {
+            start,
+            end,
+            speed: 1.0,
+        }
+    }
+
+    /// The whole video at normal speed.
+    pub fn whole() -> Self {
+        Self::new(Duration::ZERO, Duration::MAX)
+    }
+
+    /// The speed, with nonsense (zero, negative, NaN) read as 1.
+    pub fn speed(&self) -> f64 {
+        if self.speed.is_finite() && self.speed > 0.0 {
+            self.speed.clamp(0.1, 16.0)
+        } else {
+            1.0
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RecordError {
     #[error("Windows API call failed: {0}")]

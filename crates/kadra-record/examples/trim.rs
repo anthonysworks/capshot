@@ -18,10 +18,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Duration::from_secs_f64(args.get(i).ok_or(usage)?.parse()?))
     };
     let options = TrimOptions {
-        segments: vec![(seconds(3)?, seconds(4)?)],
+        segments: vec![kadra_record::Part {
+            start: seconds(3)?,
+            end: seconds(4)?,
+            speed: args.get(6).and_then(|s| s.parse().ok()).unwrap_or(1.0),
+        }],
         audio: args.get(5).is_none_or(|a| a != "mute"),
         quality: 18,
-        speed: args.get(6).and_then(|s| s.parse().ok()).unwrap_or(1.0),
         crop: None,
         composition: kadra_record::compose::Composition::default(),
         track: None,

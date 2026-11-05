@@ -24,7 +24,7 @@ use windows::core::{HSTRING, Interface};
 
 use crate::compose::{Composer, Composition};
 use crate::cursor::CursorTrack;
-use crate::{RecordError, Result};
+use crate::{Part, RecordError, Result};
 
 #[allow(clippy::cast_sign_loss)]
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -241,10 +241,8 @@ pub struct Conversion {
 /// Which parts of a video to keep and how (see [`video_to_gif`]).
 #[derive(Debug, Clone)]
 pub struct VideoEdit {
-    /// Parts to keep, in order (`Duration::MAX` as an end: until the end).
-    pub segments: Vec<(Duration, Duration)>,
-    /// Playback speed: 2.0 plays twice as fast.
-    pub speed: f64,
+    /// Parts to keep, in order, each at its own speed.
+    pub segments: Vec<Part>,
     /// Area to keep, in pixels of the video.
     pub crop: Option<Rect>,
     /// Drawn on the frames.
@@ -255,8 +253,7 @@ pub struct VideoEdit {
 impl VideoEdit {
     pub fn whole() -> Self {
         Self {
-            segments: vec![(Duration::ZERO, Duration::MAX)],
-            speed: 1.0,
+            segments: vec![Part::whole()],
             crop: None,
             composition: Composition::default(),
             track: None,
@@ -277,7 +274,6 @@ pub fn video_to_gif(
     mut progress: impl FnMut(f32) -> bool,
 ) -> Result<Conversion> {
     let fps = fps.clamp(1, kadra_gif::MAX_FPS);
-    let speed = if edit.speed > 0.0 { edit.speed } else { 1.0 };
     let mut decoder = VideoDecoder::open(input)?;
     let (w, h) = decoder.size();
     #[allow(clippy::cast_possible_wrap)]
@@ -305,16 +301,16 @@ pub fn video_to_gif(
     } else {
         duration
     };
-    let mut segments: Vec<(Duration, Duration)> = edit
+    let mut segments: Vec<(Duration, Duration, f64)> = edit
         .segments
         .iter()
-        .map(|&(a, b)| (a.min(limit), b.min(limit)))
-        .filter(|(a, b)| b > a)
+        .map(|p| (p.start.min(limit), p.end.min(limit), p.speed()))
+        .filter(|(a, b, _)| b > a)
         .collect();
-    segments.sort_unstable();
+    segments.sort_unstable_by_key(|s| s.0);
     let total: f64 = segments
         .iter()
-        .map(|(a, b)| (b.min(&duration.max(*a)).saturating_sub(*a)).as_secs_f64())
+        .map(|(a, b, _)| (b.min(&duration.max(*a)).saturating_sub(*a)).as_secs_f64())
         .sum::<f64>()
         .max(1e-3);
 
@@ -322,7 +318,7 @@ pub fn video_to_gif(
     let mut done_before = 0.0;
     let mut last_slot = None;
     let mut last = None;
-    for (index, &(start, end)) in segments.iter().enumerate() {
+    for (index, &(start, end, speed)) in segments.iter().enumerate() {
         if index > 0 || !start.is_zero() {
             decoder.seek(start)?;
         }

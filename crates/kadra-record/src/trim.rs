@@ -50,7 +50,7 @@ use crate::cursor::CursorTrack;
 use crate::encoder::{VideoSettings, set_input, video_type};
 use crate::paint::Painter;
 use crate::stretch::{click_sound, mix_at, stretch};
-use crate::{RecordError, Result};
+use crate::{Part, RecordError, Result};
 
 #[allow(clippy::cast_sign_loss)]
 const VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -64,15 +64,12 @@ const EXPORT_EFFORT: u32 = 33;
 
 #[derive(Debug, Clone)]
 pub struct TrimOptions {
-    /// Parts of the video to keep, in order (`Duration::MAX` as an end
-    /// means "until the end").
-    pub segments: Vec<(Duration, Duration)>,
+    /// Parts of the video to keep, in order, each at its own speed.
+    pub segments: Vec<Part>,
     /// Keep the sound track (if there is one).
     pub audio: bool,
     /// 0 (best) to 51 (smallest); edited videos default to a high quality.
     pub quality: u8,
-    /// Playback speed: 2.0 plays twice as fast.
-    pub speed: f64,
     /// Area to keep, in pixels of the video; `None` keeps the whole frame.
     pub crop: Option<Rect>,
     /// Drawn on the frames (overlays, cursor, clicks, canvas).
@@ -85,10 +82,9 @@ impl TrimOptions {
     /// The whole video, unchanged.
     pub fn whole(audio: bool, quality: u8) -> Self {
         Self {
-            segments: vec![(Duration::ZERO, Duration::MAX)],
+            segments: vec![Part::whole()],
             audio,
             quality,
-            speed: 1.0,
             crop: None,
             composition: Composition::default(),
             track: None,
@@ -629,19 +625,26 @@ pub fn trim_video(
     result
 }
 
-/// Segments clipped to the video and in 100 ns units, in order.
-fn clip_segments(segments: &[(Duration, Duration)], duration: Duration) -> Vec<(i64, i64)> {
+/// Parts clipped to the video, in 100 ns units and in order, with their
+/// speed.
+fn clip_segments(parts: &[Part], duration: Duration) -> Vec<(i64, i64, f64)> {
     let limit = if duration.is_zero() {
         i64::MAX
     } else {
         ticks(duration)
     };
-    let mut out: Vec<(i64, i64)> = segments
+    let mut out: Vec<(i64, i64, f64)> = parts
         .iter()
-        .map(|&(a, b)| (ticks(a).min(limit), ticks(b).min(limit)))
-        .filter(|(a, b)| b > a)
+        .map(|p| {
+            (
+                ticks(p.start).min(limit),
+                ticks(p.end).min(limit),
+                p.speed(),
+            )
+        })
+        .filter(|(a, b, _)| b > a)
         .collect();
-    out.sort_unstable();
+    out.sort_unstable_by_key(|s| s.0);
     out
 }
 
@@ -687,15 +690,9 @@ unsafe fn run(
         if segments.is_empty() {
             return Err(RecordError::EmptyRegion);
         }
-        let speed = if options.speed > 0.0 {
-            options.speed
-        } else {
-            1.0
-        };
-        let scale = |t: i64| (t as f64 / speed).round() as i64;
         let total: i64 = segments
             .iter()
-            .map(|(a, b)| (*b).min(ticks(p.duration).max(*a + 1)) - a)
+            .map(|(a, b, _)| (*b).min(ticks(p.duration).max(*a + 1)) - a)
             .sum::<i64>()
             .max(1);
         // Faster playback keeps the source frame rate: frames closer than
@@ -712,7 +709,7 @@ unsafe fn run(
         // video progresses: the writer holds back a stream that runs ahead.
         let rebuild_audio = p.audio_out.is_some()
             && !p.synth_audio
-            && ((speed - 1.0).abs() > 1e-6 || options.click_sound());
+            && (segments.iter().any(|s| (s.2 - 1.0).abs() > 1e-6) || options.click_sound());
         let copy_audio = p.audio_out.is_some() && !p.synth_audio && !rebuild_audio;
         let audio_reader = if rebuild_audio {
             Some(AudioReader::open(input)?)
@@ -735,7 +732,8 @@ unsafe fn run(
         let mut offset = 0i64;
         let mut done_before = 0i64;
         let mut last_written = i64::MIN;
-        for &(start, end) in &segments {
+        for &(start, end, speed) in &segments {
+            let scale = |t: i64| (t as f64 / speed).round() as i64;
             p.reader.SetStreamSelection(VIDEO, true)?;
             if copy_audio {
                 p.reader.SetStreamSelection(AUDIO, true)?;
@@ -1019,17 +1017,26 @@ mod tests {
 
     #[test]
     fn segments_are_clipped_and_sorted() {
+        let part = |a, b, speed| Part {
+            start: s(a),
+            end: s(b),
+            speed,
+        };
         let clipped = clip_segments(
-            &[(s(5.0), s(9.0)), (s(1.0), s(2.0)), (s(3.0), s(3.0))],
+            &[
+                part(5.0, 9.0, 2.0),
+                part(1.0, 2.0, 1.0),
+                part(3.0, 3.0, 1.0),
+            ],
             s(8.0),
         );
         assert_eq!(
             clipped,
-            vec![(10_000_000, 20_000_000), (50_000_000, 80_000_000)]
+            vec![(10_000_000, 20_000_000, 1.0), (50_000_000, 80_000_000, 2.0)]
         );
         assert_eq!(
-            clip_segments(&[(Duration::ZERO, Duration::MAX)], s(2.0)),
-            vec![(0, 20_000_000)]
+            clip_segments(&[Part::whole()], s(2.0)),
+            vec![(0, 20_000_000, 1.0)]
         );
     }
 
