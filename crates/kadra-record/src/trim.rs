@@ -49,7 +49,7 @@ use crate::convert::{Blitter, Space, render_texture};
 use crate::cursor::CursorTrack;
 use crate::encoder::{VideoSettings, set_input, video_type};
 use crate::paint::Painter;
-use crate::stretch::{click_sound, mix_at, stretch};
+use crate::stretch::{CLICK_VOLUME, click_sound, mix_at, stretch};
 use crate::{Part, RecordError, Result};
 
 #[allow(clippy::cast_sign_loss)]
@@ -761,7 +761,14 @@ unsafe fn run(
                     .filter(|&&t| t >= start as f64 / 1e7 && t < end as f64 / 1e7)
                     .map(|&t| (t - start as f64 / 1e7) / speed)
                     .collect();
-                mix_at(&mut pending.pcm, channels, rate, &click, &here, 0.7);
+                mix_at(
+                    &mut pending.pcm,
+                    channels,
+                    rate,
+                    &click,
+                    &here,
+                    CLICK_VOLUME,
+                );
             }
             // Lands on the key frame before `start`; earlier frames are
             // decoded and dropped below.

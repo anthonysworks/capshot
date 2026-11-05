@@ -96,22 +96,34 @@ pub fn stretch(pcm: &[i16], channels: usize, rate: u32, tempo: f64) -> Vec<i16> 
         .collect()
 }
 
-/// A short, soft "click", as `rate` Hz mono samples in -1..1.
+/// A short, soft, round "tock" (like a finger tapping wood), as `rate` Hz
+/// mono samples in -1..1: a low sine whose pitch drops from 480 to 240 Hz,
+/// with a gentle attack and a quick fade. No high frequencies, so it never
+/// sounds shrill.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
 pub fn click_sound(rate: u32) -> Vec<f32> {
-    let length = (rate as f32 * 0.03) as usize;
+    let rate = rate.max(1) as f32;
+    let length = (rate * 0.09) as usize;
+    let mut phase = 0.0f32;
     (0..length)
         .map(|i| {
-            let t = i as f32 / rate as f32;
-            let envelope = (-t * 220.0).exp();
-            envelope * (0.6 * (2.0 * PI * 2600.0 * t).sin() + 0.4 * (2.0 * PI * 5200.0 * t).sin())
+            let t = i as f32 / rate;
+            let pitch = 240.0 + 240.0 * (-t * 60.0).exp();
+            phase += 2.0 * PI * pitch / rate;
+            let attack = (t / 0.003).min(1.0);
+            let envelope = attack * (-t * 55.0).exp();
+            // A touch of the octave gives body without brightness.
+            envelope * (0.85 * phase.sin() + 0.15 * (2.0 * phase).sin())
         })
         .collect()
 }
+
+/// How loud clicks are mixed into the sound track.
+pub const CLICK_VOLUME: f32 = 0.35;
 
 /// Mixes `sound` into interleaved PCM at each time of `times` (seconds).
 #[allow(
