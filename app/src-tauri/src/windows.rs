@@ -41,6 +41,19 @@ pub fn open_in_explorer(dir: &Path) {
     }
 }
 
+/// Opens the folder of `path` in File Explorer with the file selected.
+pub fn select_in_explorer(path: &Path) {
+    use std::os::windows::process::CommandExt;
+    // Explorer parses its own command line: `/select,` must be followed by
+    // the quoted path. Passed as a normal argument, the whole
+    // `/select,C:\a b\c.mp4` gets quoted, which Explorer ignores (it opens
+    // Documents instead). Paths cannot contain quotes on Windows.
+    let line = format!("/select,\"{}\"", path.display());
+    if let Err(err) = std::process::Command::new("explorer").raw_arg(line).spawn() {
+        tracing::warn!("cannot show {}: {err}", path.display());
+    }
+}
+
 /// Opens a file with its default application.
 pub fn open_file(path: &Path) {
     if !path.exists() {

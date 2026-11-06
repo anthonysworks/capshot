@@ -261,9 +261,5 @@ pub fn show_in_folder(state: State<'_, AppState>, path: String) {
         tracing::warn!("refusing to show {}", path.display());
         return;
     }
-    let mut select = std::ffi::OsString::from("/select,");
-    select.push(path.as_os_str());
-    if let Err(err) = std::process::Command::new("explorer").arg(select).spawn() {
-        tracing::warn!("cannot show {}: {err}", path.display());
-    }
+    crate::windows::select_in_explorer(&path);
 }
