@@ -87,8 +87,14 @@ pub enum Task {
     Mp4 {
         edit: Edit,
         audio: bool,
-        /// 0 (best) – 51 (smallest).
+        /// 0 (best) – 51 (smallest); `None`: as good as the recording.
         quality: Option<u8>,
+        /// Frame rate; `None` keeps the recording's.
+        #[serde(default)]
+        fps: Option<u32>,
+        /// Height in pixels (scaled down); `None` keeps the size.
+        #[serde(default)]
+        height: Option<u32>,
     },
 }
 
@@ -234,6 +240,8 @@ pub fn run_host() -> i32 {
             edit,
             audio,
             quality,
+            fps,
+            height,
         } => {
             let (input, composition, track) = request.sources(&edit.composition);
             trim_video(
@@ -246,6 +254,9 @@ pub fn run_host() -> i32 {
                     crop: edit.crop(),
                     composition,
                     track,
+                    fps: *fps,
+                    max_height: *height,
+                    match_source: quality.is_none(),
                 },
                 &mut progress,
             )
@@ -294,15 +305,28 @@ pub fn to_gif(app: &AppHandle, input: PathBuf) -> u64 {
     start(app, input, output, Task::Gif { gif, edit: None }, false)
 }
 
-/// Exports part of a video edited in the editor.
-/// Exports part of a video edited in the editor; with `copy`, the result
-/// is put on the clipboard when done.
-pub fn export(app: &AppHandle, input: PathBuf, task: Task, copy: bool) -> u64 {
-    let extension = match task {
+/// File extension of what `task` makes.
+pub fn extension(task: &Task) -> &'static str {
+    match task {
         Task::Gif { .. } => "gif",
         Task::Mp4 { .. } => "mp4",
-    };
-    let output = output_for(&input, " (edited)", extension);
+    }
+}
+
+/// Exports a video edited in the editor, to `output` (picked by the user)
+/// or a new file in the export folder; with `copy`, the result is put on
+/// the clipboard when done.
+pub fn export(
+    app: &AppHandle,
+    input: PathBuf,
+    task: Task,
+    copy: bool,
+    output: Option<PathBuf>,
+) -> u64 {
+    let output =
+        output.unwrap_or_else(|| crate::saving::export_path(app, &input, extension(&task)));
+    // Holds the name, so that two exports started together never share it.
+    let _ = std::fs::File::create(&output);
     start(app, input, output, task, copy)
 }
 
@@ -350,6 +374,7 @@ fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task, copy: boo
                 let bytes = std::fs::metadata(&request.output).map_or(0, |m| m.len());
                 tracing::info!(path = %request.output.display(), bytes, "video job done");
                 crate::capture::remember(&app, &request.output, width, height);
+                crate::saving::exported(&app, &input);
                 if copy && let Some(service) = app.try_state::<CaptureService>() {
                     service.copy_files(vec![request.output.clone()]);
                 }

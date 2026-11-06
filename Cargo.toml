@@ -33,6 +33,7 @@ tauri = { version = "2.12.5", features = ["tray-icon", "protocol-asset"] }
 tauri-build = { version = "2.7.4", features = [] }
 tauri-plugin-global-shortcut = "2.4.1"
 tauri-plugin-single-instance = "2.5.5"
+tauri-plugin-dialog = "2.7.3"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

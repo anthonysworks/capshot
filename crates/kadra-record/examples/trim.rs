@@ -1,7 +1,7 @@
 //! Trims a video and prints the time taken.
 //!
 //! ```text
-//! cargo run --release -p kadra-record --example trim -- <in.mp4> <out.mp4> <start-s> <end-s> [mute|sound] [speed]
+//! cargo run --release -p kadra-record --example trim -- <in.mp4> <out.mp4> <start-s> <end-s> [mute|sound] [speed] [fps] [height]
 //! ```
 
 use std::path::PathBuf;
@@ -28,6 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         crop: None,
         composition: kadra_record::compose::Composition::default(),
         track: None,
+        fps: args.get(7).and_then(|s| s.parse().ok()),
+        max_height: args.get(8).and_then(|s| s.parse().ok()),
+        match_source: true,
     };
     let started = Instant::now();
     let stats = trim_video(&input, &output, &options, |_| true)?;

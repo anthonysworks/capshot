@@ -15,6 +15,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::capture::CaptureService;
 use crate::convert::Task;
 use crate::editor::EditorFiles;
+use crate::saving::Saving;
 
 use crate::hotkeys;
 use crate::state::AppState;
@@ -198,57 +199,110 @@ pub fn editor_export(
     path: String,
     task: Task,
     copy: Option<bool>,
+    output: Option<String>,
 ) -> Result<u64, String> {
     let path = editable(&app, &path)?;
+    // Only a file the user picked in the save dialog.
+    let output = match output.map(PathBuf::from) {
+        Some(output) if app.state::<Saving>().take_chosen(&output) => Some(output),
+        Some(_) => return Err("this destination was not chosen in the editor".into()),
+        None => None,
+    };
     Ok(crate::convert::export(
         &app,
         path,
         task,
         copy.unwrap_or(false),
+        output,
     ))
 }
 
 /// Puts a file opened in the editor on the clipboard (pasted as a file).
+/// A draft is saved first: it disappears when the editor closes.
 #[tauri::command]
 pub fn editor_copy_file(app: AppHandle, path: String) -> Result<(), String> {
     let path = editable(&app, &path)?;
     let service = app
         .try_state::<CaptureService>()
         .ok_or("the clipboard is unavailable")?;
-    service.copy_files(vec![path]);
+    let file = if app.state::<Saving>().is_draft(&path) {
+        crate::saving::save_copy(&app, &path).map_err(|e| e.to_string())?
+    } else {
+        path
+    };
+    service.copy_files(vec![file]);
     Ok(())
 }
 
 /// What the video editor can use besides the video: the copy without
-/// cursor (playable) and the cursor track, when the recording kept them.
+/// cursor (playable) and the cursor track, when the recording kept them;
+/// and where exports go.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoSources {
     clean: Option<String>,
     track: Option<serde_json::Value>,
+    /// Folder exports are saved in.
+    folder: String,
+    /// The recording is not saved yet: only exports will be.
+    draft: bool,
+    /// Size of the video file, in bytes.
+    bytes: u64,
 }
 
 #[tauri::command]
 pub fn editor_video_sources(app: AppHandle, path: String) -> Result<VideoSources, String> {
     let path = editable(&app, &path)?;
+    let mut sources = VideoSources {
+        clean: None,
+        track: None,
+        folder: crate::saving::folder_for(&app, &path).display().to_string(),
+        draft: app.state::<Saving>().is_draft(&path),
+        bytes: std::fs::metadata(&path).map_or(0, |m| m.len()),
+    };
     let Some((clean, track)) =
         crate::editor::existing_edit_files(app.state::<AppState>().paths(), &path)
     else {
-        return Ok(VideoSources {
-            clean: None,
-            track: None,
-        });
+        return Ok(sources);
     };
     if let Err(err) = app.asset_protocol_scope().allow_file(&clean) {
         tracing::warn!("cannot play {}: {err}", clean.display());
     }
-    let track = std::fs::read(&track)
+    sources.track = std::fs::read(&track)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    Ok(VideoSources {
-        clean: Some(clean.display().to_string()),
-        track,
-    })
+    sources.clean = Some(clean.display().to_string());
+    Ok(sources)
+}
+
+/// Asks for the folder exports of `path` go to; returns it.
+#[tauri::command]
+pub async fn editor_choose_folder(app: AppHandle, path: String) -> Result<Option<String>, String> {
+    let path = editable(&app, &path)?;
+    Ok(crate::saving::choose_folder(&app, &path).map(|p| p.display().to_string()))
+}
+
+/// Asks where to save one export of `path`; returns the file picked.
+#[tauri::command]
+pub async fn editor_save_as(
+    app: AppHandle,
+    path: String,
+    extension: String,
+) -> Result<Option<String>, String> {
+    let path = editable(&app, &path)?;
+    let extension = if extension == "gif" { "gif" } else { "mp4" };
+    Ok(crate::saving::choose_file(&app, &path, extension).map(|p| p.display().to_string()))
+}
+
+/// Deletes a recording that was never saved, and closes its editor.
+#[tauri::command]
+pub fn editor_discard(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
+    let path = editable(&app, &path)?;
+    if !crate::saving::discard(&app, &path) {
+        return Err("only an unsaved recording can be discarded".into());
+    }
+    let _ = window.destroy();
+    Ok(())
 }
 
 /// Selects a file in Explorer. Only files Kadra created (listed in the

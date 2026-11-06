@@ -89,7 +89,7 @@ pub fn open(app: &AppHandle, path: &Path) {
         tracing::warn!("{} no longer exists", path.display());
         return;
     }
-    let path = std::fs::canonicalize(path).map_or_else(|_| path.to_path_buf(), strip_unc);
+    let path = normalize(path);
     app.state::<EditorFiles>().allow(&path);
     if kind == Kind::Video
         && let Err(err) = app.asset_protocol_scope().allow_file(&path)
@@ -114,9 +114,24 @@ pub fn open(app: &AppHandle, path: &Path) {
     match result {
         Ok(window) => {
             let _ = window.set_focus();
+            // A draft is saved or deleted once its editor is gone.
+            let app = app.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    crate::saving::editor_closed(&app, &path);
+                }
+            });
         }
-        Err(err) => tracing::error!("cannot open the editor: {err}"),
+        Err(err) => {
+            tracing::error!("cannot open the editor: {err}");
+            crate::saving::editor_closed(app, &path);
+        }
     }
+}
+
+/// The form of a path used by editors (absolute, without `\?`).
+pub fn normalize(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).map_or_else(|_| path.to_path_buf(), strip_unc)
 }
 
 /// `canonicalize` returns `\\?\C:\...`; the web UI and the history use the

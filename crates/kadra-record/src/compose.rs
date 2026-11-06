@@ -62,6 +62,29 @@ pub struct CanvasStyle {
     pub padding: f32,
 }
 
+/// An area of the video (pixels of the source) shown as blocks of
+/// `block` pixels between two times (seconds of the source).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PixelArea {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub block: u32,
+    pub start: f64,
+    pub end: f64,
+}
+
+impl PixelArea {
+    pub fn rect(&self) -> Rect {
+        Rect::from_size(self.x, self.y, self.w.max(1), self.h.max(1))
+    }
+
+    pub fn shows_at(&self, t: f64) -> bool {
+        t >= self.start && t < self.end
+    }
+}
+
 /// Everything drawn on the frames. Empty means "leave frames untouched".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Composition {
@@ -74,6 +97,9 @@ pub struct Composition {
     pub clicks: Option<ClickStyle>,
     #[serde(default)]
     pub canvas: Option<CanvasStyle>,
+    /// Areas shown as big blocks (to hide what is there).
+    #[serde(default)]
+    pub pixelate: Vec<PixelArea>,
 }
 
 impl Composition {
@@ -83,6 +109,7 @@ impl Composition {
             && self.cursor.is_none()
             && self.clicks.as_ref().is_none_or(|c| !c.ring)
             && self.canvas.is_none()
+            && self.pixelate.is_empty()
     }
 
     /// Whether the cursor track (and the video without cursor) is needed.
@@ -174,6 +201,51 @@ pub fn blend(dst: &mut BgraImage, src: &BgraImage, at: Point) {
     }
 }
 
+/// Replaces `area` of `image` by blocks of `block` pixels, each the average
+/// of what it covers.
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+pub fn pixelate(image: &mut BgraImage, area: Rect, block: u32) {
+    let area = area.intersect(Rect::new(0, 0, image.width() as i32, image.height() as i32));
+    if area.is_empty() {
+        return;
+    }
+    let block = block.max(2) as i32;
+    let stride = image.width() as usize * 4;
+    let data = image.as_bytes_mut();
+    let mut y = area.top;
+    while y < area.bottom {
+        let y1 = (y + block).min(area.bottom);
+        let mut x = area.left;
+        while x < area.right {
+            let x1 = (x + block).min(area.right);
+            let mut sum = [0u32; 4];
+            for row in y..y1 {
+                for col in x..x1 {
+                    let i = row as usize * stride + col as usize * 4;
+                    for c in 0..4 {
+                        sum[c] += u32::from(data[i + c]);
+                    }
+                }
+            }
+            let n = ((x1 - x) * (y1 - y)) as u32;
+            for row in y..y1 {
+                for col in x..x1 {
+                    let i = row as usize * stride + col as usize * 4;
+                    for c in 0..4 {
+                        data[i + c] = (sum[c] / n) as u8;
+                    }
+                }
+            }
+            x = x1;
+        }
+        y = y1;
+    }
+}
+
 /// Draws an anti-aliased disc (`thickness` 0) or ring of `rgba`.
 #[allow(
     clippy::cast_possible_truncation,
@@ -239,6 +311,7 @@ pub struct Composer {
     crop: Rect,
     /// Canvas background and where the video goes on it.
     canvas: Option<(BgraImage, Rect)>,
+    pixelate: Vec<PixelArea>,
 }
 
 #[allow(
@@ -308,6 +381,7 @@ impl Composer {
             clicks: composition.clicks.clone(),
             crop,
             canvas,
+            pixelate: composition.pixelate.clone(),
         }
     }
 
@@ -377,6 +451,9 @@ impl Composer {
     /// Composites one source frame shown at source time `t`.
     #[allow(clippy::many_single_char_names)]
     pub fn render(&self, mut frame: BgraImage, t: f64) -> BgraImage {
+        for p in self.pixelate.iter().filter(|p| p.shows_at(t)) {
+            pixelate(&mut frame, p.rect(), p.block);
+        }
         for o in &self.overlays {
             if t >= o.start && t < o.end {
                 blend(&mut frame, &o.image, o.at);

@@ -76,6 +76,12 @@ impl Paths {
         &self.edit_dir
     }
 
+    /// Recordings being edited, not saved yet: they reach the destination
+    /// folder only when exported (or when the editor closes).
+    pub fn drafts_dir(&self) -> PathBuf {
+        self.edit_dir.join("drafts")
+    }
+
     /// Default destination for screenshots.
     pub fn pictures_dir(&self) -> &Path {
         &self.pictures_dir

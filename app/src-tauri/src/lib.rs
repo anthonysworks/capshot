@@ -9,6 +9,7 @@ mod editor;
 mod hotkeys;
 mod recorder_host;
 mod recording;
+mod saving;
 mod state;
 mod tray;
 mod windows;
@@ -81,12 +82,15 @@ pub fn run() {
             },
         ))
         .plugin(hotkeys::plugin())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(paths, config))
         .manage(hotkeys::Registered::default())
         .manage(recording::RecorderState::default())
         .manage(editor::EditorFiles::default())
+        .manage(saving::Saving::default())
         .setup(move |app| {
             tray::create(app.handle())?;
+            saving::recover(app.handle());
             let state = app.state::<AppState>();
             let hotkeys = state.config().hotkeys.clone();
             if let Err(err) = hotkeys::apply(app.handle(), &hotkeys) {
@@ -117,6 +121,9 @@ pub fn run() {
             commands::editor_export,
             commands::editor_copy_file,
             commands::editor_video_sources,
+            commands::editor_choose_folder,
+            commands::editor_save_as,
+            commands::editor_discard,
         ])
         .build(tauri::generate_context!());
 

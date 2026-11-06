@@ -76,6 +76,14 @@ pub struct TrimOptions {
     pub composition: Composition,
     /// Cursor recorded with the video (needed for cursor and click effects).
     pub track: Option<CursorTrack>,
+    /// Frame rate of the result; `None` (or more than the source) keeps
+    /// the source rate.
+    pub fps: Option<u32>,
+    /// Height of the result at most (scaled down, never up).
+    pub max_height: Option<u32>,
+    /// Never encode below the source's own bitrate (no visible loss);
+    /// off when the user picked the quality.
+    pub match_source: bool,
 }
 
 impl TrimOptions {
@@ -88,6 +96,9 @@ impl TrimOptions {
             crop: None,
             composition: Composition::default(),
             track: None,
+            fps: None,
+            max_height: None,
+            match_source: true,
         }
     }
 
@@ -198,6 +209,8 @@ struct Composed {
     frame_input: ID3D11VideoProcessorInputView,
     /// Where the video goes in the frame.
     area: Rect,
+    /// The whole frame.
+    full: Rect,
 }
 
 /// Turns decoded frames into encoder input, on the GPU.
@@ -232,17 +245,20 @@ impl Frames {
             .canvas
             .as_ref()
             .map(|style| Composer::canvas(style, crop_size.0, crop_size.1));
-        let size = canvas.as_ref().map_or(crop_size, |(background, _)| {
+        // The frame as composed, then the size written (scaled down to the
+        // height asked, if any).
+        let natural = canvas.as_ref().map_or(crop_size, |(background, _)| {
             (background.width() & !1, background.height() & !1)
         });
-        let full = Rect::new(0, 0, size.0 as i32, size.1 as i32);
+        let size = output_size(natural, options.max_height);
+        let full = Rect::new(0, 0, natural.0 as i32, natural.1 as i32);
         let (direct, composed) = if options.composition.is_empty() {
             let blit = Blitter::new(gpu, layout.coded, size, fps, (space, Space::Bt709))?;
             (Some(blit), None)
         } else {
             let area = canvas.as_ref().map_or(full, |(_, area)| *area);
-            let frame = render_texture(gpu, size, DXGI_FORMAT_B8G8R8A8_UNORM)?;
-            let decode = Blitter::new(gpu, layout.coded, size, fps, (space, Space::Rgb))?;
+            let frame = render_texture(gpu, natural, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+            let decode = Blitter::new(gpu, layout.coded, natural, fps, (space, Space::Rgb))?;
             let frame_view = decode.output(&frame)?;
             let background = canvas
                 .map(|(image, _)| upload_bgra(gpu, &image))
@@ -257,7 +273,7 @@ impl Frames {
                 crop.offset(-visible.left, -visible.top),
                 area,
             )?;
-            let encode = Blitter::new(gpu, size, size, fps, (Space::Rgb, Space::Bt709))?;
+            let encode = Blitter::new(gpu, natural, size, fps, (Space::Rgb, Space::Bt709))?;
             let frame_input = encode.input(&frame, 0)?;
             let composed = Composed {
                 decode,
@@ -268,6 +284,7 @@ impl Frames {
                 encode,
                 frame_input,
                 area,
+                full,
             };
             (None, Some(composed))
         };
@@ -336,9 +353,28 @@ impl Frames {
             c.decode.blit(&input, self.crop, &c.frame_view, c.area)?;
             c.painter.paint(t)?;
             c.encode
-                .blit(&c.frame_input, full, &c.encode.output(&output)?, full)?;
+                .blit(&c.frame_input, c.full, &c.encode.output(&output)?, full)?;
         }
         Ok(output)
+    }
+}
+
+/// `size` scaled down to `max_height` (even dimensions); never enlarged.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn output_size(size: (u32, u32), max_height: Option<u32>) -> (u32, u32) {
+    match max_height {
+        Some(h) if h >= 2 && h < size.1 => {
+            let scale = f64::from(h) / f64::from(size.1);
+            (
+                ((f64::from(size.0) * scale).round() as u32).max(2) & !1,
+                h & !1,
+            )
+        }
+        _ => size,
     }
 }
 
@@ -501,6 +537,8 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
             .filter(|&f| f > 0)
             .unwrap_or(30);
         let frames = Frames::new(&gpu, layout, space, fps, options)?;
+        // A lower frame rate asked for drops frames; never a higher one.
+        let out_fps = options.fps.map_or(fps, |f| f.clamp(1, fps));
 
         #[allow(clippy::cast_sign_loss)]
         let duration = reader
@@ -523,7 +561,7 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         let settings = VideoSettings {
             width: out_w,
             height: out_h,
-            fps,
+            fps: out_fps,
             codec: VideoCodec::H264,
             quality: options.quality,
         };
@@ -531,7 +569,11 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         let pixels = f64::from(out_w) * f64::from(out_h)
             / (f64::from(layout.visible.width().max(1))
                 * f64::from(layout.visible.height().max(1)));
-        let bitrate = export_bitrate(&settings, input, duration, pixels);
+        let bitrate = if options.match_source {
+            export_bitrate(&settings, input, duration, pixels)
+        } else {
+            settings.bitrate()
+        };
         let encoded = video_type(&settings, &MFVideoFormat_H264)?;
         encoded.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
         #[allow(clippy::cast_sign_loss)]
@@ -598,7 +640,7 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
             audio_format,
             synth_audio,
             duration,
-            fps,
+            fps: out_fps,
             _manager: manager,
         })
     }

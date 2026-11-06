@@ -102,6 +102,13 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
         let stem = kadra_encode::file_stem(kadra_encode::now());
         let countdown = Duration::from_secs(u64::from(choices.countdown_secs));
         let extension = if gif { "gif" } else { "mp4" };
+        // Recordings that open in the editor are drafts until exported.
+        let draft = !gif && config.capture.after_capture == AfterCapture::Editor;
+        let output = if gif {
+            kadra_encode::unique_path(&dir, &stem, extension)
+        } else {
+            crate::saving::recording_path(app, &dir, &stem, draft)
+        };
         let options = HostOptions {
             region: [region.left, region.top, region.right, region.bottom],
             fps: choices.fps,
@@ -111,7 +118,7 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
             // A GIF has no sound.
             system_audio: choices.system_audio && !gif,
             microphone: choices.microphone && !gif,
-            output: kadra_encode::unique_path(&dir, &stem, extension),
+            output,
             // Everything is prepared during the countdown, so recording
             // starts exactly when it reaches zero.
             start_paused: !countdown.is_zero(),
@@ -290,7 +297,6 @@ pub fn stop(app: &AppHandle) {
             #[allow(clippy::cast_precision_loss)]
             let seconds = duration_ms as f64 / 1000.0;
             tracing::info!(path = %path.display(), frames, dropped, seconds, "recording saved");
-            crate::capture::remember(&app, &path, width, height);
             let (after, copy) = {
                 let state = app.state::<AppState>();
                 let config = state.config();
@@ -299,6 +305,15 @@ pub fn stop(app: &AppHandle) {
                     config.capture.copy_to_clipboard,
                 )
             };
+            let drafts = app.state::<AppState>().paths().drafts_dir();
+            if path.starts_with(&drafts) {
+                // Saved to its folder when exported or when the editor closes.
+                app.state::<crate::saving::Saving>()
+                    .add_draft(&path, (width, height));
+                crate::editor::open(&app, &path);
+                return;
+            }
+            crate::capture::remember(&app, &path, width, height);
             if after == AfterCapture::Editor {
                 crate::editor::open(&app, &path);
                 return;

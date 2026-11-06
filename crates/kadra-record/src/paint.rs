@@ -16,15 +16,20 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_OPTIONS,
     D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext,
+    ID2D1Factory1, ID2D1SolidColorBrush,
 };
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_TEXTURE2D_DESC, ID3D11Texture2D, ID3D11VideoProcessorInputView,
+    ID3D11VideoProcessorOutputView,
+};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows::core::{Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::compose::{CLICK_MARK, ClickStyle, Composition, CursorStyle, decode_png};
+use crate::convert::{Blitter, Space, drawable_texture};
 use crate::cursor::CursorTrack;
 
 fn props(options: D2D1_BITMAP_OPTIONS, opaque: bool) -> D2D1_BITMAP_PROPERTIES1 {
@@ -78,7 +83,24 @@ struct Overlay {
     end: f64,
 }
 
+/// A pixelated area, see [`Painter::new`].
+struct Pixelated {
+    blit: Blitter,
+    input: ID3D11VideoProcessorInputView,
+    output: ID3D11VideoProcessorOutputView,
+    bitmap: ID2D1Bitmap1,
+    /// The area in the frame, and the small texture.
+    from: Rect,
+    small: Rect,
+    /// The area in source pixels.
+    to: D2D_RECT_F,
+    start: f64,
+    end: f64,
+    _texture: ID3D11Texture2D,
+}
+
 pub struct Painter {
+    pixels: Vec<Pixelated>,
     dc: ID2D1DeviceContext,
     brush: ID2D1SolidColorBrush,
     overlays: Vec<Overlay>,
@@ -94,10 +116,16 @@ pub struct Painter {
     clip: D2D_RECT_F,
 }
 
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 impl Painter {
     /// Draws into `target` (a BGRA render texture), where the `crop` area of
     /// the source is shown at `area`.
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         gpu: &Gpu,
         target: &ID3D11Texture2D,
@@ -185,7 +213,61 @@ impl Painter {
                 M31: area.left as f32 - crop.left as f32 * sx,
                 M32: area.top as f32 - crop.top as f32 * sy,
             };
+
+            // Each pixelated area: the video processor shrinks it into a
+            // small texture, drawn back enlarged without smoothing.
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            target.GetDesc(&mut desc);
+            let frame = (desc.Width, desc.Height);
+            let frame_rect = Rect::new(0, 0, frame.0 as i32, frame.1 as i32);
+            let mut pixels = Vec::new();
+            for p in &composition.pixelate {
+                let r = p.rect();
+                let to_frame = Rect::new(
+                    (area.left as f32 + (r.left - crop.left) as f32 * sx).floor() as i32,
+                    (area.top as f32 + (r.top - crop.top) as f32 * sy).floor() as i32,
+                    (area.left as f32 + (r.right - crop.left) as f32 * sx).ceil() as i32,
+                    (area.top as f32 + (r.bottom - crop.top) as f32 * sy).ceil() as i32,
+                )
+                .intersect(frame_rect);
+                if to_frame.width() < 2 || to_frame.height() < 2 {
+                    continue;
+                }
+                let block = (p.block.max(2) as f32 * sx).max(2.0);
+                let small = (
+                    ((to_frame.width() as f32 / block).ceil() as u32).max(1),
+                    ((to_frame.height() as f32 / block).ceil() as u32).max(1),
+                );
+                let texture = drawable_texture(gpu, small)?;
+                let blit = Blitter::new(gpu, frame, small, 30, (Space::Rgb, Space::Rgb))?;
+                let input = blit.input(target, 0)?;
+                let output = blit.output(&texture)?;
+                let bitmap = dc.CreateBitmapFromDxgiSurface(
+                    &texture.cast::<IDXGISurface>()?,
+                    Some(&props(D2D1_BITMAP_OPTIONS_NONE, true)),
+                )?;
+                // Drawn in source pixels, like everything else.
+                let source = D2D_RECT_F {
+                    left: crop.left as f32 + (to_frame.left as f32 - area.left as f32) / sx,
+                    top: crop.top as f32 + (to_frame.top as f32 - area.top as f32) / sy,
+                    right: crop.left as f32 + (to_frame.right as f32 - area.left as f32) / sx,
+                    bottom: crop.top as f32 + (to_frame.bottom as f32 - area.top as f32) / sy,
+                };
+                pixels.push(Pixelated {
+                    blit,
+                    input,
+                    output,
+                    bitmap,
+                    from: to_frame,
+                    small: Rect::new(0, 0, small.0 as i32, small.1 as i32),
+                    to: source,
+                    start: p.start,
+                    end: p.end,
+                    _texture: texture,
+                });
+            }
             Ok(Self {
+                pixels,
                 dc,
                 brush,
                 overlays,
@@ -240,12 +322,33 @@ impl Painter {
     /// Draws everything visible at source time `t` over the target.
     #[allow(clippy::cast_sign_loss, clippy::many_single_char_names)]
     pub fn paint(&self, t: f64) -> Result<()> {
+        let pixels: Vec<&Pixelated> = self
+            .pixels
+            .iter()
+            .filter(|p| t >= p.start && t < p.end)
+            .collect();
+        for p in &pixels {
+            p.blit.blit(&p.input, p.from, &p.output, p.small)?;
+        }
         // SAFETY: Direct2D drawing on the target set in `new`.
         unsafe {
             self.dc.BeginDraw();
             self.dc.SetTransform(&self.transform);
             self.dc
                 .PushAxisAlignedClip(&self.clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        }
+        for p in &pixels {
+            // SAFETY: inside BeginDraw/EndDraw with live resources.
+            unsafe {
+                self.dc.DrawBitmap(
+                    &p.bitmap,
+                    Some(&p.to),
+                    1.0,
+                    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                    None,
+                    None,
+                );
+            }
         }
         for o in &self.overlays {
             if t >= o.start && t < o.end {
