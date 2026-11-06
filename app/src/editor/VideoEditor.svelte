@@ -9,8 +9,11 @@
     type VideoEdit,
     GIF_FPS_PRESETS,
     GIF_WIDTHS,
+    editorChooseFolder,
     editorCopyFile,
+    editorDiscard,
     editorExport,
+    editorSaveAs,
     editorVideoSources,
     getConfig,
     onJobProgress,
@@ -32,6 +35,7 @@
     bounds,
     fontSize,
     hit,
+    normalize,
     renderAnnotations,
   } from "./shapes";
   import {
@@ -69,7 +73,7 @@
 
   let { path }: { path: string } = $props();
 
-  type Tool = "select" | "text" | "arrow" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number";
+  type Tool = "select" | "text" | "arrow" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number" | "pixelate";
   const TOOLS: { tool: Tool; icon: IconName; label: string; key: string }[] = [
     { tool: "select", icon: "select", label: "Select, move, resize — click the video to play", key: "V" },
     { tool: "text", icon: "text", label: "Text", key: "T" },
@@ -80,6 +84,7 @@
     { tool: "pen", icon: "pen", label: "Pencil", key: "P" },
     { tool: "highlight", icon: "highlight", label: "Highlighter", key: "H" },
     { tool: "number", icon: "number", label: "Numbered step", key: "N" },
+    { tool: "pixelate", icon: "pixelate", label: "Pixelate: hides what is under it", key: "B" },
   ];
   const COLORS = ["#e5484d", "#f5a524", "#ffd60a", "#30a46c", "#3b82f6", "#ffffff", "#111111"];
   const LEVELS = [
@@ -87,11 +92,22 @@
     { level: 2, label: "Medium" },
     { level: 4, label: "Thick" },
   ];
-  const QUALITIES = [
-    { value: 18, label: "High" },
-    { value: 23, label: "Balanced" },
-    { value: 28, label: "Small" },
+  const HEIGHTS: { value: number | null; label: string }[] = [
+    { value: null, label: "Original" },
+    { value: 2160, label: "2160p" },
+    { value: 1440, label: "1440p" },
+    { value: 1080, label: "1080p" },
+    { value: 720, label: "720p" },
+    { value: 480, label: "480p" },
   ];
+  const FRAME_RATES: { value: number | null; label: string }[] = [
+    { value: null, label: "Original" },
+    { value: 60, label: "60 fps" },
+    { value: 30, label: "30 fps" },
+    { value: 24, label: "24 fps" },
+  ];
+  /** Pixel block of the pixelate tool, by thickness. */
+  const BLOCKS: Record<number, number> = { 1: 8, 2: 14, 4: 24 };
   const RATIOS: { label: string; ratio: [number, number] | null }[] = [
     { label: "Original", ratio: null },
     { label: "16:9", ratio: [16, 9] },
@@ -133,7 +149,19 @@
   let trim = $state<Trim>({ start: 0, end: 0 });
   let selectedSegment = $state<number | null>(null);
   let audio = $state(true);
-  let quality = $state(18);
+  /** What is saved, and how. */
+  let exportKind = $state<"mp4" | "gif">("mp4");
+  let height = $state<number | null>(null);
+  let fps = $state<number | null>(null);
+  /** 0 (small) – 100 (as good as it gets); mapped to the encoder quality. */
+  let qualityLevel = $state(80);
+  let gifQuality = $state(90);
+  let gifDither = $state(true);
+  let gifLoop = $state(true);
+  /** Export folder, and whether the recording is still a draft. */
+  let folder = $state("");
+  let unsaved = $state(false);
+  let discardArmed = $state(false);
   let crop = $state<Rect | null>(null);
   /** Editing the crop: the whole frame shows, with the area kept. */
   let cropping = $state(false);
@@ -164,7 +192,6 @@
   let config = $state<Config | null>(null);
   let gifFps = $state(15);
   let gifWidth = $state(0);
-  let gifOptions = $state(false);
   let jobs = $state<(JobProgress & { kind: string })[]>([]);
   let past = $state<string[]>([]);
   let future = $state<string[]>([]);
@@ -259,12 +286,17 @@
       config = c;
       gifFps = c.gif.fps;
       gifWidth = c.gif.max_width;
+      gifQuality = c.gif.quality;
+      gifDither = c.gif.dither;
+      gifLoop = c.gif.repeat;
     });
     editorVideoSources(path)
       .then(async (s) => {
         cursorTrack = s.track;
         if (s.track) shapes = await loadShapes(s.track);
         cleanSource = s.clean;
+        folder = s.folder;
+        unsaved = s.draft;
       })
       .catch(() => {});
     const unlisten = onJobProgress((p) => {
@@ -398,8 +430,15 @@
     const px = 1 / (k * s);
     const t = video.currentTime;
 
-    const active = overlays.filter((o) => t >= o.start && t < o.end && o.id !== editing?.id).map((o) => o.shape);
-    renderAnnotations(ctx, draft ? [...active, draft] : active);
+    const shown = overlays.filter((o) => t >= o.start && t < o.end && o.id !== editing?.id).map((o) => o.shape);
+    const all = draft ? [...shown, draft] : shown;
+    // Pixelated areas hide the video, under everything else.
+    for (const s of all) if (s.kind === "pixelate") pixelateArea(ctx, s);
+    renderAnnotations(
+      ctx,
+      all.filter((s) => s.kind !== "pixelate"),
+    );
+    if (draft?.kind === "pixelate") dashed(ctx, normalize(draft), px);
 
     if (cursorTrack && (clickRing || cursorEditable)) {
       const scale = cursorScale;
@@ -478,6 +517,29 @@
       }
       ctx.stroke();
     }
+  }
+
+  const scratch = document.createElement("canvas");
+
+  /** Shows `s` (in source pixels) as blocks of `s.size` pixels. */
+  function pixelateArea(ctx: CanvasRenderingContext2D, s: Shape) {
+    const r = normalize(s);
+    const x = Math.max(0, r.x);
+    const y = Math.max(0, r.y);
+    const w = Math.min(vw, r.x + r.w) - x;
+    const h = Math.min(vh, r.y + r.h) - y;
+    if (w < 2 || h < 2 || video.readyState < 2) return;
+    const block = Math.max(2, s.size);
+    scratch.width = Math.max(1, Math.ceil(w / block));
+    scratch.height = Math.max(1, Math.ceil(h / block));
+    const sctx = scratch.getContext("2d");
+    if (!sctx) return;
+    sctx.imageSmoothingQuality = "high";
+    sctx.drawImage(video, x, y, w, h, 0, 0, scratch.width, scratch.height);
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(scratch, 0, 0, scratch.width, scratch.height, x, y, w, h);
+    ctx.restore();
   }
 
   function dashed(ctx: CanvasRenderingContext2D, r: Rect, px: number) {
@@ -795,7 +857,8 @@
       id: nextId++,
       kind,
       color,
-      size: kind === "text" ? (level + 1) * unit : (level + 2) * unit,
+      size:
+        kind === "text" ? (level + 1) * unit : kind === "pixelate" ? (BLOCKS[level] ?? 14) * unit : (level + 2) * unit,
       fill: kind === "text" ? "soft" : "none",
       x1: p.x,
       y1: p.y,
@@ -1031,7 +1094,8 @@
     level = l;
     const o = selectedItem;
     if (!o) return;
-    const size = o.shape.kind === "text" ? (l + 1) * unit : (l + 2) * unit;
+    const size =
+      o.shape.kind === "text" ? (l + 1) * unit : o.shape.kind === "pixelate" ? (BLOCKS[l] ?? 14) * unit : (l + 2) * unit;
     if (o.shape.size !== size) commit(() => (o.shape.size = size));
   }
 
@@ -1044,6 +1108,7 @@
     const sctx = scratch.getContext("2d");
     if (!sctx) return out;
     for (const o of overlays) {
+      if (o.shape.kind === "pixelate") continue;
       const b = bounds(sctx, o.shape);
       const pad = 8 + o.shape.size * 3;
       const x = Math.floor(b.x - pad);
@@ -1075,6 +1140,20 @@
         : null,
       clicks: clickRing || clickSound ? { ring: clickRing, color: hexRgb(clickColor), sound: clickSound } : null,
       canvas: ratio && fit === "fit" ? { ratio: [ratio[0], ratio[1]], colors: bg.map(hexRgb), padding: margin } : null,
+      pixelate: overlays
+        .filter((o) => o.shape.kind === "pixelate")
+        .map((o) => {
+          const r = normalize(o.shape);
+          return {
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.w),
+            h: Math.round(r.h),
+            block: Math.max(2, Math.round(o.shape.size)),
+            start: o.start,
+            end: o.end,
+          };
+        }),
     };
   }
 
@@ -1104,16 +1183,31 @@
       !halo,
   );
 
-  async function exportAs(kind: "mp4" | "gif", copy = false) {
+  /** Encoder quality (0 best – 51) for the quality level shown. */
+  const crf = $derived(Math.round(34 - (qualityLevel / 100) * 20));
+
+  async function exportAs(kind: "mp4" | "gif", copy = false, output: string | null = null) {
     if (cropping) applyCrop();
     if (!config || !kept.length) return;
     try {
       const job = await editorExport(
         path,
         kind === "mp4"
-          ? { kind, edit: edit(), audio, quality }
-          : { kind, gif: { ...$state.snapshot(config.gif), fps: gifFps, max_width: gifWidth }, edit: edit() },
+          ? { kind, edit: edit(), audio, quality: crf, fps, height }
+          : {
+              kind,
+              gif: {
+                ...$state.snapshot(config.gif),
+                fps: gifFps,
+                max_width: gifWidth,
+                quality: gifQuality,
+                dither: gifDither,
+                repeat: gifLoop,
+              },
+              edit: edit(),
+            },
         copy,
+        output,
       );
       jobs.unshift({ job, kind: copy ? "copy" : kind, input: path, done: 0, output: null, bytes: null, error: null });
     } catch (e) {
@@ -1130,6 +1224,67 @@
       await exportAs("mp4", true);
     }
   }
+
+  /** Save with a name and place picked in a dialog. */
+  async function saveAs() {
+    const output = await editorSaveAs(path, exportKind).catch(() => null);
+    if (output) await exportAs(exportKind, false, output);
+  }
+
+  async function chooseFolder() {
+    const chosen = await editorChooseFolder(path).catch(() => null);
+    if (chosen) folder = chosen;
+  }
+
+  /** Two clicks: the recording is deleted for good. */
+  let discardTimer: ReturnType<typeof setTimeout> | undefined;
+  async function discard() {
+    if (!discardArmed) {
+      discardArmed = true;
+      clearTimeout(discardTimer);
+      discardTimer = setTimeout(() => (discardArmed = false), 3000);
+      return;
+    }
+    try {
+      await editorDiscard(path);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  /** Size of the exported frame, after crop, format and height. */
+  const exportSize = $derived.by(() => {
+    if (!vw) return { w: 0, h: 0 };
+    const fitted = ratio && fit === "fit" ? fitLayout(crop ?? full, ratio, margin).out : null;
+    let w = fitted?.w ?? crop?.w ?? vw;
+    let h = fitted?.h ?? crop?.h ?? vh;
+    if (exportKind === "mp4" && height && height < h) {
+      w = (w * height) / h;
+      h = height;
+    }
+    if (exportKind === "gif" && gifWidth && gifWidth < w) {
+      h = (h * gifWidth) / w;
+      w = gifWidth;
+    }
+    return { w: Math.round(w) & ~1, h: Math.round(h) & ~1 };
+  });
+  /** Frame rate of the recording, from its cursor track (else 60). */
+  const sourceFps = $derived.by(() => {
+    const s = cursorTrack?.samples;
+    const step = s && s.length > 2 ? (s[2]!.t - s[0]!.t) / 2 : 0;
+    return step > 0 ? Math.round(1 / step) : 60;
+  });
+  /** What the encoder aims for (same rule as the exporter), in bytes. */
+  const estimate = $derived.by(() => {
+    if (exportKind !== "mp4" || !exportSize.w) return null;
+    const rate = Math.min(fps ?? sourceFps, sourceFps);
+    const bpp = 0.08 * 2 ** ((23 - crf) / 6);
+    const bits = Math.min(2e8, Math.max(1e6, exportSize.w * exportSize.h * rate * bpp));
+    return (bits / 8 + (audio ? 24_000 : 0)) * output;
+  });
+  const qualityName = $derived(
+    qualityLevel >= 90 ? "Near lossless" : qualityLevel >= 70 ? "High" : qualityLevel >= 45 ? "Medium" : "Small file",
+  );
 
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   function notify(text: string) {
@@ -1243,7 +1398,7 @@
     return `${Math.round(w) & ~1}×${Math.round(h) & ~1}`;
   });
   const barIcon = (kind: ShapeKind): IconName =>
-    (["text", "arrow", "line", "rect", "ellipse", "pen", "highlight", "number"] as const).find((k) => k === kind) ?? "rect";
+    (["text", "arrow", "line", "rect", "ellipse", "pen", "highlight", "number", "pixelate"] as const).find((k) => k === kind) ?? "rect";
   /** A short tip over the video for what the current tool does. */
   const hint = $derived(
     cropping
@@ -1535,6 +1690,8 @@
                     ? o.shape.text
                     : o.shape.kind === "number"
                       ? `Step ${o.shape.n}`
+                      : o.shape.kind === "pixelate"
+                        ? "Pixelate"
                       : o.shape.kind}</span
                 >
                 <span class="edge right" onpointerdown={(e) => barDown(e, o, "end")}></span>
@@ -1655,34 +1812,72 @@
     </div>
 
     <div class="export-card">
-      <div class="card-title">Export</div>
-      <div class="segmented" role="radiogroup" aria-label="Quality">
-        {#each QUALITIES as q (q.value)}
-          <button type="button" role="radio" aria-checked={quality === q.value} class:active={quality === q.value} onclick={() => (quality = q.value)}
-            >{q.label}</button
+      <div class="card-head">
+        <span class="card-title">Export</span>
+        <div class="segmented small" role="radiogroup" aria-label="Format">
+          <button type="button" role="radio" aria-checked={exportKind === "mp4"} class:active={exportKind === "mp4"} onclick={() => (exportKind = "mp4")}
+            >MP4</button
           >
-        {/each}
-      </div>
-      <label class="check"><input type="checkbox" bind:checked={audio} /> Keep the sound</label>
-      <button type="button" class="pill big" onclick={() => exportAs("mp4")} disabled={!duration}
-        ><Icon name="check" /> Export MP4 <Kbd keys="Ctrl+E" /></button
-      >
-      <div class="pair">
-        <button type="button" class="ghost" onclick={copyVideo} disabled={!duration} title="Copy the result to the clipboard (Ctrl+C)"
-          ><Icon name="copy" /> Copy</button
-        >
-        <button type="button" class="ghost" onclick={() => exportAs("gif")} disabled={!config || !duration}><Icon name="export" /> GIF</button>
-      </div>
-      <button type="button" class="link" aria-expanded={gifOptions} onclick={() => (gifOptions = !gifOptions)}
-        >GIF settings <Icon name="chevron" /></button
-      >
-      {#if gifOptions}
-        <div class="pair">
-          <select bind:value={gifFps} aria-label="GIF frame rate">{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
-          <select bind:value={gifWidth} aria-label="GIF width"
-            >{#each GIF_WIDTHS as w (w)}<option value={w}>{w === 0 ? "Original size" : `${w} px wide`}</option>{/each}</select
+          <button type="button" role="radio" aria-checked={exportKind === "gif"} class:active={exportKind === "gif"} onclick={() => (exportKind = "gif")}
+            >GIF</button
           >
         </div>
+      </div>
+      {#if exportKind === "mp4"}
+        <div class="settings">
+          <label class="field">Resolution
+            <select bind:value={height}>{#each HEIGHTS as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
+          </label>
+          <label class="field">Frame rate
+            <select bind:value={fps}>{#each FRAME_RATES as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
+          </label>
+          <label class="field">Quality
+            <input type="range" min="0" max="100" step="5" bind:value={qualityLevel} />
+            <span class="value wide">{qualityName}</span>
+          </label>
+          <label class="check"><input type="checkbox" bind:checked={audio} /> Sound</label>
+        </div>
+      {:else}
+        <div class="settings">
+          <label class="field">Width
+            <select bind:value={gifWidth}>{#each GIF_WIDTHS as w (w)}<option value={w}>{w === 0 ? "Original" : `${w} px`}</option>{/each}</select>
+          </label>
+          <label class="field">Frame rate
+            <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
+          </label>
+          <label class="field">Colours
+            <input type="range" min="10" max="100" step="5" bind:value={gifQuality} />
+            <span class="value wide">{gifQuality}%</span>
+          </label>
+          <div class="pair checks">
+            <label class="check"><input type="checkbox" bind:checked={gifDither} /> Dithering</label>
+            <label class="check"><input type="checkbox" bind:checked={gifLoop} /> Loop</label>
+          </div>
+        </div>
+      {/if}
+      <button type="button" class="destination" onclick={chooseFolder} title="Change the folder exports are saved in">
+        <Icon name="folder" /><span>{folder || "…"}</span>
+      </button>
+      <div class="meta">
+        <span class="engine"><Icon name="speed" /> {exportKind === "mp4" ? "GPU · H.264" : "Built-in"}</span>
+        <span>{exportSize.w ? `${exportSize.w}×${exportSize.h}` : ""}{estimate ? ` · ≈ ${size(estimate)}` : ""}</span>
+      </div>
+      <div class="save-row">
+        <button type="button" class="save" onclick={() => exportAs(exportKind)} disabled={!duration || !config}
+          ><Icon name="save" /> Save {exportKind.toUpperCase()}</button
+        >
+        <button type="button" class="square" onclick={saveAs} disabled={!duration || !config} title="Save as…" aria-label="Save as"
+          ><Icon name="saveCopy" /></button
+        >
+        <button type="button" class="square" onclick={copyVideo} disabled={!duration} title="Copy to the clipboard (Ctrl+C)" aria-label="Copy"
+          ><Icon name="copy" /></button
+        >
+      </div>
+      {#if unsaved}
+        <p class="draft-note">
+          Not saved yet: only what you save is kept. Closing keeps the recording as is.
+          <button type="button" class="link danger-text" onclick={discard}>{discardArmed ? "Click again to delete it" : "Discard recording"}</button>
+        </p>
       {/if}
       {#each jobs.slice(0, 3) as j (j.job)}
         <div class="job">
@@ -1707,13 +1902,13 @@
 <style>
   /* Dark, soft and rounded whatever the system theme: an editing room. */
   .editor {
-    --bg: #0c0d11;
-    --surface: #181816;
-    --raised: #1f1f1c;
-    --control: #232320;
-    --hover: #2b2b27;
-    --border: #262622;
-    --border-strong: #35352f;
+    --bg: #181816;
+    --surface: #0c0d11;
+    --raised: #13141a;
+    --control: #181a20;
+    --hover: #20232b;
+    --border: #1e2028;
+    --border-strong: #2c2f38;
     --text: #ecece8;
     --text-muted: #8f8f88;
     --accent: #8b7cff;
@@ -1735,8 +1930,8 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    padding: 10px 0 10px 10px;
-    gap: 10px;
+    padding: 0;
+    gap: 0;
   }
   .editor :global(button),
   .editor :global(select),
@@ -1777,9 +1972,8 @@
     justify-content: center;
     gap: 4px;
     padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: var(--dither-top) repeat-x left top / auto 32px, var(--surface);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
     container-type: inline-size;
   }
   .cluster {
@@ -1857,9 +2051,7 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: radial-gradient(circle at 50% 40%, #1d1d22, #101013 70%);
+    background: var(--bg);
     touch-action: none;
   }
   video {
@@ -1871,11 +2063,7 @@
   }
   .stage {
     position: absolute;
-    border-radius: 4px;
     box-shadow: 0 10px 40px rgb(0 0 0 / 0.45);
-  }
-  .stage.framed {
-    border-radius: 8px;
   }
   .text-input {
     position: absolute;
@@ -1958,11 +2146,6 @@
   .pill:hover:not(:disabled) {
     background: #ffffff !important;
   }
-  .pill.big {
-    width: 100%;
-    padding: 9px 14px;
-    margin: 4px 0 8px;
-  }
   .ghost {
     justify-content: center;
     padding: 6px 12px;
@@ -1993,9 +2176,8 @@
   /* Dock: transport and timeline */
   .dock {
     padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: var(--dither-bottom) repeat-x left bottom / auto 32px, var(--surface);
+    border-top: 1px solid var(--border);
+    background: var(--surface);
     container-type: inline-size;
   }
   .controls {
@@ -2374,9 +2556,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    margin: 10px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
+    border-left: 1px solid var(--border);
     background: var(--surface);
     overflow: hidden;
   }
@@ -2520,9 +2700,6 @@
   .pair button {
     justify-content: center;
   }
-  .pair select {
-    min-width: 0;
-  }
   button.wide {
     width: 100%;
     justify-content: center;
@@ -2579,15 +2756,127 @@
 
   /* Export card */
   .export-card {
-    padding: 12px 14px 14px;
+    padding: 12px 14px 16px;
     border-top: 1px solid var(--border);
     background: var(--dither-bottom) repeat-x left bottom / auto 48px, var(--surface);
   }
   .card-title {
-    margin-bottom: 8px;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
     color: var(--text-muted);
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .segmented.small {
+    margin: 0;
+    width: 120px;
+  }
+  .settings {
+    margin-bottom: 10px;
+  }
+  .settings .field {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr) auto;
+    margin: 6px 0;
+  }
+  .settings .field select {
+    grid-column: 2 / 4;
+  }
+  .value.wide {
+    min-width: 0;
+    font-family: var(--font);
+    color: var(--text-muted);
+    text-align: right;
+  }
+  .checks {
+    gap: 0;
+  }
+  .checks .check {
+    margin: 4px 0;
+  }
+  /* Destination, engine and size, then the save buttons. */
+  .destination {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 9px 12px;
+    border: 1px solid var(--border-strong) !important;
+    border-radius: 10px;
+    background: var(--control) !important;
+    font-size: 13px;
+  }
+  .destination span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .destination:hover {
+    border-color: var(--accent) !important;
+  }
+  .meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 8px 2px 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .engine {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--trim);
+  }
+  .engine :global(svg) {
+    width: 14px;
+    height: 14px;
+  }
+  .save-row {
+    display: flex;
+    gap: 8px;
+  }
+  .save {
+    flex: 1;
+    justify-content: center;
+    height: 44px;
+    border: none !important;
+    border-radius: 12px;
+    background: #3d7bf7 !important;
+    color: #fff !important;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .save:hover:not(:disabled) {
+    background: #5089fa !important;
+  }
+  .square {
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 1px solid var(--border-strong) !important;
+    border-radius: 12px;
+    background: var(--control) !important;
+  }
+  .square:hover:not(:disabled) {
+    background: var(--hover) !important;
+  }
+  .draft-note {
+    margin: 10px 2px 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-muted);
+  }
+  .draft-note .link {
+    display: block;
+    margin-top: 2px;
   }
   .job {
     display: flex;
@@ -2687,19 +2976,11 @@
   }
   /* Short windows: a thinner timeline leaves room for the picture. */
   @media (max-height: 720px) {
-    .main {
-      gap: 6px;
-      padding-top: 6px;
-      padding-bottom: 6px;
-    }
     .track {
       height: 44px !important;
     }
     .ratio {
       height: 46px;
-    }
-    .side-panel {
-      margin: 6px;
     }
   }
 </style>

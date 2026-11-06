@@ -126,6 +126,8 @@ export interface Composition {
   cursor: { visible: boolean; scale: number; image: { png: string; hotspot: [number, number] } | null; halo: [number, number, number, number] | null } | null;
   clicks: { ring: boolean; color: [number, number, number]; sound: boolean } | null;
   canvas: { ratio: [number, number]; colors: [number, number, number][]; padding: number } | null;
+  /** Areas shown as blocks, in video pixels. */
+  pixelate: { x: number; y: number; w: number; h: number; block: number; start: number; end: number }[];
 }
 
 /** Edits made in the video editor (times in seconds, crop in video pixels). */
@@ -140,7 +142,16 @@ export interface VideoEdit {
 }
 
 export type ExportTask =
-  | { kind: "mp4"; edit: VideoEdit; audio: boolean; quality: number | null }
+  | {
+      kind: "mp4";
+      edit: VideoEdit;
+      audio: boolean;
+      /** 0 (best) – 51; null: as good as the recording. */
+      quality: number | null;
+      /** null: the recording's frame rate, size. */
+      fps: number | null;
+      height: number | null;
+    }
   | { kind: "gif"; gif: Config["gif"]; edit: VideoEdit | null };
 
 /** Recorded cursor, as saved next to a recording. */
@@ -151,12 +162,33 @@ export interface CursorTrack {
 }
 
 /** The copy without cursor (playable) and the cursor track, when kept. */
-export const editorVideoSources = (path: string) =>
-  invoke<{ clean: string | null; track: CursorTrack | null }>("editor_video_sources", { path });
+export interface VideoSources {
+  clean: string | null;
+  track: CursorTrack | null;
+  /** Folder exports are saved in. */
+  folder: string;
+  /** A recording not saved yet: only exports will be. */
+  draft: boolean;
+  /** Size of the video file, in bytes. */
+  bytes: number;
+}
+
+export const editorVideoSources = (path: string) => invoke<VideoSources>("editor_video_sources", { path });
 
 /** Puts a video file on the clipboard. */
 export const editorCopyFile = (path: string) => invoke<void>("editor_copy_file", { path });
 
-/** Exports part of a video; resolves to the job id. */
-export const editorExport = (path: string, task: ExportTask, copy = false) =>
-  invoke<number>("editor_export", { path, task, copy });
+/** Exports part of a video, to `output` (from the save dialog) or the
+ * export folder; resolves to the job id. */
+export const editorExport = (path: string, task: ExportTask, copy = false, output: string | null = null) =>
+  invoke<number>("editor_export", { path, task, copy, output });
+
+/** Asks for the folder exports go to; resolves to it, or null. */
+export const editorChooseFolder = (path: string) => invoke<string | null>("editor_choose_folder", { path });
+
+/** Asks where to save one export; resolves to the file, or null. */
+export const editorSaveAs = (path: string, extension: "mp4" | "gif") =>
+  invoke<string | null>("editor_save_as", { path, extension });
+
+/** Deletes a recording that was never saved and closes its editor. */
+export const editorDiscard = (path: string) => invoke<void>("editor_discard", { path });
