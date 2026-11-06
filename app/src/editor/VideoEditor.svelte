@@ -20,6 +20,7 @@
   import type { IconName } from "./icons";
   import Kbd from "./Kbd.svelte";
   import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, cursorAt, drawCursor, loadShapes } from "./cursors";
+  import { ditherBand } from "./dither";
   import {
     BACKGROUNDS,
     FREEHAND,
@@ -1243,11 +1244,23 @@
   });
   const barIcon = (kind: ShapeKind): IconName =>
     (["text", "arrow", "line", "rect", "ellipse", "pen", "highlight", "number"] as const).find((k) => k === kind) ?? "rect";
+  /** A short tip over the video for what the current tool does. */
+  const hint = $derived(
+    cropping
+      ? `Drag the frame or its corners${lockedRatio ? ` · ${ratio?.join(":")} kept` : ""} · Enter to apply`
+      : selectedItem
+        ? "Drag to move · corners to resize · double-click a text to edit"
+        : tool !== "select"
+          ? `Click or drag on the video · shows ${OVERLAY_LENGTH} s`
+          : "",
+  );
+  const DITHER_TOP = ditherBand("top");
+  const DITHER_BOTTOM = ditherBand("bottom");
 </script>
 
 <svelte:window onkeydown={keyDown} />
 
-<div class="editor">
+<div class="editor" style="--dither-top:{DITHER_TOP};--dither-bottom:{DITHER_BOTTOM}">
   <div class="main">
     <nav class="toolbox" aria-label="Tools">
       <div class="cluster">
@@ -1305,14 +1318,6 @@
           >
         {/each}
       </div>
-      <div class="spacer"></div>
-      {#if cropping}
-        <span class="context">Drag the frame or its corners{lockedRatio ? ` · ${ratio?.join(":")} kept` : ""}</span>
-      {:else if selectedItem}
-        <span class="context">Drag to move · corners to resize · double-click a text to edit</span>
-      {:else if tool !== "select"}
-        <span class="context">Click or drag on the video · shows {OVERLAY_LENGTH} s</span>
-      {/if}
     </nav>
 
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1367,13 +1372,14 @@
       {/if}
       {#if error}<p class="error">{error}</p>{/if}
       {#if toast}<div class="toast" role="status">{toast}</div>{/if}
+      {#if hint}<div class="hint">{hint}</div>{/if}
     </div>
 
     <footer class="dock">
       <div class="controls">
         <div class="side left">
           <button type="button" class="act" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)"
-            ><Icon name="split" /> Split <Kbd keys="S" /></button
+            ><Icon name="split" /> <span class="lbl">Split</span> <Kbd keys="S" /></button
           >
           <button
             type="button"
@@ -1383,7 +1389,7 @@
             disabled={!duration}
             title={current?.kept === false ? "Restore this part (Del)" : "Delete this part (Del)"}
             ><Icon name={current?.kept === false ? "restore" : "trash"} />
-            {current?.kept === false ? "Restore" : "Delete"} <Kbd keys="Del" /></button
+            <span class="lbl">{current?.kept === false ? "Restore" : "Delete"}</span> <Kbd keys="Del" /></button
           >
           <div class="anchor">
             <button
@@ -1413,13 +1419,13 @@
         </div>
 
         <div class="center">
-          <button type="button" class="round" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
+          <button type="button" class="round skip" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
             ><Icon name="start" /></button
           >
           <button type="button" class="round play" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
             <Icon name={playing ? "pause" : "play"} />
           </button>
-          <button type="button" class="round" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
+          <button type="button" class="round skip" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
             ><Icon name="end" /></button
           >
           <span class="time">{format(time)} <span class="muted">/ {format(output)}</span></span>
@@ -1551,7 +1557,7 @@
     <div class="panel-scroll">
       {#if selectedItem}
         <details open>
-          <summary><span class="ic sel"></span>Selected item</summary>
+          <summary>Selected item</summary>
           <p class="note">Shows {format(selectedItem.start)} → {format(selectedItem.end)}.</p>
           <div class="pair">
             <button type="button" onclick={() => setOverlayTime("start")}>From playhead</button>
@@ -1561,7 +1567,7 @@
         </details>
       {/if}
       <details open>
-        <summary><span class="ic fmt"></span>Format</summary>
+        <summary>Format</summary>
         <div class="ratios">
           {#each RATIOS as r (r.label)}
             {@const active = (ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)}
@@ -1612,7 +1618,7 @@
         </div>
       </details>
       <details open>
-        <summary><span class="ic cur"></span>Cursor</summary>
+        <summary>Cursor</summary>
         {#if !cursorTrack}
           <p class="note">Needs a Kadra recording made with “editable cursor” on (Settings › Recording).</p>
         {:else if cursorEditable}
@@ -1635,7 +1641,7 @@
       </details>
       {#if cursorTrack}
         <details open>
-          <summary><span class="ic clk"></span>Clicks — {cursorTrack.clicks.length}</summary>
+          <summary>Clicks</summary>
           <label class="check"
             ><input type="checkbox" bind:checked={clickRing} /> Ring
             <input type="color" bind:value={clickColor} class="mini" title="Ring colour" /></label
@@ -1701,15 +1707,15 @@
 <style>
   /* Dark, soft and rounded whatever the system theme: an editing room. */
   .editor {
-    --bg: #131316;
-    --surface: #1a1a1e;
-    --raised: #212126;
-    --control: #26262c;
-    --hover: #2d2d34;
-    --border: #2b2b31;
-    --border-strong: #3a3a42;
-    --text: #ececf1;
-    --text-muted: #8e8e98;
+    --bg: #0c0d11;
+    --surface: #181816;
+    --raised: #1f1f1c;
+    --control: #232320;
+    --hover: #2b2b27;
+    --border: #262622;
+    --border-strong: #35352f;
+    --text: #ecece8;
+    --text-muted: #8f8f88;
     --accent: #8b7cff;
     --accent-soft: rgb(139 124 255 / 0.18);
     --on-accent: #ffffff;
@@ -1717,8 +1723,10 @@
     --danger: #ff8a8a;
     color-scheme: dark;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 300px;
+    grid-template-columns: minmax(0, 1fr) clamp(250px, 24vw, 300px);
     height: 100vh;
+    min-width: 640px;
+    overflow: hidden;
     background: var(--bg);
     color: var(--text);
   }
@@ -1751,9 +1759,6 @@
     border-color: var(--accent) !important;
     color: #fff;
   }
-  .spacer {
-    flex: 1;
-  }
   .sep {
     width: 1px;
     align-self: stretch;
@@ -1767,12 +1772,15 @@
   /* Toolbox */
   .toolbox {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: center;
     gap: 4px;
     padding: 5px 8px;
     border: 1px solid var(--border);
     border-radius: 14px;
-    background: var(--surface);
+    background: var(--dither-top) repeat-x left top / auto 32px, var(--surface);
+    container-type: inline-size;
   }
   .cluster {
     display: flex;
@@ -1809,14 +1817,6 @@
     font-weight: 700;
     font-family: var(--font-mono);
     opacity: 0.5;
-  }
-  .context {
-    padding-right: 6px;
-    font-size: 12px;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .swatch {
     width: 20px;
@@ -1913,6 +1913,7 @@
     margin-right: 6px;
   }
   .toast,
+  .hint,
   .error {
     position: absolute;
     left: 50%;
@@ -1924,6 +1925,21 @@
     border: 1px solid var(--border-strong);
     font-size: 13px;
     pointer-events: none;
+  }
+  .toast {
+    top: auto;
+    bottom: 14px;
+  }
+  .hint {
+    top: 12px;
+    max-width: calc(100% - 24px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-muted);
+    font-size: 12px;
+    background: rgb(24 24 22 / 0.88);
+    backdrop-filter: blur(6px);
   }
   .error {
     color: var(--danger);
@@ -1979,7 +1995,8 @@
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 14px;
-    background: var(--surface);
+    background: var(--dither-bottom) repeat-x left bottom / auto 32px, var(--surface);
+    container-type: inline-size;
   }
   .controls {
     display: grid;
@@ -2366,6 +2383,7 @@
   .panel-head {
     padding: 14px 16px 12px;
     border-bottom: 1px solid var(--border);
+    background: var(--dither-top) repeat-x left top / auto 48px;
   }
   .file {
     display: flex;
@@ -2440,23 +2458,6 @@
   }
   summary:hover {
     color: var(--text);
-  }
-  .ic {
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-  }
-  .ic.sel {
-    background: #8b7cff;
-  }
-  .ic.fmt {
-    background: linear-gradient(135deg, #5ad1c9, #3aa0a0);
-  }
-  .ic.cur {
-    background: linear-gradient(135deg, #ff9fb3, #e5484d);
-  }
-  .ic.clk {
-    background: linear-gradient(135deg, #ffd60a, #f5a524);
   }
   .ratios {
     display: grid;
@@ -2580,7 +2581,7 @@
   .export-card {
     padding: 12px 14px 14px;
     border-top: 1px solid var(--border);
-    background: linear-gradient(180deg, var(--raised), var(--surface));
+    background: var(--dither-bottom) repeat-x left bottom / auto 48px, var(--surface);
   }
   .card-title {
     margin-bottom: 8px;
@@ -2626,5 +2627,79 @@
   }
   .failed {
     color: var(--danger);
+  }
+
+  /* Smaller windows: the transport row gives up hints, shortcuts, then
+   * labels, so play stays centred and nothing overlaps. */
+  @container (max-width: 980px) {
+    .hint-keys {
+      display: none;
+    }
+  }
+  @container (max-width: 820px) {
+    .act :global(.kbd) {
+      display: none;
+    }
+    .zoom input {
+      width: 64px;
+    }
+    .time {
+      min-width: 0;
+      font-size: 12px;
+    }
+  }
+  @container (max-width: 660px) {
+    .act .lbl,
+    .zoom input {
+      display: none;
+    }
+    .act {
+      padding: 0 9px;
+    }
+    .center {
+      gap: 5px;
+    }
+    .round.play {
+      width: 38px;
+      height: 38px;
+    }
+    .round.skip {
+      display: none;
+    }
+  }
+  /* The tool bar stays on one row as long as it can. */
+  @container (max-width: 900px) {
+    .tool {
+      width: 31px;
+      height: 31px;
+    }
+    .colors {
+      gap: 4px;
+    }
+    .swatch,
+    .custom {
+      width: 17px;
+      height: 17px;
+    }
+    .sep {
+      margin: 6px 2px;
+    }
+  }
+  /* Short windows: a thinner timeline leaves room for the picture. */
+  @media (max-height: 720px) {
+    .main {
+      gap: 6px;
+      padding-top: 6px;
+      padding-bottom: 6px;
+    }
+    .track {
+      height: 44px !important;
+    }
+    .ratio {
+      height: 46px;
+    }
+    .side-panel {
+      margin: 6px;
+    }
   }
 </style>
