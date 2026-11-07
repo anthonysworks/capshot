@@ -1,5 +1,6 @@
 <script lang="ts">
   import { convertFileSrc } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import {
     type Composition,
@@ -73,11 +74,12 @@
 
   let { path }: { path: string } = $props();
 
-  type Tool = "select" | "text" | "arrow" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number" | "pixelate";
+  type Tool = "select" | "text" | "arrow" | "curve" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number" | "pixelate";
   const TOOLS: { tool: Tool; icon: IconName; label: string; key: string }[] = [
     { tool: "select", icon: "select", label: "Select, move, resize — click the video to play", key: "V" },
     { tool: "text", icon: "text", label: "Text", key: "T" },
     { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
+    { tool: "curve", icon: "curve", label: "Curved arrow (drag its middle to bend it)", key: "Q" },
     { tool: "line", icon: "line", label: "Line", key: "L" },
     { tool: "rect", icon: "rect", label: "Rectangle", key: "R" },
     { tool: "ellipse", icon: "ellipse", label: "Ellipse", key: "E" },
@@ -162,6 +164,11 @@
   let folder = $state("");
   let unsaved = $state(false);
   let discardArmed = $state(false);
+  /** Asking whether to close without saving. */
+  let closing = $state(false);
+  /** Something was saved (or copied) from this draft. */
+  let savedOnce = $state(false);
+  let sourceBytes = $state(0);
   let crop = $state<Rect | null>(null);
   /** Editing the crop: the whole frame shows, with the area kept. */
   let cropping = $state(false);
@@ -186,7 +193,7 @@
   let color = $state("#e5484d");
   let level = $state(2);
   /** Filmstrip frames, evenly spread over the video; empty until made. */
-  let frames = $state<string[]>([]);
+  let frames = $state<(ImageBitmap | null)[]>([]);
   let error = $state("");
   let toast = $state("");
   let config = $state<Config | null>(null);
@@ -271,9 +278,9 @@
     return Array.from({ length: count }, (_, i) => {
       const t = ((i + 0.5) * width) / pxPerSecond;
       const index = Math.min(frames.length - 1, Math.floor((t / duration) * frames.length));
-      let src = "";
-      for (let d = 0; !src && d < frames.length; d++) src = frames[index - d] || frames[index + d] || "";
-      return { left: i * width, width, src };
+      let frame: ImageBitmap | null = null;
+      for (let d = 0; !frame && d < frames.length; d++) frame = frames[index - d] ?? frames[index + d] ?? null;
+      return { left: i * width, width, frame };
     });
   });
   const rows = $derived(packRows(overlays));
@@ -297,6 +304,7 @@
         cleanSource = s.clean;
         folder = s.folder;
         unsaved = s.draft;
+        sourceBytes = s.bytes;
       })
       .catch(() => {});
     const unlisten = onJobProgress((p) => {
@@ -320,14 +328,49 @@
       if (!(e.target as HTMLElement)?.closest?.(".popover, .opens-menu")) menu = null;
     };
     window.addEventListener("pointerdown", closeMenu);
+    // Closing deletes a draft: ask first when nothing was saved from it.
+    const stopClose = getCurrentWindow().onCloseRequested((e) => {
+      if (!mustAsk) return;
+      e.preventDefault();
+      closing = true;
+    });
     return () => {
       cancelAnimationFrame(frame);
+      stopClose.then((f) => f());
       observer.disconnect();
       window.removeEventListener("pointerdown", closeMenu);
       unlisten.then((f) => f());
       audioContext?.close();
     };
   });
+
+  /** Nothing was saved from this draft and nothing is being saved. */
+  const mustAsk = $derived(unsaved && !savedOnce && !jobs.some((j) => !j.error));
+
+  // "Kadra Editor · name · size · length · rate · weight" in the title bar.
+  $effect(() => {
+    if (!vw || !duration) return;
+    const parts = [name(path), `${vw}×${vh}`, format(duration), `${sourceFps} fps`];
+    if (sourceBytes) parts.push(size(sourceBytes));
+    getCurrentWindow()
+      .setTitle(`Kadra Editor · ${parts.join(" · ")}`)
+      .catch(() => {});
+  });
+
+  /** Deletes the draft and closes the window. */
+  async function closeWithoutSaving() {
+    closing = false;
+    try {
+      await editorDiscard(path);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function saveThenStay() {
+    closing = false;
+    await exportAs(exportKind);
+  }
 
   function loaded() {
     vw = video.videoWidth;
@@ -340,6 +383,15 @@
     }
   }
 
+  /** Draws a filmstrip frame into its tile. */
+  function showFrame(frame: ImageBitmap) {
+    return (canvas: HTMLCanvasElement) => {
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+      canvas.getContext("2d")?.drawImage(frame, 0, 0);
+    };
+  }
+
   /** Frames for the timeline, from a second, hidden player: every 8th
    * first so the strip looks complete quickly, then the ones between. */
   async function filmstrip() {
@@ -348,19 +400,17 @@
     probe.muted = true;
     probe.preload = "auto";
     await new Promise((resolve) => probe.addEventListener("loadeddata", resolve, { once: true }));
-    const canvas = document.createElement("canvas");
-    canvas.height = 2 * TRACK_H;
-    canvas.width = Math.round((canvas.height * probe.videoWidth) / Math.max(1, probe.videoHeight));
-    const ctx = canvas.getContext("2d");
+    const height = 2 * TRACK_H;
+    const width = Math.max(1, Math.round((height * probe.videoWidth) / Math.max(1, probe.videoHeight)));
     const count = Math.min(120, Math.max(16, Math.ceil(duration * 3)));
-    frames = new Array(count).fill("");
+    frames = new Array(count).fill(null);
     const order = [...Array(count).keys()].sort((a, b) => (a % 8 === 0 ? 0 : 1) - (b % 8 === 0 ? 0 : 1) || a - b);
     for (const i of order) {
-      if (!ctx) break;
       probe.currentTime = ((i + 0.5) * duration) / count;
       await new Promise((resolve) => probe.addEventListener("seeked", resolve, { once: true }));
-      ctx.drawImage(probe, 0, 0, canvas.width, canvas.height);
-      frames[i] = canvas.toDataURL("image/jpeg", 0.75);
+      // Kept as bitmaps: the video comes from another origin (the asset
+      // protocol), so reading pixels back (toDataURL) is not allowed.
+      frames[i] = await createImageBitmap(probe, { resizeWidth: width, resizeHeight: height, resizeQuality: "medium" });
     }
     probe.removeAttribute("src");
     probe.load();
@@ -1218,6 +1268,7 @@
   async function copyVideo() {
     if (untouched) {
       await editorCopyFile(path);
+      savedOnce = true;
       notify("Copied to the clipboard");
     } else {
       notify("Preparing the edited video… it will be copied when ready");
@@ -1398,7 +1449,7 @@
     return `${Math.round(w) & ~1}×${Math.round(h) & ~1}`;
   });
   const barIcon = (kind: ShapeKind): IconName =>
-    (["text", "arrow", "line", "rect", "ellipse", "pen", "highlight", "number", "pixelate"] as const).find((k) => k === kind) ?? "rect";
+    (["text", "arrow", "curve", "line", "rect", "ellipse", "pen", "highlight", "number", "pixelate"] as const).find((k) => k === kind) ?? "rect";
   /** A short tip over the video for what the current tool does. */
   const hint = $derived(
     cropping
@@ -1416,6 +1467,19 @@
 <svelte:window onkeydown={keyDown} />
 
 <div class="editor" style="--dither-top:{DITHER_TOP};--dither-bottom:{DITHER_BOTTOM}">
+  {#if closing}
+    <div class="backdrop">
+      <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="close-title">
+        <h2 id="close-title">Close without saving?</h2>
+        <p>This recording was never saved. Closing the editor deletes it.</p>
+        <div class="dialog-actions">
+          <button type="button" class="pill big" onclick={saveThenStay}><Icon name="save" /> Save {exportKind.toUpperCase()}</button>
+          <button type="button" class="ghost danger-fill" onclick={closeWithoutSaving}>Delete and close</button>
+          <button type="button" class="ghost" onclick={() => (closing = false)}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  {/if}
   <div class="main">
     <nav class="toolbox" aria-label="Tools">
       <div class="cluster">
@@ -1534,7 +1598,7 @@
       <div class="controls">
         <div class="side left">
           <button type="button" class="act" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)"
-            ><Icon name="split" /> <span class="lbl">Split</span> <Kbd keys="S" /></button
+            ><Icon name="scissors" /> <span class="lbl">Split</span> <Kbd keys="S" /></button
           >
           <button
             type="button"
@@ -1628,7 +1692,7 @@
           <div class="track" style="height:{TRACK_H}px">
             <div class="filmstrip">
               {#each tiles as tile, i (i)}
-                {#if tile.src}<img src={tile.src} alt="" draggable="false" style="left:{tile.left}px;width:{tile.width}px" />{/if}
+                {#if tile.frame}<canvas {@attach showFrame(tile.frame)} style="left:{tile.left}px;width:{tile.width}px"></canvas>{/if}
               {/each}
             </div>
             {#each segments as sg, i (sg.start)}
@@ -1875,7 +1939,7 @@
       </div>
       {#if unsaved}
         <p class="draft-note">
-          Not saved yet: only what you save is kept. Closing keeps the recording as is.
+          Not saved yet: only what you save is kept. Closing the editor deletes the recording.
           <button type="button" class="link danger-text" onclick={discard}>{discardArmed ? "Click again to delete it" : "Discard recording"}</button>
         </p>
       {/if}
@@ -1900,23 +1964,10 @@
 </div>
 
 <style>
-  /* Dark, soft and rounded whatever the system theme: an editing room. */
+  /* Square and contrasted, in the window's theme (docs/UI_DESIGN.md). */
   .editor {
-    --bg: #181816;
-    --surface: #0c0d11;
-    --raised: #13141a;
-    --control: #181a20;
-    --hover: #20232b;
-    --border: #1e2028;
-    --border-strong: #2c2f38;
-    --text: #ecece8;
-    --text-muted: #8f8f88;
-    --accent: #8b7cff;
-    --accent-soft: rgb(139 124 255 / 0.18);
-    --on-accent: #ffffff;
+    --accent-soft: color-mix(in srgb, var(--accent) 24%, transparent);
     --trim: #f5c542;
-    --danger: #ff8a8a;
-    color-scheme: dark;
     display: grid;
     grid-template-columns: minmax(0, 1fr) clamp(250px, 24vw, 300px);
     height: 100vh;
@@ -1938,21 +1989,25 @@
   .editor :global(input) {
     color: var(--text);
     background: var(--control);
-    border-color: var(--border);
+    border-color: var(--border-strong);
+  }
+  .editor :global(button:not(:disabled):hover),
+  .editor :global(select:hover) {
+    border-color: var(--focus);
   }
   button {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    border-radius: 8px;
+    border-radius: var(--radius);
   }
   button:hover:not(:disabled) {
     background: var(--hover);
   }
   button.active {
-    background: var(--accent-soft) !important;
+    background: var(--accent) !important;
     border-color: var(--accent) !important;
-    color: #fff;
+    color: var(--on-accent) !important;
   }
   .sep {
     width: 1px;
@@ -1994,14 +2049,16 @@
     padding: 0;
     border: 1px solid transparent !important;
     background: transparent !important;
-    border-radius: 10px;
+    border-radius: var(--radius);
   }
   .tool:hover:not(:disabled):not(.active) {
     background: var(--hover) !important;
+    border-color: var(--focus) !important;
   }
   .tool.active {
-    background: var(--accent-soft) !important;
-    border-color: color-mix(in srgb, var(--accent) 60%, transparent) !important;
+    background: var(--accent) !important;
+    border-color: var(--accent) !important;
+    color: var(--on-accent);
   }
   .tool .key {
     position: absolute;
@@ -2016,19 +2073,21 @@
     width: 20px;
     height: 20px;
     padding: 0;
-    border-radius: 50%;
+    border-radius: var(--radius);
     background: var(--swatch) !important;
-    border: 2px solid rgb(255 255 255 / 0.12) !important;
+    border: 1px solid var(--border-strong) !important;
   }
   .swatch.active {
-    outline: 2px solid #fff;
+    background: var(--swatch) !important;
+    border-color: var(--surface) !important;
+    outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
   .custom {
     position: relative;
     width: 20px;
     height: 20px;
-    border-radius: 50%;
+    border-radius: var(--radius);
     overflow: hidden;
     background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
   }
@@ -2041,8 +2100,51 @@
   .dot {
     width: var(--d);
     height: var(--d);
-    border-radius: 50%;
+    border-radius: var(--radius);
     background: currentColor;
+  }
+
+  /* Close confirmation */
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: grid;
+    place-items: center;
+    background: rgb(0 0 0 / 0.55);
+  }
+  .dialog {
+    width: min(440px, calc(100vw - 32px));
+    padding: 22px 24px;
+    background: var(--surface);
+    border: 2px solid var(--focus);
+    box-shadow: var(--shadow);
+  }
+  .dialog h2 {
+    margin: 0 0 8px;
+    font-size: 22px;
+    font-weight: 700;
+  }
+  .dialog p {
+    margin: 0 0 18px;
+    color: var(--text-muted);
+  }
+  .dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .pill.big {
+    min-height: 40px;
+    padding: 6px 18px;
+  }
+  .danger-fill {
+    color: var(--danger) !important;
+    border-color: var(--danger) !important;
+  }
+  .danger-fill:hover:not(:disabled) {
+    background: var(--danger) !important;
+    color: #fff !important;
   }
 
   /* Player */
@@ -2051,7 +2153,11 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-    background: var(--bg);
+    /* Transparent around the picture, shown as a checkerboard like in the
+       image editor. */
+    background:
+      repeating-conic-gradient(color-mix(in srgb, var(--bg) 92%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
+      20px;
     touch-action: none;
   }
   video {
@@ -2061,9 +2167,9 @@
     opacity: 0;
     pointer-events: none;
   }
+  /* No frame or shadow: the video sits on the window background. */
   .stage {
     position: absolute;
-    box-shadow: 0 10px 40px rgb(0 0 0 / 0.45);
   }
   .text-input {
     position: absolute;
@@ -2090,8 +2196,8 @@
     gap: 6px;
     padding: 6px 6px 6px 14px;
     border: 1px solid var(--border-strong);
-    border-radius: 999px;
-    background: rgb(26 26 30 / 0.92);
+    border-radius: var(--radius);
+    background: var(--surface);
     backdrop-filter: blur(8px);
     cursor: default;
   }
@@ -2108,7 +2214,7 @@
     top: 14px;
     transform: translateX(-50%);
     padding: 7px 14px;
-    border-radius: 999px;
+    border-radius: var(--radius);
     background: var(--raised);
     border: 1px solid var(--border-strong);
     font-size: 13px;
@@ -2126,8 +2232,9 @@
     white-space: nowrap;
     color: var(--text-muted);
     font-size: 12px;
-    background: rgb(24 24 22 / 0.88);
-    backdrop-filter: blur(6px);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    color: var(--text);
+    font-weight: 600;
   }
   .error {
     color: var(--danger);
@@ -2137,20 +2244,20 @@
     justify-content: center;
     padding: 6px 14px;
     border: none !important;
-    border-radius: 999px;
-    background: #f4f4f6 !important;
-    color: #141416 !important;
-    font-weight: 600;
-    box-shadow: 0 2px 8px rgb(0 0 0 / 0.3);
+    border-radius: var(--radius);
+    background: var(--accent) !important;
+    color: var(--on-accent) !important;
+    font-weight: 700;
   }
   .pill:hover:not(:disabled) {
-    background: #ffffff !important;
+    background: var(--accent-hover) !important;
+    box-shadow: 0 0 0 2px var(--focus);
   }
   .ghost {
     justify-content: center;
     padding: 6px 12px;
     border: 1px solid var(--border-strong) !important;
-    border-radius: 999px;
+    border-radius: var(--radius);
     background: transparent !important;
   }
   .ghost:hover:not(:disabled) {
@@ -2197,12 +2304,12 @@
     justify-content: flex-end;
   }
   .act {
-    height: 34px;
+    height: 36px;
     padding: 0 12px;
     border: 1px solid var(--border-strong) !important;
     background: var(--raised) !important;
-    border-radius: 10px;
-    font-weight: 500;
+    border-radius: var(--radius);
+    font-weight: 600;
     white-space: nowrap;
   }
   .act:hover:not(:disabled) {
@@ -2227,7 +2334,7 @@
     width: 34px;
     height: 34px;
     padding: 0;
-    border-radius: 50% !important;
+    border-radius: var(--radius);
     border: 1px solid var(--border-strong) !important;
     background: var(--raised) !important;
   }
@@ -2242,12 +2349,11 @@
     width: 44px;
     height: 44px;
     border: none !important;
-    background: #f4f4f6 !important;
-    color: #141416 !important;
-    box-shadow: 0 2px 10px rgb(0 0 0 / 0.35);
+    background: var(--text) !important;
+    color: var(--surface) !important;
   }
   .round.play:hover {
-    background: #fff !important;
+    box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text);
   }
   .time {
     min-width: 140px;
@@ -2278,9 +2384,9 @@
     z-index: 20;
     padding: 8px;
     border: 1px solid var(--border-strong);
-    border-radius: 12px;
+    border-radius: var(--radius);
     background: var(--raised);
-    box-shadow: 0 12px 32px rgb(0 0 0 / 0.5);
+    box-shadow: var(--shadow);
   }
   .speeds {
     bottom: calc(100% + 8px);
@@ -2308,7 +2414,7 @@
   }
   .chip {
     padding: 2px 9px;
-    border-radius: 999px;
+    border-radius: var(--radius);
   }
 
   /* Timeline */
@@ -2345,18 +2451,18 @@
   }
   .track {
     position: relative;
-    border-radius: 10px;
-    background: #0d0d10;
+    border-radius: var(--radius);
+    background: var(--control);
     cursor: pointer;
   }
   .filmstrip {
     position: absolute;
     inset: 0;
     overflow: hidden;
-    border-radius: 10px;
+    border-radius: var(--radius);
     pointer-events: none;
   }
-  .filmstrip img {
+  .filmstrip canvas {
     position: absolute;
     top: 0;
     height: 100%;
@@ -2382,14 +2488,14 @@
   }
   .segment.selected {
     box-shadow: inset 0 0 0 2px var(--accent);
-    background-color: rgb(139 124 255 / 0.12);
+    background-color: var(--accent-soft);
   }
   .badge {
     position: absolute;
     left: 8px;
     bottom: 5px;
     padding: 0 6px;
-    border-radius: 999px;
+    border-radius: var(--radius);
     background: var(--trim);
     color: #1a1400;
     font: 700 11px/17px var(--font-mono);
@@ -2413,14 +2519,15 @@
     padding: 0 6px;
     justify-content: center;
     border: none !important;
-    border-radius: 999px;
-    background: rgb(15 15 18 / 0.85) !important;
-    color: #fff;
+    border-radius: var(--radius);
+    background: var(--surface) !important;
+    color: var(--text);
+    border: 1px solid var(--border-strong) !important;
     font: 600 11px var(--font-mono);
   }
   .part-tools button:hover {
-    background: #f4f4f6 !important;
-    color: #141416;
+    background: var(--text) !important;
+    color: var(--surface);
   }
   .part-tools :global(svg) {
     width: 14px;
@@ -2451,11 +2558,11 @@
     z-index: 4;
   }
   .handle.start {
-    border-radius: 8px 0 0 8px;
+    border-radius: var(--radius);
     transform: translateX(-12px);
   }
   .handle.end {
-    border-radius: 0 8px 8px 0;
+    border-radius: var(--radius);
     transform: translateX(-2px);
   }
   .handle::after {
@@ -2475,8 +2582,9 @@
   .lanes {
     position: relative;
     margin-top: 6px;
-    border-radius: 10px;
-    background: rgb(255 255 255 / 0.03);
+    border-radius: var(--radius);
+    background: var(--raised);
+    border: 1px solid var(--border);
     transition: height 0.15s;
   }
   .lane-hint {
@@ -2494,14 +2602,14 @@
     height: 22px;
     display: flex;
     align-items: center;
-    border-radius: 7px;
-    background: color-mix(in srgb, var(--bar) 30%, #1b1b20);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--bar) 30%, var(--raised));
     border: 1px solid color-mix(in srgb, var(--bar) 70%, transparent);
     cursor: grab;
     overflow: hidden;
   }
   .bar.selected {
-    outline: 2px solid #fff;
+    outline: 2px solid var(--focus);
     outline-offset: 1px;
   }
   .bar .label {
@@ -2514,7 +2622,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 11px;
-    color: #fff;
+    font-weight: 600;
+    color: var(--text);
     pointer-events: none;
   }
   .bar .label :global(svg) {
@@ -2536,8 +2645,8 @@
     bottom: 0;
     width: 2px;
     margin-left: -1px;
-    background: #fff;
-    box-shadow: 0 0 3px rgb(0 0 0 / 0.8);
+    background: var(--focus);
+    box-shadow: 0 0 0 1px var(--surface);
     pointer-events: none;
     z-index: 5;
   }
@@ -2547,8 +2656,8 @@
     left: -5px;
     width: 12px;
     height: 12px;
-    border-radius: 3px 3px 7px 7px;
-    background: #fff;
+    border-radius: var(--radius);
+    background: var(--focus);
   }
 
   /* Right panel */
@@ -2563,7 +2672,28 @@
   .panel-head {
     padding: 14px 16px 12px;
     border-bottom: 1px solid var(--border);
-    background: var(--dither-top) repeat-x left top / auto 48px;
+    position: relative;
+    isolation: isolate;
+  }
+  /* Pixel bands, drawn in the theme's band colour through the tile. */
+  .panel-head::before,
+  .export-card::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 48px;
+    z-index: -1;
+    background: var(--band);
+    pointer-events: none;
+  }
+  .panel-head::before {
+    top: 0;
+    mask: var(--dither-top) repeat-x left top / auto 48px;
+  }
+  .export-card::before {
+    bottom: 0;
+    mask: var(--dither-bottom) repeat-x left bottom / auto 48px;
   }
   .file {
     display: flex;
@@ -2581,7 +2711,7 @@
     place-items: center;
     width: 24px;
     height: 24px;
-    border-radius: 7px;
+    border-radius: var(--radius);
     background: var(--accent-soft);
     color: var(--accent);
   }
@@ -2652,12 +2782,12 @@
     height: 56px;
     padding: 4px;
     font-size: 12px;
-    border-radius: 10px;
+    border-radius: var(--radius);
   }
   .ratio .shape {
     display: block;
     border: 1.5px solid currentColor;
-    border-radius: 3px;
+    border-radius: var(--radius);
     opacity: 0.8;
   }
   .segmented {
@@ -2665,7 +2795,7 @@
     padding: 3px;
     gap: 3px;
     margin-bottom: 10px;
-    border-radius: 10px;
+    border-radius: var(--radius);
     background: var(--bg);
     border: 1px solid var(--border);
   }
@@ -2676,11 +2806,12 @@
     font-size: 12px;
     border: 1px solid transparent !important;
     background: transparent !important;
-    border-radius: 7px;
+    border-radius: var(--radius);
   }
   .segmented button.active {
-    background: var(--hover) !important;
-    border-color: var(--border-strong) !important;
+    background: var(--accent) !important;
+    border-color: var(--accent) !important;
+    color: var(--on-accent) !important;
   }
   .chips {
     display: flex;
@@ -2690,7 +2821,7 @@
   }
   .wide-swatch {
     width: 36px;
-    border-radius: 8px;
+    border-radius: var(--radius);
   }
   .pair {
     display: grid;
@@ -2758,7 +2889,9 @@
   .export-card {
     padding: 12px 14px 16px;
     border-top: 1px solid var(--border);
-    background: var(--dither-bottom) repeat-x left bottom / auto 48px, var(--surface);
+    position: relative;
+    isolation: isolate;
+    background: var(--surface);
   }
   .card-title {
     font-size: 11px;
@@ -2807,7 +2940,7 @@
     gap: 10px;
     padding: 9px 12px;
     border: 1px solid var(--border-strong) !important;
-    border-radius: 10px;
+    border-radius: var(--radius);
     background: var(--control) !important;
     font-size: 13px;
   }
@@ -2832,7 +2965,8 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    color: var(--trim);
+    color: var(--accent-text);
+    font-weight: 600;
   }
   .engine :global(svg) {
     width: 14px;
@@ -2847,14 +2981,15 @@
     justify-content: center;
     height: 44px;
     border: none !important;
-    border-radius: 12px;
-    background: #3d7bf7 !important;
-    color: #fff !important;
+    border-radius: var(--radius);
+    background: var(--accent) !important;
+    color: var(--on-accent) !important;
     font-size: 15px;
-    font-weight: 600;
+    font-weight: 700;
   }
   .save:hover:not(:disabled) {
-    background: #5089fa !important;
+    background: var(--accent-hover) !important;
+    box-shadow: 0 0 0 2px var(--focus);
   }
   .square {
     justify-content: center;
@@ -2862,7 +2997,7 @@
     height: 44px;
     padding: 0;
     border: 1px solid var(--border-strong) !important;
-    border-radius: 12px;
+    border-radius: var(--radius);
     background: var(--control) !important;
   }
   .square:hover:not(:disabled) {
@@ -2900,14 +3035,14 @@
   .bar-progress {
     flex: 1;
     height: 4px;
-    border-radius: 2px;
+    border-radius: var(--radius);
     background: var(--border);
     overflow: hidden;
   }
   .bar-progress span {
     display: block;
     height: 100%;
-    background: linear-gradient(90deg, #b8860b, var(--trim));
+    background: var(--accent);
     transition: width 0.2s;
   }
   .pct {

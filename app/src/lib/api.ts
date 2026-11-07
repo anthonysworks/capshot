@@ -11,6 +11,7 @@ export type Folder = "screenshots" | "recordings" | "logs";
 /** Mirrors `kadra_core::Config`. */
 export interface Config {
   hotkeys: { capture: string; record: string };
+  appearance: { theme: "system" | "dark" | "light" };
   capture: {
     output_dir: string;
     format: ImageFormat;

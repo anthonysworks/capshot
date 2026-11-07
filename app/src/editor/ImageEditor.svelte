@@ -12,6 +12,8 @@
     type Fill,
     type Frame,
     LINEAR,
+    bendTowards,
+    curvePoints,
     type Point,
     type Rect,
     type Shape,
@@ -36,6 +38,7 @@
       title: "Shapes",
       tools: [
         { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
+        { tool: "curve", icon: "curve", label: "Curved arrow (drag its middle to bend it)", key: "Q" },
         { tool: "line", icon: "line", label: "Line", key: "L" },
         { tool: "rect", icon: "rect", label: "Rectangle", key: "R" },
         { tool: "ellipse", icon: "ellipse", label: "Ellipse", key: "E" },
@@ -137,6 +140,12 @@
       try {
         const bytes = await editorRead(path);
         image = await createImageBitmap(new Blob([bytes]));
+        const n = bytes.byteLength;
+        const weight = n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
+        const name = path.split(/[\\/]/).pop() ?? path;
+        getCurrentWindow()
+          .setTitle(`Kadra Editor · ${name} · ${image.width}×${image.height} · ${weight}`)
+          .catch(() => {});
       } catch (e) {
         error = String(e);
       }
@@ -298,6 +307,7 @@
 
   /** Resize handles: end points of lines, corners of boxes. */
   function handles(s: Shape): Point[] {
+    if (s.kind === "curve") return [{ x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }, curvePoints(s).apex];
     if (LINEAR.includes(s.kind)) {
       return [
         { x: s.x1, y: s.y1 },
@@ -471,7 +481,8 @@
       if (!sh) return;
       current.moved = true;
       if (LINEAR.includes(sh.kind)) {
-        if (current.handle === 0) [sh.x1, sh.y1] = [p.x, p.y];
+        if (current.handle === 2) sh.bend = bendTowards(sh, raw);
+        else         if (current.handle === 0) [sh.x1, sh.y1] = [p.x, p.y];
         else [sh.x2, sh.y2] = [p.x, p.y];
       } else {
         // Corners in order: (x1,y1) (x2,y1) (x2,y2) (x1,y2).
@@ -1052,7 +1063,7 @@
   .heading,
   h3 {
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -1074,8 +1085,8 @@
     background: transparent;
   }
   .tool:hover {
-    background: var(--control);
-    border-color: var(--border);
+    background: var(--hover);
+    border-color: var(--focus);
   }
   .tool.active {
     background: var(--accent);
@@ -1136,8 +1147,8 @@
   }
   button.icon:hover:not(:disabled),
   button.chip:hover {
-    background: var(--control);
-    border-color: var(--border);
+    background: var(--hover);
+    border-color: var(--focus);
   }
   button.chip {
     padding: 3px 9px;
@@ -1151,27 +1162,32 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    min-height: 34px;
+  }
+  button.action.primary {
+    min-width: 120px;
+    justify-content: center;
   }
   button.link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 0 0 0 8px;
   }
   .swatch {
     width: 24px;
     height: 24px;
     padding: 0;
-    border-radius: 50%;
+    border-radius: var(--radius);
     background: var(--swatch);
     border: 2px solid var(--border);
   }
   .swatch.wide {
     width: 38px;
-    border-radius: 6px;
+    border-radius: var(--radius);
   }
   .swatch.active {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
   .custom input {
@@ -1185,7 +1201,7 @@
   .dot {
     width: var(--d);
     height: var(--d);
-    border-radius: 50%;
+    border-radius: var(--radius);
     background: currentColor;
   }
   .check,
@@ -1248,10 +1264,11 @@
     left: 50%;
     transform: translateX(-50%);
     padding: 8px 14px;
-    border-radius: 6px;
+    border-radius: var(--radius);
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+    box-shadow: var(--shadow);
+    font-weight: 600;
   }
   .toast {
     bottom: 20px;

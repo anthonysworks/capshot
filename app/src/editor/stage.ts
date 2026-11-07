@@ -2,7 +2,7 @@
  * crop frames locked to a ratio, resizing annotations, and stacking time
  * bars without overlap. */
 
-import { type Point, type Rect, type Shape, FREEHAND, LINEAR, badgeRadius, bounds, fontSize } from "./shapes";
+import { type Point, type Rect, type Shape, FREEHAND, LINEAR, badgeRadius, bendTowards, bounds, curvePoints, fontSize } from "./shapes";
 
 /** How the source maps onto the exported frame: the `crop` area of the
  * source is drawn at `area` of an `out`-sized frame. */
@@ -109,9 +109,10 @@ export function dragCorner(anchor: Point, to: Point, within: Rect, ratio: number
   };
 }
 
-/** Handles of a selected annotation: the ends of lines and arrows, the
- * corners of everything else. */
+/** Handles of a selected annotation: the ends of lines and arrows (and the
+ * middle of curved ones), the corners of everything else. */
 export function shapeHandles(ctx: CanvasRenderingContext2D, s: Shape): Point[] {
+  if (s.kind === "curve") return [{ x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }, curvePoints(s).apex];
   if (LINEAR.includes(s.kind)) return [{ x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }];
   return corners(bounds(ctx, s));
 }
@@ -127,7 +128,8 @@ export function resizeShape(
 ): Shape {
   const s: Shape = structuredClone(original);
   if (LINEAR.includes(s.kind)) {
-    if (handle === 0) [s.x1, s.y1] = [to.x, to.y];
+    if (handle === 2) s.bend = bendTowards(s, to);
+    else if (handle === 0) [s.x1, s.y1] = [to.x, to.y];
     else [s.x2, s.y2] = [to.x, to.y];
     return s;
   }

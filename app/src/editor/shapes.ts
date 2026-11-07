@@ -3,6 +3,7 @@
 
 export type ShapeKind =
   | "arrow"
+  | "curve"
   | "line"
   | "rect"
   | "ellipse"
@@ -38,6 +39,9 @@ export interface Shape {
   points?: Point[];
   text?: string;
   n?: number;
+  /** Curved arrow: how far its middle sits from the straight line, as a
+   * share of its length (negative: the other side). */
+  bend?: number;
 }
 
 export interface Rect {
@@ -54,7 +58,42 @@ export const FREEHAND: ShapeKind[] = ["pen", "highlight"];
 /** Width of the highlighter stroke for a given size. */
 export const markerWidth = (size: number) => size * 5;
 /** Shapes defined by two end points. */
-export const LINEAR: ShapeKind[] = ["arrow", "line"];
+export const LINEAR: ShapeKind[] = ["arrow", "curve", "line"];
+
+/** Bend of a new curved arrow. */
+export const DEFAULT_BEND = 0.25;
+
+/** Middle of a curved arrow (on the curve) and its quadratic control point. */
+export function curvePoints(s: Shape): { apex: Point; control: Point } {
+  const dx = s.x2 - s.x1;
+  const dy = s.y2 - s.y1;
+  const bend = s.bend ?? DEFAULT_BEND;
+  const mx = (s.x1 + s.x2) / 2;
+  const my = (s.y1 + s.y2) / 2;
+  // Perpendicular to the line, scaled by its length.
+  const apex = { x: mx - dy * bend, y: my + dx * bend };
+  return { apex, control: { x: 2 * apex.x - mx, y: 2 * apex.y - my } };
+}
+
+/** Bend that puts the middle of a curved arrow at `p`. */
+export function bendTowards(s: Shape, p: Point): number {
+  const dx = s.x2 - s.x1;
+  const dy = s.y2 - s.y1;
+  const len2 = dx * dx + dy * dy;
+  if (!len2) return 0;
+  const bend = ((p.x - (s.x1 + s.x2) / 2) * -dy + (p.y - (s.y1 + s.y2) / 2) * dx) / len2;
+  return Math.max(-1.5, Math.min(1.5, bend));
+}
+
+/** Points along a curved arrow, for hit testing and bounds. */
+function curveSamples(s: Shape, count = 24): Point[] {
+  const { control: c } = curvePoints(s);
+  return Array.from({ length: count + 1 }, (_, i) => {
+    const t = i / count;
+    const u = 1 - t;
+    return { x: u * u * s.x1 + 2 * u * t * c.x + t * t * s.x2, y: u * u * s.y1 + 2 * u * t * c.y + t * t * s.y2 };
+  });
+}
 
 export const normalize = (s: { x1: number; y1: number; x2: number; y2: number }): Rect => ({
   x: Math.min(s.x1, s.x2),
@@ -94,6 +133,13 @@ export function bounds(ctx: CanvasRenderingContext2D, s: Shape): Rect {
     const r = badgeRadius(s.size);
     return { x: s.x1 - r, y: s.y1 - r, w: 2 * r, h: 2 * r };
   }
+  if (s.kind === "curve") {
+    const pts = curveSamples(s);
+    const pad = s.size + 6;
+    const x = Math.min(...pts.map((q) => q.x)) - pad;
+    const y = Math.min(...pts.map((q) => q.y)) - pad;
+    return { x, y, w: Math.max(...pts.map((q) => q.x)) + pad - x, h: Math.max(...pts.map((q) => q.y)) + pad - y };
+  }
   if (FREEHAND.includes(s.kind) && s.points?.length) {
     const xs = s.points.map((p) => p.x);
     const ys = s.points.map((p) => p.y);
@@ -117,6 +163,10 @@ function distanceToSegment(p: Point, a: Point, b: Point) {
 
 /** Whether `p` touches the shape (lines are hit near the stroke only). */
 export function hit(ctx: CanvasRenderingContext2D, s: Shape, p: Point, slack: number) {
+  if (s.kind === "curve") {
+    const pts = curveSamples(s);
+    return pts.some((a, i) => i > 0 && distanceToSegment(p, pts[i - 1] ?? a, a) <= s.size / 2 + slack);
+  }
   if (LINEAR.includes(s.kind)) {
     return distanceToSegment(p, { x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }) <= s.size / 2 + slack;
   }
@@ -199,6 +249,30 @@ function arrow(ctx: CanvasRenderingContext2D, s: Shape) {
   ctx.fill();
 }
 
+/** Arrow along a curve; the head follows the curve's direction at its end. */
+function curvedArrow(ctx: CanvasRenderingContext2D, s: Shape) {
+  const { control: c } = curvePoints(s);
+  const length = Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
+  const head = Math.min(length * 0.5, 10 + s.size * 3);
+  let angle = Math.atan2(s.y2 - c.y, s.x2 - c.x);
+  if (Math.hypot(s.x2 - c.x, s.y2 - c.y) < 1) angle = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
+  // The curve ends inside the head so its end does not poke out.
+  const ex = s.x2 - Math.cos(angle) * head * 0.6;
+  const ey = s.y2 - Math.sin(angle) * head * 0.6;
+  ctx.beginPath();
+  ctx.moveTo(s.x1, s.y1);
+  ctx.quadraticCurveTo(c.x, c.y, ex, ey);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(s.x2, s.y2);
+  for (const side of [-1, 1]) {
+    const a = angle + Math.PI - side * 0.45;
+    ctx.lineTo(s.x2 + Math.cos(a) * head, s.y2 + Math.sin(a) * head);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
 /** Smooth freehand path through the midpoints of the samples. */
 function pen(ctx: CanvasRenderingContext2D, points: Point[]) {
   const [first, ...rest] = points;
@@ -266,6 +340,11 @@ export function renderAnnotations(ctx: CanvasRenderingContext2D, shapes: Shape[]
         ctx.shadowColor = "rgba(0,0,0,0.35)";
         ctx.shadowBlur = s.size;
         arrow(ctx, s);
+        break;
+      case "curve":
+        ctx.shadowColor = "rgba(0,0,0,0.35)";
+        ctx.shadowBlur = s.size;
+        curvedArrow(ctx, s);
         break;
       case "line":
         ctx.beginPath();

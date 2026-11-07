@@ -19,11 +19,12 @@
     padding: 0 4px;
     border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
     border-bottom-width: 2px;
-    border-radius: 4px;
+    border-radius: var(--radius);
     font-family: var(--font-mono);
     font-size: 10px;
     line-height: 15px;
-    opacity: 0.8;
+    font-weight: 600;
+    opacity: 0.9;
   }
   .plus {
     font-size: 9px;
