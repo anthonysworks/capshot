@@ -40,6 +40,8 @@ pub struct CaptureRequest {
     pub countdown_secs: u32,
     pub system_audio: bool,
     pub microphone: bool,
+    /// Light theme for the toolbar.
+    pub light: bool,
     /// When the user asked for the capture, to measure latency.
     pub requested_at: Instant,
 }
@@ -201,4 +203,26 @@ impl Drop for Overlay {
     fn drop(&mut self) {
         self.post(window::WM_KADRA_QUIT);
     }
+}
+
+/// Whether Windows apps use the light theme (Settings › Personalisation ›
+/// Colours); dark when it cannot be read.
+pub fn system_uses_light_theme() -> bool {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    use windows::core::w;
+    let mut value: u32 = 0;
+    let mut size = u32::try_from(std::mem::size_of::<u32>()).unwrap_or(4);
+    // SAFETY: the out-pointers point at `value` and `size`, which outlive the call.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut value).cast()),
+            Some(&raw mut size),
+        )
+    };
+    result.is_ok() && value != 0
 }

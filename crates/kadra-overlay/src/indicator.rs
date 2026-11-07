@@ -19,7 +19,7 @@ use kadra_core::{Point, Rect};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DWMWCP_ROUND, DwmSetWindowAttribute,
+    DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CreateFontW, CreateSolidBrush, DT_CENTER, DT_SINGLELINE,
@@ -41,11 +41,11 @@ const FRAME_CLASS: PCWSTR = w!("KadraRecordingFrame");
 const TICK_TIMER: usize = 1;
 
 // GDI colours are 0x00BBGGRR.
-const RED: COLORREF = COLORREF(0x004d_48e5); // #E5484D
+const RED: COLORREF = COLORREF(0x0023_11e8); // #E81123
 const AMBER: COLORREF = COLORREF(0x0000_b0ff); // #FFB000
-const PANEL: COLORREF = COLORREF(0x0020_2020);
+const PANEL: COLORREF = COLORREF(0x0011_0d0c); // #0C0D11
 const WHITE: COLORREF = COLORREF(0x00ff_ffff);
-const BUTTON: COLORREF = COLORREF(0x0040_4040);
+const BUTTON: COLORREF = COLORREF(0x0030_2b28); // #282B30
 
 /// What a click on the indicator asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +191,8 @@ pub struct Indicator {
 impl Indicator {
     pub fn new(instance: HINSTANCE) -> windows::core::Result<Self> {
         let pill = create(instance, PILL_CLASS, 0)?;
-        let round = DWMWCP_ROUND;
+        // Square, like the rest of Kadra.
+        let round = DWMWCP_DONOTROUND;
         // SAFETY: valid attribute value for our window.
         unsafe {
             let _ = DwmSetWindowAttribute(

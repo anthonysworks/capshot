@@ -42,6 +42,8 @@ fn scene<'a>(
         countdown: 3,
         system_audio: true,
         microphone: false,
+        // `LIGHT=1` renders the light theme.
+        light: std::env::var_os("LIGHT").is_some(),
     }
 }
 

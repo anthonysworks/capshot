@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use kadra_core::{BgraImage, Point, Rect};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
@@ -56,7 +56,7 @@ const AFTER_HOVER_MS: u32 = 2500;
 const COLOUR_VISIBLE_MS: u32 = 2500;
 const HIDE_TIMER: usize = 1;
 
-const BACKGROUND: COLORREF = COLORREF(0x0020_2020);
+const BACKGROUND: COLORREF = COLORREF(0x0011_0d0c); // #0C0D11
 /// Checkerboard behind transparent pixels (freeform captures).
 const CHECKER: [u8; 2] = [0x2b, 0x38];
 
@@ -97,7 +97,8 @@ pub fn create_window(
             Some(instance),
             None,
         )?;
-        let round = DWMWCP_ROUND;
+        // Square, like the rest of Kadra.
+        let round = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,

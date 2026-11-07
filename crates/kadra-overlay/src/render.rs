@@ -48,22 +48,52 @@ const fn rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     }
 }
 
-const ACCENT: D2D1_COLOR_F = rgba(0x4f, 0x7c, 0xff, 1.0);
-const RECORD: D2D1_COLOR_F = rgba(0xe5, 0x48, 0x4d, 1.0);
+/// Xbox green: screenshots, the active tool.
+const ACCENT: D2D1_COLOR_F = rgba(0x10, 0x7c, 0x10, 1.0);
+const RECORD: D2D1_COLOR_F = rgba(0xe8, 0x11, 0x23, 1.0);
 const DIM: D2D1_COLOR_F = rgba(0, 0, 0, 0.5);
 const WHITE: D2D1_COLOR_F = rgba(255, 255, 255, 1.0);
 const BLACK: D2D1_COLOR_F = rgba(0, 0, 0, 1.0);
-const PANEL: D2D1_COLOR_F = rgba(0x20, 0x20, 0x20, 0.94);
-const PANEL_BORDER: D2D1_COLOR_F = rgba(255, 255, 255, 0.12);
-const BUTTON_HOVER: D2D1_COLOR_F = rgba(255, 255, 255, 0.1);
-/// Background of a toggle that is on.
-const TOGGLE_ON: D2D1_COLOR_F = rgba(255, 255, 255, 0.16);
-/// Glyph of a toggle that is off.
-const MUTED: D2D1_COLOR_F = rgba(0xe5, 0x48, 0x4d, 1.0);
-const SEPARATOR: D2D1_COLOR_F = rgba(255, 255, 255, 0.16);
-/// Label of a text toggle that is off.
-const DIMMED: D2D1_COLOR_F = rgba(255, 255, 255, 0.5);
-const LABEL: D2D1_COLOR_F = rgba(0x14, 0x14, 0x14, 0.86);
+/// Toolbar colours of a theme (see `docs/UI_DESIGN.md`).
+struct Palette {
+    panel: D2D1_COLOR_F,
+    border: D2D1_COLOR_F,
+    hover: D2D1_COLOR_F,
+    /// Background of a toggle that is on.
+    toggle_on: D2D1_COLOR_F,
+    separator: D2D1_COLOR_F,
+    text: D2D1_COLOR_F,
+    /// Label of a text toggle that is off.
+    dimmed: D2D1_COLOR_F,
+    /// Glyph of a toggle that is off.
+    muted: D2D1_COLOR_F,
+}
+
+const DARK: Palette = Palette {
+    panel: rgba(0x0c, 0x0d, 0x11, 0.97),
+    border: rgba(255, 255, 255, 0.2),
+    hover: rgba(255, 255, 255, 0.1),
+    toggle_on: rgba(255, 255, 255, 0.16),
+    separator: rgba(255, 255, 255, 0.18),
+    text: WHITE,
+    dimmed: rgba(255, 255, 255, 0.6),
+    muted: rgba(0xff, 0x5a, 0x5f, 1.0),
+};
+
+const LIGHT: Palette = Palette {
+    panel: rgba(0xf7, 0xf7, 0xf7, 0.98),
+    border: rgba(0, 0, 0, 0.25),
+    hover: rgba(0, 0, 0, 0.07),
+    toggle_on: rgba(0, 0, 0, 0.12),
+    separator: rgba(0, 0, 0, 0.18),
+    text: rgba(0x10, 0x10, 0x10, 1.0),
+    dimmed: rgba(0x10, 0x10, 0x10, 0.55),
+    muted: rgba(0xc5, 0x0f, 0x1f, 1.0),
+};
+
+const fn palette(light: bool) -> &'static Palette {
+    if light { &LIGHT } else { &DARK }
+}
 
 const TEXT_FONT: &str = "Segoe UI Variable Text";
 const ICON_FONT: &str = "Segoe Fluent Icons";
@@ -122,6 +152,8 @@ pub struct Scene<'a> {
     pub countdown: u32,
     pub system_audio: bool,
     pub microphone: bool,
+    /// Light theme for the toolbar and labels.
+    pub light: bool,
 }
 
 /// The frozen desktop, uploaded to the GPU once per capture.
@@ -421,8 +453,10 @@ impl Renderer {
             (22.0 * scene.scale).round() as i32,
         );
         let label = size_label(rect, scene.bounds, size, scene.scale);
-        self.pill(label, LABEL, 4.0 * scene.scale);
-        self.text(&text, &format, rect_f(label), WHITE);
+        let p = palette(scene.light);
+        self.pill(label, p.panel, 2.0 * scene.scale);
+        self.frame(label, p.border, 1.0);
+        self.text(&text, &format, rect_f(label), p.text);
         Ok(())
     }
 
@@ -436,19 +470,21 @@ impl Renderer {
         unsafe { self.dc.FillRoundedRectangle(&rounded, &self.color(color)) };
     }
 
-    fn draw_toolbar(&self, bar: &Toolbar, scene: &Scene<'_>, accent: D2D1_COLOR_F) -> Result<()> {
-        let s = bar.scale;
-        let rounded = D2D1_ROUNDED_RECT {
-            rect: rect_f(bar.frame),
-            radiusX: 8.0 * s,
-            radiusY: 8.0 * s,
-        };
+    /// Outline of a square, inside `r`.
+    fn frame(&self, r: Rect, color: D2D1_COLOR_F, width: f32) {
         // SAFETY: drawing inside BeginDraw/EndDraw.
         unsafe {
-            self.dc.FillRoundedRectangle(&rounded, &self.color(PANEL));
             self.dc
-                .DrawRoundedRectangle(&rounded, &self.color(PANEL_BORDER), 1.0, None);
+                .DrawRectangle(&outline(r, width), &self.color(color), width, None);
         }
+    }
+
+    fn draw_toolbar(&self, bar: &Toolbar, scene: &Scene<'_>, accent: D2D1_COLOR_F) -> Result<()> {
+        let s = bar.scale;
+        let p = palette(scene.light);
+        // Square, like the rest of Kadra (docs/UI_DESIGN.md).
+        self.pill(bar.frame, p.panel, 2.0 * s);
+        self.frame(bar.frame, p.border, 1.0);
         #[allow(clippy::cast_precision_loss)]
         for &x in &bar.separators {
             let x = x as f32 + 0.5;
@@ -464,7 +500,7 @@ impl Renderer {
                         X: x,
                         Y: bar.frame.bottom as f32 - inset,
                     },
-                    &self.color(SEPARATOR),
+                    &self.color(p.separator),
                     1.0,
                     None,
                 );
@@ -483,22 +519,27 @@ impl Renderer {
                 Button::Purpose(purpose) => purpose == scene.purpose,
                 _ => false,
             };
+            let hovered = scene.toolbar_hover == Some(button);
             if active {
-                self.pill(rect, accent, 4.0 * s);
-            } else if scene.toolbar_hover == Some(button) {
-                self.pill(rect, BUTTON_HOVER, 4.0 * s);
+                self.pill(rect, accent, 2.0 * s);
+            } else if hovered {
+                self.pill(rect, p.hover, 2.0 * s);
             } else if toggle == Some(true) {
-                self.pill(rect, TOGGLE_ON, 4.0 * s);
+                self.pill(rect, p.toggle_on, 2.0 * s);
+            }
+            // Xbox-like focus frame on the button under the pointer.
+            if hovered {
+                self.frame(rect, if active { WHITE } else { p.text }, (2.0 * s).round().max(1.0));
             }
             if button == Button::Gif {
                 let label = self.format(Font::Label, 11.0 * s)?;
-                let colour = if toggle == Some(true) { WHITE } else { DIMMED };
+                let colour = if toggle == Some(true) { p.text } else { p.dimmed };
                 self.text("GIF", &label, rect_f(rect), colour);
                 continue;
             }
             if button == Button::Fps {
                 let label = self.format(Font::Label, 12.0 * s)?;
-                self.text(&format!("{} fps", scene.fps), &label, rect_f(rect), WHITE);
+                self.text(&format!("{} fps", scene.fps), &label, rect_f(rect), p.text);
                 continue;
             }
             if button == Button::Countdown {
@@ -506,7 +547,7 @@ impl Renderer {
                 let mut glyph = rect_f(rect);
                 glyph.right = glyph.left + 22.0 * s;
                 glyph.left += 4.0 * s;
-                let colour = if scene.countdown == 0 { DIMMED } else { WHITE };
+                let colour = if scene.countdown == 0 { p.dimmed } else { p.text };
                 self.text(
                     "\u{E916}",
                     &self.format(Font::Icon, 14.0 * s)?,
@@ -520,15 +561,16 @@ impl Renderer {
                 continue;
             }
             let colour = match (active, toggle) {
-                (true, _) => BLACK,
-                (_, Some(false)) => MUTED,
-                _ => WHITE,
+                (true, _) => WHITE,
+                (_, Some(false)) => p.muted,
+                _ => p.text,
             };
             let glyph = icon(button, toggle.unwrap_or(true)).to_string();
             self.text(&glyph, &format, rect_f(rect), colour);
         }
         Ok(())
     }
+
 
     #[allow(
         clippy::cast_precision_loss,
@@ -570,7 +612,9 @@ impl Renderer {
             dc.DrawRectangle(&outline(m.frame, 2.0), &self.color(WHITE), 2.0, None);
         }
 
-        self.pill(m.info, LABEL, 4.0 * scene.scale);
+        let p = palette(scene.light);
+        self.pill(m.info, p.panel, 2.0 * scene.scale);
+        self.frame(m.info, p.border, 1.0);
         let cursor = scene.selection.cursor();
         let pad = 8.0 * scene.scale;
         let mut text_left = m.info.left as f32 + pad;
@@ -589,7 +633,7 @@ impl Renderer {
                     self.dc
                         .FillRectangle(&rect_f(swatch), &self.color(rgba(r, g, b, 1.0)));
                     self.dc
-                        .DrawRectangle(&rect_f(swatch), &self.color(PANEL_BORDER), 1.0, None);
+                        .DrawRectangle(&rect_f(swatch), &self.color(p.border), 1.0, None);
                 }
                 text_left = swatch.right as f32 + pad * 0.75;
                 format!("#{r:02X}{g:02X}{b:02X}")
@@ -603,7 +647,7 @@ impl Renderer {
             &format!("{text}\n{}, {}", cursor.x, cursor.y),
             &format,
             info,
-            WHITE,
+            p.text,
         );
         Ok(())
     }
@@ -657,7 +701,8 @@ impl Renderer {
                 fps: 60,
                 countdown: 3,
                 system_audio: true,
-                microphone: false,
+                microphone: selection.mode() == Mode::Freeform,
+                light: selection.mode() == Mode::Freeform,
             };
             self.render_to_image(&scene, &shot)?;
         }

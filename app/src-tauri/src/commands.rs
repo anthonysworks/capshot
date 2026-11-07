@@ -54,6 +54,8 @@ pub fn save_config(
         .map_err(|e| e.to_string())?;
     *state.config() = config;
     tray::refresh(&app);
+    // Open windows follow the change (theme, toolbar toggles).
+    let _ = tauri::Emitter::emit(&app, crate::recording::CONFIG_EVENT, &*state.config());
     tracing::info!("settings saved");
     Ok(())
 }

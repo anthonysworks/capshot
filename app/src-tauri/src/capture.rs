@@ -43,6 +43,7 @@ impl CaptureService {
             countdown_secs: options.countdown_secs,
             system_audio: options.system_audio,
             microphone: options.microphone,
+            light: options.light,
             requested_at: Instant::now(),
         });
     }
@@ -94,6 +95,7 @@ pub struct Options {
     countdown_secs: u32,
     system_audio: bool,
     microphone: bool,
+    light: bool,
 }
 
 /// Opens the overlay for `purpose` (after the configured delay for a
@@ -117,6 +119,11 @@ pub fn start(app: &AppHandle, purpose: Purpose) {
                 countdown_secs: config.recording.countdown_secs,
                 system_audio: config.recording.system_audio,
                 microphone: config.recording.microphone,
+                light: match config.appearance.theme {
+                    kadra_core::Theme::Light => true,
+                    kadra_core::Theme::Dark => false,
+                    kadra_core::Theme::System => kadra_overlay::system_uses_light_theme(),
+                },
             },
         )
     };

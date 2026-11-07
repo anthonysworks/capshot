@@ -41,9 +41,27 @@ pub enum ConfigError {
 #[serde(default)]
 pub struct Config {
     pub hotkeys: Hotkeys,
+    pub appearance: Appearance,
     pub capture: CaptureSettings,
     pub recording: RecordingSettings,
     pub gif: GifSettings,
+}
+
+/// How the windows look.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub theme: Theme,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Follows the Windows setting.
+    #[default]
+    System,
+    Dark,
+    Light,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

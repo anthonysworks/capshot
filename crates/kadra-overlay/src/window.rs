@@ -250,6 +250,7 @@ impl Session {
             countdown: self.countdown,
             system_audio: self.system_audio,
             microphone: self.microphone,
+            light: self.request.light,
         }
     }
 

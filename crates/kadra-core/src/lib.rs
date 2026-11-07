@@ -12,7 +12,8 @@ pub mod logging;
 pub mod paths;
 
 pub use config::{
-    AfterCapture, Config, ConfigError, GifSettings, ImageFormat, RecordingFormat, VideoCodec,
+    AfterCapture, Appearance, Config, ConfigError, GifSettings, ImageFormat, RecordingFormat, Theme,
+    VideoCodec,
 };
 pub use geometry::{Point, Rect};
 pub use history::History;
