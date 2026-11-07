@@ -106,7 +106,7 @@ pub fn open(app: &AppHandle, path: &Path) {
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let result = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title(format!("{name} — Kadra"))
+        .title(format!("Kadra Editor · {name}"))
         .inner_size(1100.0, 760.0)
         .min_inner_size(640.0, 480.0)
         .center()

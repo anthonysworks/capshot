@@ -327,6 +327,7 @@ pub fn export(
         output.unwrap_or_else(|| crate::saving::export_path(app, &input, extension(&task)));
     // Holds the name, so that two exports started together never share it.
     let _ = std::fs::File::create(&output);
+    crate::saving::export_started(app, &input);
     start(app, input, output, task, copy)
 }
 
@@ -338,6 +339,8 @@ fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task, copy: boo
     let job = NEXT.fetch_add(1, Ordering::Relaxed);
     let app = app.clone();
     std::thread::spawn(move || {
+        // The draft being exported may go once this job ends.
+        let _ended = Ended(&app, &input);
         let label = input.display().to_string();
         let report = |done: f32, output: Option<String>, bytes, error| {
             let _ = app.emit(
@@ -374,7 +377,6 @@ fn start(app: &AppHandle, input: PathBuf, output: PathBuf, task: Task, copy: boo
                 let bytes = std::fs::metadata(&request.output).map_or(0, |m| m.len());
                 tracing::info!(path = %request.output.display(), bytes, "video job done");
                 crate::capture::remember(&app, &request.output, width, height);
-                crate::saving::exported(&app, &input);
                 if copy && let Some(service) = app.try_state::<CaptureService>() {
                     service.copy_files(vec![request.output.clone()]);
                 }
@@ -435,6 +437,15 @@ fn run_child(request: &Request, mut progress: impl FnMut(f32)) -> Result<Event, 
         Some(Event::Error { message }) => Err(message),
         Some(event) => Ok(event),
         None => Err("the converter stopped unexpectedly".into()),
+    }
+}
+
+/// Tells [`crate::saving`] that a job on a file ended, however it ended.
+struct Ended<'a>(&'a AppHandle, &'a Path);
+
+impl Drop for Ended<'_> {
+    fn drop(&mut self) {
+        crate::saving::export_ended(self.0, self.1);
     }
 }
 

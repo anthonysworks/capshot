@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions granted to the settings and editor windows.",
   "windows": ["settings", "editor-*"],
-  "permissions": ["core:default", "core:window:allow-destroy"]
+  "permissions": ["core:default", "core:window:allow-destroy", "core:window:allow-set-title"]
 }

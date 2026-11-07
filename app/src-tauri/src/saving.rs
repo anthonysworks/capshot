@@ -2,10 +2,9 @@
 //!
 //! A recording that opens in the editor is a *draft*: it is recorded into
 //! the drafts folder, not the destination folder. Only what the user
-//! exports reaches the destination, so a recording and its edited version
-//! never both take up space. Closing the editor without exporting saves
-//! the recording as it is (nothing is ever lost silently); *Discard*
-//! deletes it.
+//! saves reaches the destination, so a recording and its edited version
+//! never both take up space. Closing the editor deletes the draft (the
+//! editor asks first when nothing was saved).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,8 +20,10 @@ use crate::state::AppState;
 struct Draft {
     /// Size of the video, for the history.
     size: (u32, u32),
-    /// Something was exported from it.
-    exported: bool,
+    /// Exports of it still running.
+    running: u32,
+    /// Its editor closed while exports were running.
+    closed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -49,19 +50,14 @@ impl Saving {
             crate::editor::normalize(path),
             Draft {
                 size,
-                exported: false,
+                running: 0,
+                closed: false,
             },
         );
     }
 
     pub fn is_draft(&self, path: &Path) -> bool {
         self.lock().drafts.contains_key(path)
-    }
-
-    fn mark_exported(&self, path: &Path) {
-        if let Some(draft) = self.lock().drafts.get_mut(path) {
-            draft.exported = true;
-        }
     }
 
     fn take_draft(&self, path: &Path) -> Option<Draft> {
@@ -130,11 +126,6 @@ pub fn export_path(app: &AppHandle, input: &Path, extension: &str) -> PathBuf {
     kadra_encode::unique_path(&dir, &stem, extension)
 }
 
-/// An export of `input` finished.
-pub fn exported(app: &AppHandle, input: &Path) {
-    app.state::<Saving>().mark_exported(input);
-}
-
 /// Asks for a destination folder for the exports of `input`.
 pub fn choose_folder(app: &AppHandle, input: &Path) -> Option<PathBuf> {
     let current = folder_for(app, input);
@@ -184,7 +175,6 @@ pub fn save_copy(app: &AppHandle, input: &Path) -> std::io::Result<PathBuf> {
     let target = export_path(app, input, "mp4");
     std::fs::copy(input, &target)?;
     remember(app, input, &target);
-    exported(app, input);
     Ok(target)
 }
 
@@ -228,46 +218,56 @@ fn delete_file(path: &Path) {
     tracing::warn!("cannot delete {}", path.display());
 }
 
-/// The editor of `input` closed: an exported draft is deleted, any other
-/// draft is saved as recorded.
+/// The editor of `input` closed: the draft is deleted (only what was
+/// saved from the editor stays), once its running exports are done.
 pub fn editor_closed(app: &AppHandle, input: &Path) {
-    let Some(draft) = app.state::<Saving>().take_draft(input) else {
-        return;
-    };
-    let app = app.clone();
-    let input = input.to_path_buf();
-    let folder = folder_for(&app, &input);
-    std::thread::spawn(move || {
-        let paths = app.state::<AppState>().paths().clone();
-        let (clean, track) = crate::editor::edit_files(&paths, &input);
-        if draft.exported {
-            delete_file(&input);
-            delete_file(&clean);
-            delete_file(&track);
-            tracing::info!(path = %input.display(), "draft discarded after export");
+    let saving = app.state::<Saving>();
+    {
+        let mut inner = saving.lock();
+        if let Some(draft) = inner.drafts.get_mut(input)
+            && draft.running > 0
+        {
+            draft.closed = true;
             return;
         }
-        let _ = std::fs::create_dir_all(&folder);
-        let target = kadra_encode::unique_path(&folder, &stem_of(&input), "mp4");
-        match move_file(&input, &target) {
-            Ok(()) => {
-                tracing::info!(path = %target.display(), "recording saved as recorded");
-                crate::capture::remember(&app, &target, draft.size.0, draft.size.1);
-                // The editing material follows the file's name.
-                let (new_clean, new_track) = crate::editor::edit_files(&paths, &target);
-                let _ = std::fs::rename(&clean, new_clean);
-                let _ = std::fs::rename(&track, new_track);
-            }
-            Err(err) => tracing::error!("cannot save {}: {err}", input.display()),
-        }
-    });
+    }
+    if saving.take_draft(input).is_some() {
+        delete_draft(app, input);
+    }
 }
 
 /// Deletes a draft and its editing material (the user discarded it).
 pub fn discard(app: &AppHandle, input: &Path) -> bool {
-    if app.state::<Saving>().take_draft(input).is_none() {
-        return false;
+    editor_closed(app, input);
+    true
+}
+
+/// An export of `input` started: its draft stays until the export ends.
+pub fn export_started(app: &AppHandle, input: &Path) {
+    if let Some(draft) = app.state::<Saving>().lock().drafts.get_mut(input) {
+        draft.running += 1;
     }
+}
+
+/// An export of `input` ended; the draft goes if its editor already closed.
+pub fn export_ended(app: &AppHandle, input: &Path) {
+    let saving = app.state::<Saving>();
+    let gone = {
+        let mut inner = saving.lock();
+        match inner.drafts.get_mut(input) {
+            Some(draft) => {
+                draft.running = draft.running.saturating_sub(1);
+                draft.closed && draft.running == 0
+            }
+            None => false,
+        }
+    };
+    if gone && saving.take_draft(input).is_some() {
+        delete_draft(app, input);
+    }
+}
+
+fn delete_draft(app: &AppHandle, input: &Path) {
     let paths = app.state::<AppState>().paths().clone();
     let input = input.to_path_buf();
     std::thread::spawn(move || {
@@ -275,9 +275,8 @@ pub fn discard(app: &AppHandle, input: &Path) -> bool {
         delete_file(&input);
         delete_file(&clean);
         delete_file(&track);
-        tracing::info!(path = %input.display(), "draft discarded");
+        tracing::info!(path = %input.display(), "draft deleted");
     });
-    true
 }
 
 /// Drafts left by a previous session (Kadra quit with an editor open) are
