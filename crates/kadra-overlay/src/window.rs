@@ -470,6 +470,11 @@ impl State {
                                 tracing::warn!("cannot copy to the clipboard: {err}");
                             }
                         }
+                        Command::CopyText(text) => {
+                            if let Err(err) = clipboard::set_text(self.hwnd, &text) {
+                                tracing::warn!("cannot copy to the clipboard: {err}");
+                            }
+                        }
                         Command::HideIndicator => self.indicator.hide(),
                     }
                 }
@@ -952,6 +957,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let (result, request) = state.indicator.handle(hwnd, msg, lparam)?;
             match request {
                 Some(indicator::Request::Stop) => (state.handler)(CaptureResult::StopRecording),
+                Some(indicator::Request::Discard) => {
+                    (state.handler)(CaptureResult::DiscardRecording);
+                }
                 Some(indicator::Request::TogglePause) => {
                     (state.handler)(CaptureResult::TogglePause);
                 }

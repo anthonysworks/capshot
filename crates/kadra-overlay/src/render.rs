@@ -454,8 +454,8 @@ impl Renderer {
         );
         let label = size_label(rect, scene.bounds, size, scene.scale);
         let p = palette(scene.light);
-        self.pill(label, p.panel, 2.0 * scene.scale);
-        self.frame(label, p.border, 1.0);
+        self.pill(label, p.panel, 8.0 * scene.scale);
+        self.rounded_outline(label, p.border, 8.0 * scene.scale);
         self.text(&text, &format, rect_f(label), p.text);
         Ok(())
     }
@@ -470,6 +470,20 @@ impl Renderer {
         unsafe { self.dc.FillRoundedRectangle(&rounded, &self.color(color)) };
     }
 
+    /// Hairline outline of a rounded rectangle, inside `r`.
+    fn rounded_outline(&self, r: Rect, color: D2D1_COLOR_F, radius: f32) {
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: outline(r, 1.0),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        // SAFETY: drawing inside BeginDraw/EndDraw.
+        unsafe {
+            self.dc
+                .DrawRoundedRectangle(&rounded, &self.color(color), 1.0, None);
+        }
+    }
+
     /// Outline of a square, inside `r`.
     fn frame(&self, r: Rect, color: D2D1_COLOR_F, width: f32) {
         // SAFETY: drawing inside BeginDraw/EndDraw.
@@ -482,9 +496,9 @@ impl Renderer {
     fn draw_toolbar(&self, bar: &Toolbar, scene: &Scene<'_>, accent: D2D1_COLOR_F) -> Result<()> {
         let s = bar.scale;
         let p = palette(scene.light);
-        // Square, like the rest of Kadra (docs/UI_DESIGN.md).
-        self.pill(bar.frame, p.panel, 2.0 * s);
-        self.frame(bar.frame, p.border, 1.0);
+        // Soft corners, like the rest of Kadra (docs/UI_DESIGN.md).
+        self.pill(bar.frame, p.panel, 12.0 * s);
+        self.rounded_outline(bar.frame, p.border, 12.0 * s);
         #[allow(clippy::cast_precision_loss)]
         for &x in &bar.separators {
             let x = x as f32 + 0.5;
@@ -521,19 +535,19 @@ impl Renderer {
             };
             let hovered = scene.toolbar_hover == Some(button);
             if active {
-                self.pill(rect, accent, 2.0 * s);
+                self.pill(rect, accent, 8.0 * s);
             } else if hovered {
-                self.pill(rect, p.hover, 2.0 * s);
+                self.pill(rect, p.hover, 8.0 * s);
             } else if toggle == Some(true) {
-                self.pill(rect, p.toggle_on, 2.0 * s);
-            }
-            // Xbox-like focus frame on the button under the pointer.
-            if hovered {
-                self.frame(rect, if active { WHITE } else { p.text }, (2.0 * s).round().max(1.0));
+                self.pill(rect, p.toggle_on, 8.0 * s);
             }
             if button == Button::Gif {
                 let label = self.format(Font::Label, 11.0 * s)?;
-                let colour = if toggle == Some(true) { p.text } else { p.dimmed };
+                let colour = if toggle == Some(true) {
+                    p.text
+                } else {
+                    p.dimmed
+                };
                 self.text("GIF", &label, rect_f(rect), colour);
                 continue;
             }
@@ -547,7 +561,11 @@ impl Renderer {
                 let mut glyph = rect_f(rect);
                 glyph.right = glyph.left + 22.0 * s;
                 glyph.left += 4.0 * s;
-                let colour = if scene.countdown == 0 { p.dimmed } else { p.text };
+                let colour = if scene.countdown == 0 {
+                    p.dimmed
+                } else {
+                    p.text
+                };
                 self.text(
                     "\u{E916}",
                     &self.format(Font::Icon, 14.0 * s)?,
@@ -570,7 +588,6 @@ impl Renderer {
         }
         Ok(())
     }
-
 
     #[allow(
         clippy::cast_precision_loss,

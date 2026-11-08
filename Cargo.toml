@@ -28,6 +28,7 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 windows = "0.62.2"
+rqrr = "0.11.0"
 
 tauri = { version = "2.12.5", features = ["tray-icon", "protocol-asset"] }
 tauri-build = { version = "2.7.4", features = [] }

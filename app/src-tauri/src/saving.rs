@@ -178,6 +178,24 @@ pub fn save_copy(app: &AppHandle, input: &Path) -> std::io::Result<PathBuf> {
     Ok(target)
 }
 
+/// Moves a draft to `target` for good, with its editing material (the
+/// editor can still change its cursor).
+pub fn keep_draft(app: &AppHandle, input: &Path, target: &Path) -> std::io::Result<()> {
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    move_file(input, target)?;
+    remember(app, input, target);
+    app.state::<Saving>().take_draft(input);
+    let state = app.state::<AppState>();
+    let paths = state.paths();
+    let (clean, track) = crate::editor::edit_files(paths, input);
+    let (new_clean, new_track) = crate::editor::edit_files(paths, target);
+    let _ = std::fs::rename(clean, new_clean);
+    let _ = std::fs::rename(track, new_track);
+    Ok(())
+}
+
 fn remember(app: &AppHandle, draft: &Path, target: &Path) {
     let size = app
         .state::<Saving>()

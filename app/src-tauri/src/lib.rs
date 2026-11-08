@@ -7,9 +7,11 @@ mod commands;
 mod convert;
 mod editor;
 mod hotkeys;
+mod quick;
 mod recorder_host;
 mod recording;
 mod saving;
+mod sounds;
 mod state;
 mod tray;
 mod windows;
@@ -22,6 +24,8 @@ use crate::capture::CaptureService;
 use crate::state::AppState;
 
 /// Entry point called from `main`.
+// One builder chain: the list of commands makes it long.
+#[allow(clippy::too_many_lines)]
 pub fn run() {
     let Some(paths) = Paths::resolve() else {
         // Without a user profile there is nowhere to store settings; this
@@ -88,6 +92,7 @@ pub fn run() {
         .manage(recording::RecorderState::default())
         .manage(editor::EditorFiles::default())
         .manage(saving::Saving::default())
+        .manage(quick::QuickFiles::default())
         .setup(move |app| {
             tray::create(app.handle())?;
             saving::recover(app.handle());
@@ -117,6 +122,8 @@ pub fn run() {
             commands::editor_read,
             commands::editor_save,
             commands::editor_save_copy,
+            commands::editor_image_save_as,
+            commands::editor_save_to,
             commands::editor_copy,
             commands::editor_export,
             commands::editor_copy_file,
@@ -124,6 +131,16 @@ pub fn run() {
             commands::editor_choose_folder,
             commands::editor_save_as,
             commands::editor_discard,
+            commands::quick_info,
+            commands::quick_save,
+            commands::quick_save_as,
+            commands::quick_copy,
+            commands::quick_edit,
+            commands::quick_pin,
+            commands::quick_text,
+            commands::quick_codes,
+            commands::quick_discard,
+            commands::copy_text,
         ])
         .build(tauri::generate_context!());
 

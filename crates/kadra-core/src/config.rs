@@ -16,6 +16,8 @@ pub const FPS_RANGE: std::ops::RangeInclusive<u32> = 1..=240;
 /// GIF delays are in hundredths of a second; browsers slow down anything
 /// faster than 50 FPS.
 pub const GIF_FPS_RANGE: std::ops::RangeInclusive<u32> = 1..=50;
+/// Layout of the configuration file written by this version.
+pub const CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -37,14 +39,31 @@ pub enum ConfigError {
     Invalid(String),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Layout of the file; older files are brought up to date when read
+    /// (missing: written before versions existed).
+    #[serde(default)]
+    pub version: u32,
     pub hotkeys: Hotkeys,
     pub appearance: Appearance,
     pub capture: CaptureSettings,
     pub recording: RecordingSettings,
     pub gif: GifSettings,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            version: CONFIG_VERSION,
+            hotkeys: Hotkeys::default(),
+            appearance: Appearance::default(),
+            capture: CaptureSettings::default(),
+            recording: RecordingSettings::default(),
+            gif: GifSettings::default(),
+        }
+    }
 }
 
 /// How the windows look.
@@ -99,8 +118,10 @@ pub struct CaptureSettings {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AfterCapture {
-    /// Open the capture in the editor.
+    /// Show what can be done with it: copy, save, edit, read its text…
     #[default]
+    Actions,
+    /// Open the capture in the editor.
     Editor,
     /// Copy it and show a thumbnail; clicking the thumbnail opens the editor.
     Preview,
@@ -117,7 +138,7 @@ impl Default for CaptureSettings {
             format: ImageFormat::Png,
             copy_to_clipboard: true,
             save_to_disk: true,
-            after_capture: AfterCapture::Editor,
+            after_capture: AfterCapture::Actions,
             delay_secs: 0,
         }
     }
@@ -297,11 +318,22 @@ impl Config {
         }
     }
 
+    /// Brings a file written by an older version up to date.
+    fn upgrade(&mut self) {
+        // Version 1: captures show their actions; opening the editor
+        // straight away was the old default.
+        if self.version < 1 && self.capture.after_capture == AfterCapture::Editor {
+            self.capture.after_capture = AfterCapture::Actions;
+        }
+        self.version = CONFIG_VERSION;
+    }
+
     fn parse(path: &Path, text: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(text).map_err(|source| ConfigError::Parse {
+        let mut config: Self = toml::from_str(text).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
+        config.upgrade();
         config.validate()?;
         Ok(config)
     }
@@ -316,7 +348,10 @@ impl Config {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(io_err)?;
         }
-        let text = toml::to_string_pretty(self)?;
+        let text = toml::to_string_pretty(&Self {
+            version: CONFIG_VERSION,
+            ..self.clone()
+        })?;
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, text).map_err(io_err)?;
         fs::rename(&tmp, path).map_err(io_err)
@@ -326,6 +361,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_files_show_actions_after_a_capture() {
+        let path = Path::new("config.toml");
+        let old = Config::parse(path, "[capture]\nafter_capture = \"editor\"\n").unwrap();
+        assert_eq!(old.capture.after_capture, AfterCapture::Actions);
+        assert_eq!(old.version, CONFIG_VERSION);
+        let text = "version = 1\n[capture]\nafter_capture = \"editor\"\n";
+        let chosen = Config::parse(path, text).unwrap();
+        assert_eq!(chosen.capture.after_capture, AfterCapture::Editor);
+    }
 
     fn temp_config() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();

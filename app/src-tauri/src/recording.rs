@@ -102,8 +102,13 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
         let stem = kadra_encode::file_stem(kadra_encode::now());
         let countdown = Duration::from_secs(u64::from(choices.countdown_secs));
         let extension = if gif { "gif" } else { "mp4" };
-        // Recordings that open in the editor are drafts until exported.
-        let draft = !gif && config.capture.after_capture == AfterCapture::Editor;
+        // Recordings that open in the editor or the quick actions are drafts
+        // until saved.
+        let draft = !gif
+            && matches!(
+                config.capture.after_capture,
+                AfterCapture::Editor | AfterCapture::Actions
+            );
         let output = if gif {
             kadra_encode::unique_path(&dir, &stem, extension)
         } else {
@@ -185,6 +190,14 @@ pub const CONFIG_EVENT: &str = "config-changed";
 /// Recorder start-up, countdown and hand-over to the recording phase.
 fn begin(app: &AppHandle, options: &HostOptions, countdown: Duration) {
     let started = Instant::now();
+    // The chime plays while the recorder starts or the countdown ends, so
+    // that the recording itself does not catch it.
+    let chime_at = countdown.saturating_sub(Duration::from_millis(450));
+    let mut chimed = false;
+    if chime_at.is_zero() {
+        crate::sounds::recording_starts();
+        chimed = true;
+    }
     let host = Host::start(options);
     let state = app.state::<RecorderState>();
 
@@ -204,6 +217,10 @@ fn begin(app: &AppHandle, options: &HostOptions, countdown: Duration) {
     // Wait for the end of the countdown, unless the user cancels.
     let cancelled = || matches!(*state.phase(), Phase::Starting { cancelled: true });
     while started.elapsed() < countdown && !cancelled() {
+        if !chimed && started.elapsed() >= chime_at {
+            crate::sounds::recording_starts();
+            chimed = true;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
 
@@ -257,6 +274,15 @@ pub fn toggle_pause(app: &AppHandle) {
 
 /// Stops (or cancels) the recording, then saves and previews the video.
 pub fn stop(app: &AppHandle) {
+    finish(app, true);
+}
+
+/// Stops the recording and deletes it.
+pub fn discard(app: &AppHandle) {
+    finish(app, false);
+}
+
+fn finish(app: &AppHandle, keep: bool) {
     let state = app.state::<RecorderState>();
     let taken = {
         let mut phase = state.phase();
@@ -290,8 +316,15 @@ pub fn stop(app: &AppHandle) {
             thumbnail,
         }) => {
             let image = thumbnail.as_deref().and_then(take_thumbnail);
-            if frames == 0 {
+            if frames == 0 || !keep {
                 let _ = std::fs::remove_file(&path);
+                let state = app.state::<AppState>();
+                let (clean, track) = crate::editor::edit_files(state.paths(), &path);
+                let _ = std::fs::remove_file(clean);
+                let _ = std::fs::remove_file(track);
+                if !keep {
+                    tracing::info!("recording discarded");
+                }
                 return;
             }
             #[allow(clippy::cast_precision_loss)]
@@ -310,7 +343,11 @@ pub fn stop(app: &AppHandle) {
                 // Saved to its folder when exported or when the editor closes.
                 app.state::<crate::saving::Saving>()
                     .add_draft(&path, (width, height));
-                crate::editor::open(&app, &path);
+                if after == AfterCapture::Actions {
+                    crate::quick::open(&app, &path);
+                } else {
+                    crate::editor::open(&app, &path);
+                }
                 return;
             }
             crate::capture::remember(&app, &path, width, height);
@@ -325,7 +362,7 @@ pub fn stop(app: &AppHandle) {
             if copy {
                 service.copy_files(vec![path.clone()]);
             }
-            if after == AfterCapture::Preview
+            if matches!(after, AfterCapture::Preview | AfterCapture::Actions)
                 && let Some(image) = image
             {
                 let label = copy.then(|| "Copied to the clipboard".to_owned());

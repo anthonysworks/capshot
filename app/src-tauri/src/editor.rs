@@ -48,7 +48,7 @@ pub fn kind(path: &Path) -> Option<Kind> {
 }
 
 /// Percent-encodes everything but unreserved URL characters.
-fn encode_component(text: &str) -> String {
+pub fn encode_component(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 3);
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {

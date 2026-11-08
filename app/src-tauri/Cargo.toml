@@ -29,7 +29,19 @@ tauri-plugin-global-shortcut.workspace = true
 tauri-plugin-single-instance.workspace = true
 tauri-plugin-dialog.workspace = true
 tracing.workspace = true
-windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
+rqrr.workspace = true
+windows = { workspace = true, features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Security_Cryptography",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+    "Win32_Media_Audio",
+] }
 
 [features]
 # Serve the web UI embedded in the executable. `tauri dev` builds with

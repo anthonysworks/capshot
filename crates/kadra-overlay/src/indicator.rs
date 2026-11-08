@@ -19,13 +19,13 @@ use kadra_core::{Point, Rect};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DwmSetWindowAttribute,
+    DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CreateFontW, CreateSolidBrush, DT_CENTER, DT_SINGLELINE,
     DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint, FONT_CHARSET, FONT_CLIP_PRECISION,
     FONT_OUTPUT_PRECISION, FW_SEMIBOLD, FillRect, GetStockObject, HDC, HGDIOBJ, InvalidateRect,
-    NULL_PEN, PAINTSTRUCT, Polygon, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    NULL_PEN, PAINTSTRUCT, Polygon, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE,
@@ -43,15 +43,20 @@ const TICK_TIMER: usize = 1;
 // GDI colours are 0x00BBGGRR.
 const RED: COLORREF = COLORREF(0x0023_11e8); // #E81123
 const AMBER: COLORREF = COLORREF(0x0000_b0ff); // #FFB000
-const PANEL: COLORREF = COLORREF(0x0011_0d0c); // #0C0D11
+const PANEL: COLORREF = COLORREF(0x001f_1c1c); // #1C1C1F
 const WHITE: COLORREF = COLORREF(0x00ff_ffff);
-const BUTTON: COLORREF = COLORREF(0x0030_2b28); // #282B30
+const BUTTON: COLORREF = COLORREF(0x0034_302e); // #2E3034
+/// Size of the pill, in pixels at 100% scale.
+const PILL_WIDTH: f32 = 300.0;
+const PILL_HEIGHT: f32 = 50.0;
 
 /// What a click on the indicator asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     Stop,
     TogglePause,
+    /// Stop and delete the recording.
+    Discard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,14 +190,15 @@ pub struct Indicator {
     phase: Phase,
     pause_button: Rect,
     stop_button: Rect,
+    discard_button: Rect,
     scale: f32,
 }
 
 impl Indicator {
     pub fn new(instance: HINSTANCE) -> windows::core::Result<Self> {
         let pill = create(instance, PILL_CLASS, 0)?;
-        // Square, like the rest of Kadra.
-        let round = DWMWCP_DONOTROUND;
+        // Soft corners, like the rest of Kadra.
+        let round = DWMWCP_ROUND;
         // SAFETY: valid attribute value for our window.
         unsafe {
             let _ = DwmSetWindowAttribute(
@@ -233,6 +239,7 @@ impl Indicator {
             phase: Phase::Hidden,
             pause_button: Rect::default(),
             stop_button: Rect::default(),
+            discard_button: Rect::default(),
             scale: 1.0,
         })
     }
@@ -279,12 +286,17 @@ impl Indicator {
             Rect::new(region.right, region.top, region.right + t, region.bottom),
         ];
 
-        let (w, h) = (px(164.0), px(36.0));
+        // Timer, then Delete and Pause, then a large Stop button.
+        let (w, h) = (px(PILL_WIDTH), px(PILL_HEIGHT));
         let gap = px(8.0);
         let (x, y) = pill_position(region, work, (w, h), gap);
-        let side = h - px(10.0);
-        self.stop_button = Rect::from_size(w - px(5.0) - side, px(5.0), side, side);
-        self.pause_button = self.stop_button.offset(-(side + px(4.0)), 0);
+        let pad = px(7.0);
+        let side = h - 2 * pad;
+        let stop_width = px(98.0);
+        self.stop_button = Rect::from_size(w - pad - stop_width, pad, stop_width, side);
+        self.pause_button =
+            Rect::from_size(self.stop_button.left - px(6.0) - side, pad, side, side);
+        self.discard_button = self.pause_button.offset(-(side + px(6.0)), 0);
         self.scale = scale;
         self.phase = if countdown.is_zero() {
             Self::running_now()
@@ -384,6 +396,8 @@ impl Indicator {
                 );
                 let request = if self.stop_button.contains(p) {
                     Some(Request::Stop)
+                } else if self.discard_button.contains(p) {
+                    Some(Request::Discard)
                 } else if self.pause_button.contains(p)
                     && matches!(self.phase, Phase::Running { .. })
                 {
@@ -398,8 +412,18 @@ impl Indicator {
     }
 
     fn paint(&self) {
+        let mut ps = PAINTSTRUCT::default();
+        // SAFETY: standard paint cycle on our own window.
+        unsafe {
+            let hdc = BeginPaint(self.pill, &mut ps);
+            self.draw(hdc, &ps.rcPaint);
+            let _ = EndPaint(self.pill, &ps);
+        }
+    }
+
+    fn draw(&self, hdc: HDC, area: &RECT) {
         let px = |v: f32| (v * self.scale).round() as i32;
-        let height = px(36.0);
+        let height = px(PILL_HEIGHT);
         let (running, paused, blink_on) = match self.phase {
             Phase::Running {
                 started,
@@ -414,18 +438,16 @@ impl Indicator {
         };
         let label = if let Phase::Countdown { until } = self.phase {
             let left = until.saturating_duration_since(Instant::now());
-            format!("Starting in {}", left.as_secs() + 1)
+            format!("Starts in {}", left.as_secs() + 1)
         } else {
             let s = self.phase.elapsed().as_secs();
             format!("{:02}:{:02}", s / 60, s % 60)
         };
 
-        let mut ps = PAINTSTRUCT::default();
-        // SAFETY: standard paint cycle; every GDI object created here is
-        // deselected and deleted before returning.
+        // SAFETY: every GDI object created here is deselected and deleted
+        // before returning.
         unsafe {
-            let hdc = BeginPaint(self.pill, &mut ps);
-            fill(hdc, &ps.rcPaint, PANEL);
+            fill(hdc, area, PANEL);
 
             // Status dot: blinking red while recording, amber when paused.
             let dot_color = if paused {
@@ -437,71 +459,55 @@ impl Indicator {
             };
             if let Some(color) = dot_color {
                 let dot = px(10.0);
-                let (x, y) = (px(14.0), (height - dot) / 2);
+                let (x, y) = (px(16.0), (height - dot) / 2);
                 with_brush(hdc, color, || {
                     let _ = Ellipse(hdc, x, y, x + dot, y + dot);
                 });
             }
 
-            let font = CreateFontW(
-                -px(14.0),
-                0,
-                0,
-                0,
-                FW_SEMIBOLD.0 as i32,
-                0,
-                0,
-                0,
-                FONT_CHARSET(0),
-                FONT_OUTPUT_PRECISION(0),
-                FONT_CLIP_PRECISION(0),
-                CLEARTYPE_QUALITY,
-                0,
-                w!("Segoe UI Variable Text"),
-            );
-            let previous_font = SelectObject(hdc, HGDIOBJ(font.0));
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, WHITE);
-            let text_right = if running {
-                self.pause_button.left
-            } else {
-                self.stop_button.left
-            } - px(4.0);
-            let mut area = win_rect(Rect::new(px(28.0), 0, text_right, height));
-            let mut text: Vec<u16> = label.encode_utf16().collect();
-            DrawTextW(
-                hdc,
-                &mut text,
-                &mut area,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-            );
-            SelectObject(hdc, previous_font);
-            let _ = DeleteObject(HGDIOBJ(font.0));
+            let text_right = self.discard_button.left - px(4.0);
+            let area = Rect::new(px(32.0), 0, text_right, height);
+            draw_text(hdc, &label, area, px(15.0), WHITE);
 
+            // Delete, Pause (while recording), then Stop: the one that
+            // matters, in red with its name.
+            let radius = px(8.0);
+            rounded(hdc, self.discard_button, radius, BUTTON);
+            paint_trash(hdc, self.discard_button);
             if running {
+                rounded(hdc, self.pause_button, radius, BUTTON);
                 self.paint_pause_button(hdc, paused);
             }
-            // Stop: red square on a dark button.
             let b = self.stop_button;
-            fill(hdc, &win_rect(b), BUTTON);
-            let inset = b.width() / 3;
-            let square = Rect::new(
-                b.left + inset,
-                b.top + inset,
-                b.right - inset,
-                b.bottom - inset,
+            rounded(hdc, b, radius, RED);
+            let icon = px(11.0);
+            let icon_left = b.left + px(16.0);
+            let top = b.top + (b.height() - icon) / 2;
+            with_brush(hdc, WHITE, || {
+                let _ = RoundRect(
+                    hdc,
+                    icon_left,
+                    top,
+                    icon_left + icon,
+                    top + icon,
+                    px(3.0),
+                    px(3.0),
+                );
+            });
+            let text = Rect::new(
+                icon_left + icon + px(4.0),
+                b.top,
+                b.right - px(8.0),
+                b.bottom,
             );
-            fill(hdc, &win_rect(square), RED);
-
-            let _ = EndPaint(self.pill, &ps);
+            draw_text(hdc, "Stop", text, px(15.0), WHITE);
         }
     }
 
     /// Two bars while recording, a "play" triangle while paused.
     fn paint_pause_button(&self, hdc: HDC, paused: bool) {
         let b = self.pause_button;
-        fill(hdc, &win_rect(b), BUTTON);
-        let inset = b.width() / 3;
+        let inset = b.width() * 7 / 20;
         let inner = Rect::new(
             b.left + inset,
             b.top + inset,
@@ -534,6 +540,103 @@ impl Indicator {
             fill(hdc, &win_rect(left), WHITE);
             fill(hdc, &win_rect(right), WHITE);
         }
+    }
+}
+
+/// A filled rectangle with rounded corners.
+fn rounded(hdc: HDC, r: Rect, radius: i32, color: COLORREF) {
+    with_brush(hdc, color, || {
+        // SAFETY: drawing on the paint DC.
+        let _ = unsafe {
+            RoundRect(
+                hdc,
+                r.left,
+                r.top,
+                r.right + 1,
+                r.bottom + 1,
+                radius,
+                radius,
+            )
+        };
+    });
+}
+
+/// A small bin: handle, lid, and a body narrowing towards the bottom.
+fn paint_trash(hdc: HDC, b: Rect) {
+    let size = b.width() * 9 / 20;
+    let cx = b.left + b.width() / 2;
+    let top = b.top + (b.height() - size) / 2;
+    let unit = (size / 9).max(1);
+    let handle = Rect::new(cx - 2 * unit, top, cx + 2 * unit, top + unit);
+    let lid = Rect::new(cx - size / 2, top + unit, cx + size / 2, top + 2 * unit);
+    fill(hdc, &win_rect(handle), WHITE);
+    fill(hdc, &win_rect(lid), WHITE);
+    let (body_top, bottom) = (top + 3 * unit, top + size);
+    let (wide, narrow) = (size / 2 - unit, size / 2 - 2 * unit);
+    let body = [
+        POINT {
+            x: cx - wide,
+            y: body_top,
+        },
+        POINT {
+            x: cx + wide,
+            y: body_top,
+        },
+        POINT {
+            x: cx + narrow,
+            y: bottom,
+        },
+        POINT {
+            x: cx - narrow,
+            y: bottom,
+        },
+    ];
+    with_brush(hdc, WHITE, || {
+        // SAFETY: drawing on the paint DC with a valid point list.
+        let _ = unsafe { Polygon(hdc, &body) };
+    });
+    // Grooves in the body.
+    let groove = (unit * 2 / 3).max(1);
+    for dx in [-(size / 6), size / 6] {
+        let left = cx + dx - groove / 2;
+        let g = Rect::new(left, body_top + unit, left + groove, bottom - unit);
+        fill(hdc, &win_rect(g), BUTTON);
+    }
+}
+
+/// Centred single-line text in Segoe UI Variable.
+fn draw_text(hdc: HDC, label: &str, area: Rect, size: i32, color: COLORREF) {
+    // SAFETY: the font is selected, used and deleted here.
+    unsafe {
+        let font = CreateFontW(
+            -size,
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
+            FONT_CHARSET(0),
+            FONT_OUTPUT_PRECISION(0),
+            FONT_CLIP_PRECISION(0),
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI Variable Text"),
+        );
+        let previous_font = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, color);
+        let mut rect = win_rect(area);
+        let mut text: Vec<u16> = label.encode_utf16().collect();
+        DrawTextW(
+            hdc,
+            &mut text,
+            &mut rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        SelectObject(hdc, previous_font);
+        let _ = DeleteObject(HGDIOBJ(font.0));
     }
 }
 

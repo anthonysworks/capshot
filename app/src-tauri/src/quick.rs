@@ -1,0 +1,398 @@
+//! The window shown after a capture: what can be done with it at once
+//! (copy, save, edit, pin, read its text or QR code, pick a colour).
+//!
+//! The capture is not in the destination folder yet: a screenshot waits in
+//! a temporary folder and a recording is a draft (see `saving`). *Save*
+//! moves it there; closing the window without saving deletes it (the
+//! clipboard keeps its copy). *Edit* hands it to the editor.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use serde::Serialize;
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+use crate::editor::{EditorFiles, Kind};
+use crate::saving::Saving;
+use crate::state::AppState;
+
+/// Captures shown in a quick-actions window, by path.
+#[derive(Debug, Default)]
+pub struct QuickFiles(Mutex<HashMap<PathBuf, Entry>>);
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Entry {
+    /// Moved to its destination: nothing to clean up.
+    saved: bool,
+    /// Now open in the editor, which owns it.
+    edited: bool,
+}
+
+impl QuickFiles {
+    fn lock(&self) -> MutexGuard<'_, HashMap<PathBuf, Entry>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        self.lock().contains_key(path)
+    }
+}
+
+/// Where screenshots wait until they are saved.
+pub fn pending_dir() -> PathBuf {
+    std::env::temp_dir().join("Kadra").join("captures")
+}
+
+/// Opens the quick-actions window for a capture that was just taken.
+pub fn open(app: &AppHandle, path: &Path) {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let Some(kind) = crate::editor::kind(path) else {
+        return;
+    };
+    let path = crate::editor::normalize(path);
+    app.state::<EditorFiles>().allow(&path);
+    app.state::<QuickFiles>()
+        .lock()
+        .insert(path.clone(), Entry::default());
+    if kind == Kind::Video
+        && let Err(err) = app.asset_protocol_scope().allow_file(&path)
+    {
+        tracing::warn!("cannot play {}: {err}", path.display());
+    }
+    let label = format!("quick-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "index.html?quick={}",
+        crate::editor::encode_component(&path.to_string_lossy())
+    );
+    let result = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+        .title(if kind == Kind::Video {
+            "Kadra · Recording"
+        } else {
+            "Kadra · Screenshot"
+        })
+        .inner_size(760.0, 600.0)
+        .min_inner_size(560.0, 440.0)
+        .center()
+        .always_on_top(true)
+        .build();
+    match result {
+        Ok(window) => {
+            let _ = window.set_focus();
+            let app = app.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    closed(&app, &path);
+                }
+            });
+        }
+        Err(err) => {
+            tracing::error!("cannot open the capture window: {err}");
+            closed(app, &path);
+        }
+    }
+}
+
+/// The window closed: a capture neither saved nor edited is deleted.
+fn closed(app: &AppHandle, path: &Path) {
+    let Some(entry) = app.state::<QuickFiles>().lock().remove(path) else {
+        return;
+    };
+    if entry.saved || entry.edited {
+        return;
+    }
+    match crate::editor::kind(path) {
+        Some(Kind::Video) => crate::saving::editor_closed(app, path),
+        _ => {
+            if path.starts_with(pending_dir()) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn mark(app: &AppHandle, path: &Path, change: impl FnOnce(&mut Entry)) {
+    if let Some(entry) = app.state::<QuickFiles>().lock().get_mut(path) {
+        change(entry);
+    }
+}
+
+/// What the window shows about a capture.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Info {
+    video: bool,
+    /// Already in its destination.
+    saved: bool,
+    /// Folder Save puts it in.
+    folder: String,
+    bytes: u64,
+}
+
+pub fn info(app: &AppHandle, path: &Path) -> Info {
+    let video = crate::editor::kind(path) == Some(Kind::Video);
+    let saved = !(path.starts_with(pending_dir()) || app.state::<Saving>().is_draft(path));
+    Info {
+        video,
+        saved,
+        folder: destination(app, path, video).display().to_string(),
+        bytes: std::fs::metadata(path).map_or(0, |m| m.len()),
+    }
+}
+
+fn destination(app: &AppHandle, path: &Path, video: bool) -> PathBuf {
+    if video {
+        crate::saving::folder_for(app, path)
+    } else {
+        app.state::<AppState>().config().capture.output_dir.clone()
+    }
+}
+
+/// Moves the capture to its folder (or to `to`, picked in the save
+/// dialog); returns where it went.
+pub fn save(app: &AppHandle, path: &Path, to: Option<PathBuf>) -> Result<PathBuf, String> {
+    let video = crate::editor::kind(path) == Some(Kind::Video);
+    let target = if let Some(to) = to {
+        to
+    } else {
+        let dir = destination(app, path, video);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let stem = path
+            .file_stem()
+            .map_or_else(|| "Kadra".into(), |s| s.to_string_lossy().into_owned());
+        let extension = path
+            .extension()
+            .map_or_else(|| "png".into(), |e| e.to_string_lossy().into_owned());
+        kadra_encode::unique_path(&dir, &stem, &extension)
+    };
+    if video {
+        crate::saving::keep_draft(app, path, &target).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::copy(path, &target)
+            .map_err(|e| format!("cannot save {}: {e}", target.display()))?;
+        let _ = std::fs::remove_file(path);
+        let (width, height) = image_size(&target);
+        crate::capture::remember(app, &target, width, height);
+    }
+    tracing::info!(path = %target.display(), "capture saved");
+    let target = crate::editor::normalize(&target);
+    app.state::<EditorFiles>().allow(&target);
+    if video && let Err(err) = app.asset_protocol_scope().allow_file(&target) {
+        tracing::warn!("cannot play {}: {err}", target.display());
+    }
+    // The window now shows the saved file.
+    let files = app.state::<QuickFiles>();
+    let mut files = files.lock();
+    files.remove(path);
+    files.insert(
+        target.clone(),
+        Entry {
+            saved: true,
+            edited: false,
+        },
+    );
+    Ok(target)
+}
+
+fn image_size(path: &Path) -> (u32, u32) {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| kadra_encode::decode(&bytes).ok())
+        .map_or((0, 0), |image| (image.width(), image.height()))
+}
+
+/// Hands the capture to the editor. A screenshot is saved first: the
+/// editor saves over the file it opened.
+pub fn edit(app: &AppHandle, path: &Path) -> Result<(), String> {
+    let video = crate::editor::kind(path) == Some(Kind::Video);
+    let path = if !video && path.starts_with(pending_dir()) {
+        save(app, path, None)?
+    } else {
+        path.to_path_buf()
+    };
+    mark(app, &path, |entry| entry.edited = true);
+    crate::editor::open(app, &path);
+    Ok(())
+}
+
+/// Puts the capture on the clipboard: the picture, or the video as a file
+/// (a draft is saved first, as in the editor).
+pub fn copy(app: &AppHandle, path: &Path) -> Result<(), String> {
+    let service = app
+        .try_state::<crate::capture::CaptureService>()
+        .ok_or("the clipboard is unavailable")?;
+    if crate::editor::kind(path) == Some(Kind::Video) {
+        let file = if app.state::<Saving>().is_draft(path) {
+            crate::saving::save_copy(app, path).map_err(|e| e.to_string())?
+        } else {
+            path.to_path_buf()
+        };
+        service.copy_files(vec![file]);
+    } else {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        service.copy_image(kadra_encode::decode(&bytes).map_err(|e| e.to_string())?);
+    }
+    Ok(())
+}
+
+/// Shows the screenshot in a small window that stays on top.
+pub fn pin(app: &AppHandle, path: &Path, scale: f64) -> Result<(), String> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let (width, height) = image_size(path);
+    if width == 0 {
+        return Err("cannot read the image".into());
+    }
+    // A pinned file outlives the capture window: keep a copy of its own.
+    let dir = pending_dir().join("pinned");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let pinned = kadra_encode::unique_path(&dir, "pin", "png");
+    std::fs::copy(path, &pinned).map_err(|e| e.to_string())?;
+    let pinned = crate::editor::normalize(&pinned);
+    app.state::<EditorFiles>().allow(&pinned);
+    let scale = scale.max(0.5);
+    let (w, h) = (f64::from(width) / scale, f64::from(height) / scale);
+    // At most 70% of a 1080p screen, keeping the proportions.
+    let fit = (1300.0 / w).min(760.0 / h).min(1.0);
+    let label = format!("pin-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "index.html?pin={}",
+        crate::editor::encode_component(&pinned.to_string_lossy())
+    );
+    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+        .title("Kadra · Pinned")
+        .inner_size(w * fit, h * fit)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(true)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = std::fs::remove_file(&pinned);
+        }
+    });
+    Ok(())
+}
+
+/// Reads the text in a screenshot with the OCR built into Windows, in the
+/// languages of the user's profile.
+pub fn read_text(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let image = kadra_encode::decode(&bytes).map_err(|e| e.to_string())?;
+    // WinRT needs an initialised thread; this one is ours alone.
+    std::thread::spawn(move || ocr::recognize(&image))
+        .join()
+        .map_err(|_| "text recognition failed".to_owned())?
+}
+
+/// QR codes (and other 2D codes rqrr reads) in a screenshot.
+pub fn read_codes(path: &Path) -> Result<Vec<String>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let image = kadra_encode::decode(&bytes).map_err(|e| e.to_string())?;
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    let data = image.as_bytes();
+    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
+        let i = (y * width + x) * 4;
+        let (b, g, r) = (
+            u32::from(data[i]),
+            u32::from(data[i + 1]),
+            u32::from(data[i + 2]),
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        let luma = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
+        luma
+    });
+    Ok(prepared
+        .detect_grids()
+        .into_iter()
+        .filter_map(|grid| grid.decode().ok().map(|(_, content)| content))
+        .collect())
+}
+
+mod ocr {
+    use kadra_core::BgraImage;
+    use windows::Globalization::Language;
+    use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Security::Cryptography::CryptographicBuffer;
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+
+    pub fn recognize(image: &BgraImage) -> Result<String, String> {
+        // SAFETY: initialises WinRT on this thread, undone below.
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.map_err(|e| e.to_string())?;
+        let result = run(image).map_err(|e| e.message());
+        // SAFETY: pairs with the RoInitialize above.
+        unsafe { RoUninitialize() };
+        result.and_then(|text| {
+            if text.is_none() {
+                Err("no OCR language is installed in Windows (Settings › Time & language › Language)".into())
+            } else {
+                Ok(text.unwrap_or_default())
+            }
+        })
+    }
+
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    fn run(image: &BgraImage) -> windows::core::Result<Option<String>> {
+        let engine = match OcrEngine::TryCreateFromUserProfileLanguages() {
+            Ok(engine) => engine,
+            Err(_) => {
+                match OcrEngine::TryCreateFromLanguage(&Language::CreateLanguage(&"en-US".into())?)
+                {
+                    Ok(engine) => engine,
+                    Err(_) => return Ok(None),
+                }
+            }
+        };
+        // The engine takes images up to a size: larger ones are scaled down.
+        let max = OcrEngine::MaxImageDimension()?;
+        let image = if image.width() > max || image.height() > max {
+            image.thumbnail(max, max)
+        } else {
+            image.clone()
+        };
+        let buffer = CryptographicBuffer::CreateFromByteArray(image.as_bytes())?;
+        let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
+            &buffer,
+            BitmapPixelFormat::Bgra8,
+            image.width() as i32,
+            image.height() as i32,
+            BitmapAlphaMode::Premultiplied,
+        )?;
+        let result = engine.RecognizeAsync(&bitmap)?.join()?;
+        let mut lines = Vec::new();
+        for line in result.Lines()? {
+            lines.push(line.Text()?.to_string());
+        }
+        Ok(Some(lines.join("\n")))
+    }
+}
+
+/// Asks where to save the capture, starting in its folder.
+pub fn choose(app: &AppHandle, path: &Path) -> Option<PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+    let video = crate::editor::kind(path) == Some(Kind::Video);
+    let extension = path
+        .extension()
+        .map_or_else(|| "png".to_owned(), |e| e.to_string_lossy().to_lowercase());
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Save as")
+        .add_filter(extension.to_uppercase(), &[extension.as_str()])
+        .set_directory(destination(app, path, video));
+    if let Some(name) = path.file_name() {
+        dialog = dialog.set_file_name(name.to_string_lossy());
+    }
+    let mut chosen = dialog.blocking_save_file()?.into_path().ok()?;
+    if chosen
+        .extension()
+        .is_none_or(|e| !e.eq_ignore_ascii_case(&extension))
+    {
+        chosen.set_extension(&extension);
+    }
+    Some(chosen)
+}

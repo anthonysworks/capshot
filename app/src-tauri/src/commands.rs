@@ -319,3 +319,125 @@ pub fn show_in_folder(state: State<'_, AppState>, path: String) {
     }
     crate::windows::select_in_explorer(&path);
 }
+
+/// Asks where to save an image opened in the editor; returns the file
+/// picked (then written by `editor_save_to`).
+#[tauri::command]
+pub async fn editor_image_save_as(app: AppHandle, path: String) -> Result<Option<String>, String> {
+    let path = editable(&app, &path)?;
+    let extension = path
+        .extension()
+        .map_or_else(|| "png".to_owned(), |e| e.to_string_lossy().to_lowercase());
+    Ok(crate::saving::choose_file(&app, &path, &extension).map(|p| p.display().to_string()))
+}
+
+/// Writes an image (PNG body) to the file picked in the save dialog
+/// (`x-output` header), in that file's format; returns its path.
+#[tauri::command]
+pub fn editor_save_to(app: AppHandle, request: Request<'_>) -> Result<String, String> {
+    header_path(&app, &request)?;
+    let output = request
+        .headers()
+        .get("x-output")
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::editor::decode_component)
+        .map(PathBuf::from)
+        .ok_or("missing destination")?;
+    if !app.state::<Saving>().take_chosen(&output) {
+        return Err("this destination was not chosen in the editor".into());
+    }
+    let image = kadra_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
+    let format = kadra_encode::format_of(&output).unwrap_or(kadra_core::ImageFormat::Png);
+    let bytes = kadra_encode::encode(&image, format).map_err(|e| e.to_string())?;
+    std::fs::write(&output, bytes).map_err(|e| format!("cannot save {}: {e}", output.display()))?;
+    tracing::info!(path = %output.display(), "image saved as");
+    app.state::<EditorFiles>().allow(&output);
+    crate::capture::remember(&app, &output, image.width(), image.height());
+    Ok(output.display().to_string())
+}
+
+// ── Quick actions after a capture ──────────────────────────────────────
+
+/// A capture shown in a quick-actions window.
+fn quick_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
+    let path = editable(app, path)?;
+    if app.state::<crate::quick::QuickFiles>().contains(&path) {
+        Ok(path)
+    } else {
+        Err("this capture is not open in a quick-actions window".into())
+    }
+}
+
+#[tauri::command]
+pub fn quick_info(app: AppHandle, path: String) -> Result<crate::quick::Info, String> {
+    Ok(crate::quick::info(&app, &quick_path(&app, &path)?))
+}
+
+/// Saves the capture to its folder; returns its new path.
+#[tauri::command]
+pub fn quick_save(app: AppHandle, path: String) -> Result<String, String> {
+    let path = quick_path(&app, &path)?;
+    crate::quick::save(&app, &path, None).map(|p| p.display().to_string())
+}
+
+/// Saves the capture where the user picks; returns its new path, if any.
+#[tauri::command]
+pub async fn quick_save_as(app: AppHandle, path: String) -> Result<Option<String>, String> {
+    let path = quick_path(&app, &path)?;
+    let Some(to) = crate::quick::choose(&app, &path) else {
+        return Ok(None);
+    };
+    crate::quick::save(&app, &path, Some(to)).map(|p| Some(p.display().to_string()))
+}
+
+#[tauri::command]
+pub fn quick_copy(app: AppHandle, path: String) -> Result<(), String> {
+    crate::quick::copy(&app, &quick_path(&app, &path)?)
+}
+
+/// Opens the capture in the editor and closes the quick-actions window.
+#[tauri::command]
+pub fn quick_edit(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
+    crate::quick::edit(&app, &quick_path(&app, &path)?)?;
+    let _ = window.destroy();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn quick_pin(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    crate::quick::pin(&app, &quick_path(&app, &path)?, scale)
+}
+
+/// Text in the screenshot (Windows OCR).
+#[tauri::command]
+pub async fn quick_text(app: AppHandle, path: String) -> Result<String, String> {
+    crate::quick::read_text(&quick_path(&app, &path)?)
+}
+
+/// Contents of the QR codes in the screenshot.
+#[tauri::command]
+pub async fn quick_codes(app: AppHandle, path: String) -> Result<Vec<String>, String> {
+    crate::quick::read_codes(&quick_path(&app, &path)?)
+}
+
+/// Deletes an unsaved recording and closes its window.
+#[tauri::command]
+pub fn quick_discard(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
+    let path = quick_path(&app, &path)?;
+    if crate::editor::kind(&path) == Some(crate::editor::Kind::Video) {
+        crate::saving::discard(&app, &path);
+    }
+    let _ = window.destroy();
+    Ok(())
+}
+
+/// Puts text on the clipboard (recognised text, a QR code, a colour).
+#[tauri::command]
+pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
+    let service = app
+        .try_state::<CaptureService>()
+        .ok_or("the clipboard is unavailable")?;
+    service.copy_text(text);
+    Ok(())
+}

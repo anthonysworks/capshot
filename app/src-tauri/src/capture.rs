@@ -81,6 +81,10 @@ impl CaptureService {
     pub fn copy_image(&self, image: BgraImage) {
         self.overlay.copy_image(image);
     }
+
+    pub fn copy_text(&self, text: String) {
+        self.overlay.copy_text(text);
+    }
 }
 
 /// Settings read when the overlay is requested.
@@ -173,6 +177,7 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
         ),
         CaptureResult::OpenFile(path) => crate::editor::open_capture(app, &path),
         CaptureResult::StopRecording => recording::stop(app),
+        CaptureResult::DiscardRecording => recording::discard(app),
         CaptureResult::TogglePause => recording::toggle_pause(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),
         CaptureResult::Cancelled => tracing::debug!("capture cancelled"),
@@ -192,9 +197,13 @@ fn save(app: &AppHandle, id: u64, image: &BgraImage) {
         )
     };
     let edit = after == AfterCapture::Editor;
-    // The editor works on a file: without saving, use a temporary one.
-    let dir = match (enabled, edit) {
+    // The quick actions save it only when asked: it waits in a temporary
+    // folder. The editor works on a file: without saving, use a temporary one.
+    let quick = after == AfterCapture::Actions;
+    let enabled = enabled && !quick;
+    let dir = match (enabled, edit || quick) {
         (true, _) => dir,
+        (false, true) if quick => crate::quick::pending_dir(),
         (false, true) => std::env::temp_dir().join("Kadra"),
         (false, false) => return,
     };
@@ -215,6 +224,8 @@ fn save(app: &AppHandle, id: u64, image: &BgraImage) {
             }
             if edit {
                 crate::editor::open(app, &path);
+            } else if quick {
+                crate::quick::open(app, &path);
             }
         }
         Err(err) => tracing::error!("cannot save the screenshot: {err}"),

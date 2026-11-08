@@ -67,6 +67,9 @@ pub enum CaptureResult {
     },
     /// The stop button of the recording indicator was clicked.
     StopRecording,
+    /// The delete button of the recording indicator was clicked: stop and
+    /// throw the recording away.
+    DiscardRecording,
     /// The pause/resume button of the recording indicator was clicked.
     TogglePause,
     /// The preview was clicked: open this file.
@@ -104,6 +107,7 @@ enum Command {
         label: Option<String>,
     },
     CopyFiles(Vec<PathBuf>),
+    CopyText(String),
 }
 
 /// Handle to the overlay thread.
@@ -181,6 +185,11 @@ impl Overlay {
     /// Puts files on the clipboard, to paste them anywhere files go.
     pub fn copy_files(&self, files: Vec<PathBuf>) {
         self.send(Command::CopyFiles(files));
+    }
+
+    /// Puts plain text on the clipboard.
+    pub fn copy_text(&self, text: String) {
+        self.send(Command::CopyText(text));
     }
 
     /// Puts `image` on the clipboard (with transparency).
