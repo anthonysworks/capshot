@@ -49,7 +49,7 @@ use crate::convert::{Blitter, Space, render_texture};
 use crate::cursor::CursorTrack;
 use crate::encoder::{VideoSettings, set_input, video_type};
 use crate::paint::Painter;
-use crate::stretch::{CLICK_VOLUME, click_sound, mix_at, stretch};
+use crate::stretch::{apply_gain, click_sound, click_volume, mix_at, stretch};
 use crate::{Part, RecordError, Result};
 
 #[allow(clippy::cast_sign_loss)]
@@ -84,6 +84,47 @@ pub struct TrimOptions {
     /// Never encode below the source's own bitrate (no visible loss);
     /// off when the user picked the quality.
     pub match_source: bool,
+    /// Volume and fades of the sound track.
+    pub sound: SoundEdit,
+}
+
+/// Changes to the recorded sound.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SoundEdit {
+    /// 1 keeps the recorded level; up to 2.
+    pub volume: f32,
+    /// Seconds over which the sound rises at the start, and falls at the end.
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+impl Default for SoundEdit {
+    fn default() -> Self {
+        Self {
+            volume: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }
+    }
+}
+
+impl SoundEdit {
+    fn is_plain(&self) -> bool {
+        (self.volume - 1.0).abs() < 1e-3 && self.fade_in <= 0.0 && self.fade_out <= 0.0
+    }
+
+    /// Level at `t` seconds of a result `total` seconds long.
+    #[allow(clippy::cast_possible_truncation)]
+    fn gain(&self, t: f64, total: f64) -> f32 {
+        let mut g = f64::from(self.volume.clamp(0.0, 2.0));
+        if self.fade_in > 0.0 {
+            g *= (t / self.fade_in).clamp(0.0, 1.0);
+        }
+        if self.fade_out > 0.0 {
+            g *= ((total - t) / self.fade_out).clamp(0.0, 1.0);
+        }
+        g as f32
+    }
 }
 
 impl TrimOptions {
@@ -99,6 +140,7 @@ impl TrimOptions {
             fps: None,
             max_height: None,
             match_source: true,
+            sound: SoundEdit::default(),
         }
     }
 
@@ -751,7 +793,9 @@ unsafe fn run(
         // video progresses: the writer holds back a stream that runs ahead.
         let rebuild_audio = p.audio_out.is_some()
             && !p.synth_audio
-            && (segments.iter().any(|s| (s.2 - 1.0).abs() > 1e-6) || options.click_sound());
+            && (segments.iter().any(|s| (s.2 - 1.0).abs() > 1e-6)
+                || options.click_sound()
+                || !options.sound.is_plain());
         let copy_audio = p.audio_out.is_some() && !p.synth_audio && !rebuild_audio;
         let audio_reader = if rebuild_audio {
             Some(AudioReader::open(input)?)
@@ -766,7 +810,19 @@ unsafe fn run(
         } else {
             Vec::new()
         };
-        let click = click_sound(p.audio_format.0);
+        let voice = options
+            .composition
+            .clicks
+            .as_ref()
+            .map_or_else(Default::default, |c| c.voice);
+        let click = click_sound(p.audio_format.0, voice);
+        // Length of the result, for the fade out.
+        let output_seconds: f64 = segments
+            .iter()
+            .map(|&(start, end, speed)| {
+                (end.min(ticks(p.duration).max(start + 1)) - start) as f64 / 1e7 / speed
+            })
+            .sum();
         let (rate, channels) = (p.audio_format.0, p.audio_format.1 as usize);
         let mut frames = 0u64;
         // Output time where the current segment starts, and source time
@@ -784,11 +840,14 @@ unsafe fn run(
             let mut pending = match (p.audio_out, &audio_reader) {
                 (Some(stream), Some(reader)) if rebuild_audio => {
                     let pcm = reader.read(start, end, rate, channels)?;
-                    Some(PendingPcm::new(
-                        stretch(&pcm, channels, rate, speed),
-                        stream,
-                        offset,
-                    ))
+                    let mut pcm = stretch(&pcm, channels, rate, speed);
+                    if !options.sound.is_plain() {
+                        let at = offset as f64 / 1e7;
+                        apply_gain(&mut pcm, channels, rate, |t| {
+                            options.sound.gain(at + t, output_seconds)
+                        });
+                    }
+                    Some(PendingPcm::new(pcm, stream, offset))
                 }
                 (Some(stream), _) if p.synth_audio => {
                     let length = end.min(ticks(p.duration).max(start + 1)) - start;
@@ -809,7 +868,7 @@ unsafe fn run(
                     rate,
                     &click,
                     &here,
-                    CLICK_VOLUME,
+                    click_volume(voice),
                 );
             }
             // Lands on the key frame before `start`; earlier frames are

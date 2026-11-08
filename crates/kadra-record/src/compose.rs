@@ -50,6 +50,22 @@ pub struct ClickStyle {
     pub color: [u8; 3],
     /// Click sound mixed into the audio.
     pub sound: bool,
+    /// Which click sound.
+    #[serde(default)]
+    pub voice: ClickVoice,
+}
+
+/// The click sounds offered in the editor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickVoice {
+    /// A fingertip on a table: low and round.
+    #[default]
+    Soft,
+    /// A small bubble pop.
+    Pop,
+    /// A mouse button pressed and released.
+    Click,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -554,6 +570,7 @@ mod tests {
                 ring: false,
                 color: [0, 0, 0],
                 sound: true,
+                voice: ClickVoice::Soft,
             }),
             ..Composition::default()
         };

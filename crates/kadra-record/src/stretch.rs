@@ -9,6 +9,8 @@
 
 use std::f32::consts::PI;
 
+use crate::compose::ClickVoice;
+
 /// Changes the duration of interleaved 16-bit PCM by `1 / tempo` (tempo 2:
 /// twice as fast) without changing its pitch.
 #[allow(
@@ -96,34 +98,94 @@ pub fn stretch(pcm: &[i16], channels: usize, rate: u32, tempo: f64) -> Vec<i16> 
         .collect()
 }
 
-/// A short, soft, round "tock" (like a finger tapping wood), as `rate` Hz
-/// mono samples in -1..1: a low sine whose pitch drops from 480 to 240 Hz,
-/// with a gentle attack and a quick fade. No high frequencies, so it never
-/// sounds shrill.
+/// The click sound `voice` as `rate` Hz mono samples in -1..1, with a peak
+/// of one. The preview in the editor makes the same samples (`clickSamples` in
+/// `stage.ts`).
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-pub fn click_sound(rate: u32) -> Vec<f32> {
+pub fn click_sound(rate: u32, voice: ClickVoice) -> Vec<f32> {
     let rate = rate.max(1) as f32;
-    let length = (rate * 0.09) as usize;
+    let seconds = match voice {
+        ClickVoice::Soft => 0.14,
+        ClickVoice::Pop => 0.08,
+        ClickVoice::Click => 0.1,
+    };
+    let length = (rate * seconds) as usize;
     let mut phase = 0.0f32;
-    (0..length)
+    let mut seed: u32 = 0x2545_f491;
+    let mut low = 0.0f32;
+    let mut out: Vec<f32> = (0..length)
         .map(|i| {
             let t = i as f32 / rate;
-            let pitch = 240.0 + 240.0 * (-t * 60.0).exp();
-            phase += 2.0 * PI * pitch / rate;
-            let attack = (t / 0.003).min(1.0);
-            let envelope = attack * (-t * 55.0).exp();
-            // A touch of the octave gives body without brightness.
-            envelope * (0.85 * phase.sin() + 0.15 * (2.0 * phase).sin())
+            match voice {
+                ClickVoice::Soft => {
+                    // A fingertip on a table: low, round, no edge.
+                    let pitch = 150.0 + 110.0 * (-t * 35.0).exp();
+                    phase += 2.0 * PI * pitch / rate;
+                    let attack = if t < 0.008 {
+                        0.5 - 0.5 * (PI * t / 0.008).cos()
+                    } else {
+                        1.0
+                    };
+                    attack * (-t * 32.0).exp() * (phase.sin() + 0.06 * (2.0 * phase).sin())
+                }
+                ClickVoice::Pop => {
+                    let pitch = 320.0 + 520.0 * (1.0 - (-t * 80.0).exp());
+                    phase += 2.0 * PI * pitch / rate;
+                    (t / 0.002).min(1.0) * (-t * 60.0).exp() * phase.sin()
+                }
+                ClickVoice::Click => {
+                    // Press, then release: two short, dull snaps.
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let noise = (f64::from(seed) / 4_294_967_296.0 * 2.0 - 1.0) as f32;
+                    low += 0.3 * (noise - low);
+                    let press = (-t * 700.0).exp();
+                    let r = t - 0.055;
+                    let release = if r >= 0.0 {
+                        0.55 * (-r * 900.0).exp()
+                    } else {
+                        0.0
+                    };
+                    phase += 2.0 * PI * 1900.0 / rate;
+                    (press + release) * (0.8 * low * 3.0 + 0.2 * phase.sin())
+                }
+            }
         })
-        .collect()
+        .collect();
+    let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    if peak > 0.0 {
+        for v in &mut out {
+            *v /= peak;
+        }
+    }
+    out
 }
 
-/// How loud clicks are mixed into the sound track.
-pub const CLICK_VOLUME: f32 = 0.35;
+/// How loud a click sound is mixed into the sound track.
+pub const fn click_volume(voice: ClickVoice) -> f32 {
+    match voice {
+        ClickVoice::Soft | ClickVoice::Click => 0.3,
+        ClickVoice::Pop => 0.25,
+    }
+}
+
+/// Multiplies interleaved PCM by `gain(t)`, `t` in seconds from its start.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub fn apply_gain(pcm: &mut [i16], channels: usize, rate: u32, gain: impl Fn(f64) -> f32) {
+    let channels = channels.max(1);
+    for (frame, samples) in pcm.chunks_mut(channels).enumerate() {
+        let g = gain(frame as f64 / f64::from(rate.max(1)));
+        if (g - 1.0).abs() < f32::EPSILON {
+            continue;
+        }
+        for s in samples {
+            *s = (f32::from(*s) * g).round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
 
 /// Mixes `sound` into interleaved PCM at each time of `times` (seconds).
 #[allow(
@@ -209,7 +271,14 @@ mod tests {
     fn clicks_are_mixed_at_their_time() {
         let rate = 48_000;
         let mut pcm = vec![0i16; 48_000 * 2];
-        mix_at(&mut pcm, 2, rate, &click_sound(rate), &[0.5], 0.8);
+        mix_at(
+            &mut pcm,
+            2,
+            rate,
+            &click_sound(rate, ClickVoice::Soft),
+            &[0.5],
+            0.8,
+        );
         let loud: Vec<usize> = pcm
             .iter()
             .enumerate()

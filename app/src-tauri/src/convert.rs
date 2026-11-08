@@ -95,7 +95,18 @@ pub enum Task {
         /// Height in pixels (scaled down); `None` keeps the size.
         #[serde(default)]
         height: Option<u32>,
+        /// Sound level (1: as recorded) and fades, in seconds.
+        #[serde(default = "unit_volume")]
+        volume: f32,
+        #[serde(default)]
+        fade_in: f64,
+        #[serde(default)]
+        fade_out: f64,
     },
+}
+
+const fn unit_volume() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -183,6 +194,7 @@ fn seconds(s: f64) -> Duration {
 }
 
 /// Entry point of the host process. Returns the process exit code.
+#[allow(clippy::too_many_lines)]
 pub fn run_host() -> i32 {
     let mut line = String::new();
     let request = std::io::stdin()
@@ -242,6 +254,9 @@ pub fn run_host() -> i32 {
             quality,
             fps,
             height,
+            volume,
+            fade_in,
+            fade_out,
         } => {
             let (input, composition, track) = request.sources(&edit.composition);
             trim_video(
@@ -257,6 +272,11 @@ pub fn run_host() -> i32 {
                     fps: *fps,
                     max_height: *height,
                     match_source: quality.is_none(),
+                    sound: kadra_record::SoundEdit {
+                        volume: *volume,
+                        fade_in: *fade_in,
+                        fade_out: *fade_out,
+                    },
                 },
                 &mut progress,
             )

@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fps: args.get(7).and_then(|s| s.parse().ok()),
         max_height: args.get(8).and_then(|s| s.parse().ok()),
         match_source: true,
+        sound: kadra_record::SoundEdit::default(),
     };
     let started = Instant::now();
     let stats = trim_video(&input, &output, &options, |_| true)?;
