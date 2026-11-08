@@ -62,6 +62,13 @@ pub fn open(app: &AppHandle, path: &Path) {
         tracing::warn!("cannot play {}: {err}", path.display());
     }
     let label = format!("quick-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    // A small toolbar with the preview, at the bottom right of the screen.
+    let (width, height) = if kind == Kind::Video {
+        (540.0, 196.0)
+    } else {
+        (540.0, 252.0)
+    };
+    let (x, y) = corner(app, width, height);
     let url = format!(
         "index.html?quick={}",
         crate::editor::encode_component(&path.to_string_lossy())
@@ -72,9 +79,14 @@ pub fn open(app: &AppHandle, path: &Path) {
         } else {
             "Kadra · Screenshot"
         })
-        .inner_size(760.0, 600.0)
-        .min_inner_size(560.0, 440.0)
-        .center()
+        .inner_size(width, height)
+        .position(x, y)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .decorations(false)
+        .skip_taskbar(true)
+        .shadow(true)
         .always_on_top(true)
         .build();
     match result {
@@ -92,6 +104,23 @@ pub fn open(app: &AppHandle, path: &Path) {
             closed(app, &path);
         }
     }
+}
+
+/// Bottom right of the primary screen (logical pixels), above the taskbar.
+fn corner(app: &AppHandle, width: f64, height: f64) -> (f64, f64) {
+    let Ok(Some(monitor)) = app.primary_monitor() else {
+        return (100.0, 100.0);
+    };
+    let scale = monitor.scale_factor();
+    let size = monitor.size();
+    let (screen_w, screen_h) = (
+        f64::from(size.width) / scale,
+        f64::from(size.height) / scale,
+    );
+    (
+        (screen_w - width - 24.0).max(0.0),
+        (screen_h - height - 72.0).max(0.0),
+    )
 }
 
 /// The window closed: a capture neither saved nor edited is deleted.

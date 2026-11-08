@@ -395,16 +395,19 @@ pub fn quick_copy(app: AppHandle, path: String) -> Result<(), String> {
     crate::quick::copy(&app, &quick_path(&app, &path)?)
 }
 
+/// Windows are built from async commands only: a synchronous command runs
+/// on the main thread, where creating a webview window freezes it (blank
+/// window).
 /// Opens the capture in the editor and closes the quick-actions window.
 #[tauri::command]
-pub fn quick_edit(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
+pub async fn quick_edit(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
     crate::quick::edit(&app, &quick_path(&app, &path)?)?;
     let _ = window.destroy();
     Ok(())
 }
 
 #[tauri::command]
-pub fn quick_pin(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
+pub async fn quick_pin(app: AppHandle, window: tauri::Window, path: String) -> Result<(), String> {
     let scale = window.scale_factor().unwrap_or(1.0);
     crate::quick::pin(&app, &quick_path(&app, &path)?, scale)
 }
