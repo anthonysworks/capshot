@@ -38,6 +38,18 @@ export const ICONS = {
   restore: "M4.5 8.5a6 6 0 111 5M4.5 3.5v5h5",
   start: "M5 4v12M15 4l-7 6 7 6z",
   end: "M15 4v12M5 4l7 6-7 6z",
+  join: "M3 10h5M12 10h5M5.5 7.5L8 10l-2.5 2.5M14.5 7.5L12 10l2.5 2.5M10 3v3M10 14v3",
+  volume: "M3.5 7.5h3l4-3.5v12l-4-3.5h-3zM13.5 7a4 4 0 010 6M15.5 4.5a7.5 7.5 0 010 11",
+  mute: "M3.5 7.5h3l4-3.5v12l-4-3.5h-3zM13.5 8l4 4M17.5 8l-4 4",
+  duplicate: "M7 7h9.5v9.5H7zM13 7V3.5H3.5V13H7M11.75 9.5v5M9.25 12h5",
+  close: "M5 5l10 10M15 5L5 15",
+  pin: "M12.5 3l4.5 4.5-2 1-3 3 .5 3.5-1.5 1.5-3-3L4 17.5l-1.5-1.5L6.5 12l-3-3L5 7.5l3.5.5 3-3z",
+  text_scan: "M3 6.5V3h3.5M13.5 3H17v3.5M17 13.5V17h-3.5M6.5 17H3v-3.5M6.5 7.5h7M10 7.5v6",
+  qr: "M3 3h5v5H3zM12 3h5v5h-5zM3 12h5v5H3zM12 12h2v2h-2zM15 15h2v2h-2zM12 16h1M16 12h1",
+  picker: "M12.5 4.5l3 3M14 3a2.1 2.1 0 013 3l-2 2-3-3zM12 6l-7.5 7.5L4 16l2.5-.5L14 8",
+  edit: "M3.5 16.5l1-4L13 4a1.4 1.4 0 012 0l1 1a1.4 1.4 0 010 2l-8.5 8.5zM11.5 5.5l3 3",
+  gif: "M2.5 4.5h15v11h-15zM8 8.5H6.5v3H8v-1.3M10.5 8.5v3M13 11.5v-3h1.8M13 10h1.4",
+  stop: "M5 5h10v10H5z",
 } as const;
 
 export type IconName = keyof typeof ICONS;

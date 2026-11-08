@@ -179,20 +179,68 @@ export function packRows(items: { id: number; start: number; end: number }[]): {
   return { row, count: Math.max(1, ends.length) };
 }
 
-/** The soft click mixed into exports, played in the preview. */
-export function playClick(audio: AudioContext, volume = 0.35) {
-  const rate = audio.sampleRate;
-  const length = Math.floor(rate * 0.09);
-  const buffer = audio.createBuffer(1, length, rate);
-  const data = buffer.getChannelData(0);
+/** Click sounds, the same as the ones mixed into exports (kadra-record's
+ * `stretch::click_sound` makes identical samples). */
+export type ClickSound = "soft" | "pop" | "click";
+
+export const CLICK_SOUNDS: { value: ClickSound; label: string }[] = [
+  { value: "soft", label: "Soft tap" },
+  { value: "pop", label: "Pop" },
+  { value: "click", label: "Mouse click" },
+];
+
+/** Mono samples in -1..1 for `kind`, at `rate` Hz. */
+export function clickSamples(kind: ClickSound, rate: number): Float32Array {
+  const seconds = kind === "soft" ? 0.14 : kind === "pop" ? 0.08 : 0.1;
+  const length = Math.floor(rate * seconds);
+  const out = new Float32Array(length);
   let phase = 0;
+  let seed = 0x2545f491;
+  let low = 0;
+  const noise = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return (seed / 4294967296) * 2 - 1;
+  };
   for (let i = 0; i < length; i++) {
     const t = i / rate;
-    const pitch = 240 + 240 * Math.exp(-t * 60);
-    phase += (2 * Math.PI * pitch) / rate;
-    const envelope = Math.min(1, t / 0.003) * Math.exp(-t * 55);
-    data[i] = envelope * (0.85 * Math.sin(phase) + 0.15 * Math.sin(2 * phase)) * volume;
+    let v = 0;
+    if (kind === "soft") {
+      // A fingertip on a table: low, round, no edge.
+      const pitch = 150 + 110 * Math.exp(-t * 35);
+      phase += (2 * Math.PI * pitch) / rate;
+      const attack = t < 0.008 ? 0.5 - 0.5 * Math.cos((Math.PI * t) / 0.008) : 1;
+      v = attack * Math.exp(-t * 32) * (Math.sin(phase) + 0.06 * Math.sin(2 * phase));
+    } else if (kind === "pop") {
+      const pitch = 320 + 520 * (1 - Math.exp(-t * 80));
+      phase += (2 * Math.PI * pitch) / rate;
+      v = Math.min(1, t / 0.002) * Math.exp(-t * 60) * Math.sin(phase);
+    } else {
+      // Press, then release: two short, dull snaps.
+      const n = noise();
+      low += 0.3 * (n - low);
+      const press = Math.exp(-t * 700);
+      const r = t - 0.055;
+      const release = r >= 0 ? 0.55 * Math.exp(-r * 900) : 0;
+      phase += (2 * Math.PI * 1900) / rate;
+      v = (press + release) * (0.8 * low * 3 + 0.2 * Math.sin(phase));
+    }
+    out[i] = v;
   }
+  let peak = 0;
+  for (const v of out) peak = Math.max(peak, Math.abs(v));
+  if (peak > 0) for (let i = 0; i < length; i++) out[i]! /= peak;
+  return out;
+}
+
+/** How loud each click sound is mixed, as in the export. */
+export const CLICK_VOLUME: Record<ClickSound, number> = { soft: 0.3, pop: 0.25, click: 0.3 };
+
+/** Plays a click sound in the preview. */
+export function playClick(audio: AudioContext, kind: ClickSound = "soft") {
+  const samples = clickSamples(kind, audio.sampleRate);
+  const buffer = audio.createBuffer(1, samples.length, audio.sampleRate);
+  const volume = CLICK_VOLUME[kind];
+  buffer.getChannelData(0).set(samples.map((v) => v * volume));
   const node = audio.createBufferSource();
   node.buffer = buffer;
   node.connect(audio.destination);

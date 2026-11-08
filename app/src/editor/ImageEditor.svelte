@@ -1,7 +1,8 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
-  import { editorCopy, editorRead, editorSave, editorSaveCopy, showInFolder } from "../lib/api";
+  import { editorCopy, editorImageSaveAs, editorRead, editorSave, editorSaveTo, showInFolder } from "../lib/api";
+  import { VIVID } from "./colors";
   import Icon from "./Icon.svelte";
   import Kbd from "./Kbd.svelte";
   import type { IconName } from "./icons";
@@ -14,6 +15,10 @@
     LINEAR,
     bendTowards,
     curvePoints,
+    drawnBend,
+    TEXT_FONTS,
+    type TextFont,
+    textFont,
     type Point,
     type Rect,
     type Shape,
@@ -77,9 +82,9 @@
   const TOOLS = GROUPS.flatMap((g) => g.tools);
   /** Default colour of each tool (the highlighter is yellow); the last
    * colour picked for a tool is remembered. */
-  const toolColors: Partial<Record<Tool, string>> = { highlight: "#ffd60a" };
-  let lastColor = "#e5484d";
-  const COLORS = ["#e5484d", "#f5a524", "#ffd60a", "#30a46c", "#3b82f6", "#a855f7", "#ffffff", "#111111"];
+  const toolColors: Partial<Record<Tool, string>> = { highlight: "#ffee00" };
+  let lastColor = VIVID[0]!;
+  const COLORS = VIVID;
   const SIZES = [
     { level: 1, label: "Thin" },
     { level: 2, label: "Medium" },
@@ -96,9 +101,13 @@
   let image = $state<ImageBitmap | null>(null);
   let error = $state("");
   let tool = $state<Tool>("arrow");
-  let color = $state<string>("#e5484d");
+  let color = $state<string>(VIVID[0]!);
   let level = $state(2);
   let fill = $state<Fill>("none");
+  /** Style of new texts (and of the selected one). */
+  let textLook = $state<{ font: TextFont; bold: boolean; italic: boolean }>({ font: "sans", bold: true, italic: false });
+  /** While drawing a curved arrow: the path followed, to bend it that way. */
+  let curvePath: Point[] = [];
   let shapes = $state<Shape[]>([]);
   let crop = $state<Rect | null>(null);
   let frame = $state<Frame>({ enabled: false, background: 0, padding: 64, radius: 12, shadow: true });
@@ -390,6 +399,7 @@
       color,
       size: kind === "text" ? (level + 1) * unit : kind === "blur" ? 6 * unit : stroke,
       fill: FILLABLE.includes(kind) ? fill : "none",
+      ...(kind === "text" ? { ...textLook } : {}),
       x1: p.x,
       y1: p.y,
       x2: p.x,
@@ -447,6 +457,7 @@
     }
     drag = { kind: "draw", start: p, moved: false };
     if (tool === "frame") return;
+    curvePath = [p];
     draft = make(tool, p, FREEHAND.includes(tool) ? { points: [p] } : {});
   }
 
@@ -511,6 +522,10 @@
         } else {
           draft.x2 = p.x;
           draft.y2 = p.y;
+        }
+        if (draft.kind === "curve") {
+          curvePath.push(p);
+          draft.bend = drawnBend(draft, curvePath);
         }
       }
     }
@@ -608,6 +623,13 @@
     if (sh && tool === "select" && FILLABLE.includes(sh.kind)) commit(() => (sh.fill = f));
   }
 
+  /** Font, bold, italic: for new texts and the selected one. */
+  function setTextLook(change: Partial<typeof textLook>) {
+    textLook = { ...textLook, ...change };
+    const sh = selectedShape;
+    if (sh?.kind === "text") commit(() => Object.assign(sh, change));
+  }
+
   function setFrame(change: Partial<Frame>) {
     commit(() => (frame = { ...frame, ...change }));
   }
@@ -668,9 +690,12 @@
     }
   }
 
-  async function saveCopy() {
+  /** Saves to a name and place picked in a dialog. */
+  async function saveAs() {
     try {
-      copyPath = await editorSaveCopy(path, await flatten());
+      const output = await editorImageSaveAs(path);
+      if (!output) return;
+      copyPath = await editorSaveTo(path, output, await flatten());
       dirty = false;
       notify(`Saved as ${copyPath.split(/[\\/]/).pop()}`);
     } catch (e) {
@@ -724,7 +749,7 @@
       copy();
     } else if (ctrl && key === "s") {
       e.preventDefault();
-      if (e.shiftKey) saveCopy();
+      if (e.shiftKey) saveAs();
       else save();
     } else if (ctrl && key === "d" && selectedShape) {
       e.preventDefault();
@@ -782,7 +807,9 @@
     const left = (view.ox + editing.x * view.s) / view.dpr;
     const top = (view.oy + editing.y * view.s) / view.dpr;
     const size = (fontSize((level + 1) * unit) * view.s) / view.dpr;
-    return `left:${left}px;top:${top}px;font-size:${size}px;color:${color}`;
+    const look = editing.id !== null ? shapes.find((sh) => sh.id === editing?.id) : null;
+    const font = textFont({ ...(look ?? { size: level + 1 }), ...(look ? {} : textLook) } as Shape, size);
+    return `left:${left}px;top:${top}px;font:${font};color:${color}`;
   });
 
   const showFill = $derived(
@@ -821,8 +848,8 @@
     </div>
     <div class="spacer"></div>
     <button type="button" class="action" onclick={copy}><Icon name="copy" /> Copy <Kbd keys="Ctrl+C" /></button>
-    <button type="button" class="action" onclick={saveCopy}
-      ><Icon name="saveCopy" /> Save a copy <Kbd keys="Ctrl+Shift+S" /></button
+    <button type="button" class="action" onclick={saveAs}
+      ><Icon name="saveCopy" /> Save as… <Kbd keys="Ctrl+Shift+S" /></button
     >
     <button type="button" class="action primary" onclick={save}><Icon name="save" /> Save <Kbd keys="Ctrl+S" /></button>
   </header>
@@ -992,6 +1019,25 @@
             </div>
           </section>
         {/if}
+        {#if tool === "text" || selectedShape?.kind === "text"}
+          {@const look = selectedShape?.kind === "text" ? { font: selectedShape.font ?? "sans", bold: selectedShape.bold !== false, italic: !!selectedShape.italic } : textLook}
+          <section>
+            <h3>Text style</h3>
+            <div class="fonts">
+              {#each TEXT_FONTS as tf (tf.value)}
+                <button type="button" class="chip" class:active={look.font === tf.value} style="font-family:{tf.family}" onclick={() => setTextLook({ font: tf.value })}
+                  >{tf.label}</button
+                >
+              {/each}
+            </div>
+            <div class="row">
+              <button type="button" class="chip" class:active={look.bold} style="font-weight:700" onclick={() => setTextLook({ bold: !look.bold })}>Bold</button>
+              <button type="button" class="chip" class:active={look.italic} style="font-style:italic" onclick={() => setTextLook({ italic: !look.italic })}
+                >Italic</button
+              >
+            </div>
+          </section>
+        {/if}
         {#if selectedShape}
           <section>
             <h3>Selection</h3>
@@ -1023,8 +1069,8 @@
   .topbar {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 12px;
+    gap: 14px;
+    padding: 10px 16px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
@@ -1033,14 +1079,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-weight: 600;
+    font-weight: 650;
   }
   .group {
     display: flex;
     align-items: center;
     gap: 2px;
-    padding-left: 10px;
-    border-left: 1px solid var(--border);
   }
   .spacer {
     flex: 1;
@@ -1049,25 +1093,23 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: auto 1fr 230px;
+    grid-template-columns: auto 1fr 250px;
   }
   .tools {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 10px 8px;
+    gap: 16px;
+    padding: 16px 12px;
     background: var(--surface);
     border-right: 1px solid var(--border);
     overflow-y: auto;
   }
   .heading,
   h3 {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: 12px;
+    font-weight: 650;
     color: var(--text-muted);
-    margin: 0 0 4px;
+    margin: 0 0 8px;
   }
   .tool-grid {
     display: grid;
@@ -1081,16 +1123,10 @@
     width: 40px;
     height: 40px;
     padding: 0;
-    border-color: transparent;
     background: transparent;
-  }
-  .tool:hover {
-    background: var(--hover);
-    border-color: var(--focus);
   }
   .tool.active {
     background: var(--accent);
-    border-color: var(--accent);
     color: var(--on-accent);
   }
   .key {
@@ -1099,16 +1135,16 @@
     bottom: 1px;
     font-size: 9px;
     font-weight: 700;
-    opacity: 0.7;
+    opacity: 0.5;
   }
   .panel {
-    padding: 12px;
+    padding: 20px;
     background: var(--surface);
     border-left: 1px solid var(--border);
     overflow-y: auto;
   }
   .panel section {
-    margin-bottom: 16px;
+    margin-bottom: 24px;
   }
   .panel button {
     display: inline-flex;
@@ -1119,8 +1155,18 @@
   .swatches {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
+  }
+  .fonts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .fonts .chip {
+    justify-content: center;
+    font-size: 15px;
   }
   .column {
     display: flex;
@@ -1131,41 +1177,35 @@
     justify-content: space-between;
   }
   .note {
-    margin: 6px 0;
+    margin: 8px 0;
     font-size: 12px;
     color: var(--text-muted);
   }
   button.icon {
     display: grid;
     place-items: center;
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     padding: 0;
-    border-color: transparent;
     background: transparent;
     font-size: 18px;
   }
-  button.icon:hover:not(:disabled),
-  button.chip:hover {
-    background: var(--hover);
-    border-color: var(--focus);
-  }
   button.chip {
-    padding: 3px 9px;
+    padding: 5px 11px;
   }
   button.chip.active {
     background: var(--accent);
-    border-color: var(--accent);
     color: var(--on-accent);
   }
   button.action {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    min-height: 34px;
+    gap: 7px;
+    min-height: 36px;
   }
   button.action.primary {
     min-width: 120px;
+    min-height: 40px;
     justify-content: center;
   }
   button.link {
@@ -1178,13 +1218,16 @@
     width: 24px;
     height: 24px;
     padding: 0;
-    border-radius: var(--radius);
+    border-radius: 50%;
     background: var(--swatch);
-    border: 2px solid var(--border);
+    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
+  }
+  .swatch:hover:not(:disabled) {
+    background: var(--swatch);
   }
   .swatch.wide {
     width: 38px;
-    border-radius: var(--radius);
+    border-radius: 6px;
   }
   .swatch.active {
     outline: 2px solid var(--focus);
@@ -1201,7 +1244,7 @@
   .dot {
     width: var(--d);
     height: var(--d);
-    border-radius: var(--radius);
+    border-radius: 50%;
     background: currentColor;
   }
   .check,
@@ -1209,7 +1252,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin: 6px 0;
+    margin: 8px 0;
     font-size: 13px;
   }
   .field input {
@@ -1219,13 +1262,14 @@
     min-width: 60px;
     justify-content: center;
     font-variant-numeric: tabular-nums;
+    background: transparent;
   }
   .stage {
     position: relative;
     min-width: 0;
     overflow: hidden;
     background:
-      repeating-conic-gradient(color-mix(in srgb, var(--bg) 92%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
+      repeating-conic-gradient(color-mix(in srgb, var(--bg) 94%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
       20px;
   }
   canvas {
@@ -1242,8 +1286,6 @@
     margin: 0;
     border: 1px dashed var(--accent);
     background: transparent;
-    font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
-    font-weight: 600;
     line-height: 1.25;
     resize: none;
     overflow: hidden;
@@ -1263,18 +1305,17 @@
     position: absolute;
     left: 50%;
     transform: translateX(-50%);
-    padding: 8px 14px;
-    border-radius: var(--radius);
+    padding: 8px 16px;
+    border-radius: 999px;
     background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow);
-    font-weight: 600;
+    box-shadow: var(--shadow-soft);
+    font-weight: 550;
   }
   .toast {
     bottom: 20px;
   }
   .hint {
-    top: 12px;
+    top: 14px;
     font-size: 13px;
     color: var(--text-muted);
   }

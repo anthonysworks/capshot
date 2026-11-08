@@ -1,55 +1,57 @@
-/* Kadra's look: square, high contrast, one accent (docs/UI_DESIGN.md).
-   Light by default; dark from Windows or the theme setting. */
+/* Kadra's look: calm and airy, readable at a glance, one green accent for
+   the action that matters (docs/UI_DESIGN.md). Light by default; dark from
+   Windows or the theme setting. */
 :root {
-  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font: "Inter Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Inter Variable", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", Consolas, monospace;
-  --radius: 2px;
+  --radius: 8px;
+  --radius-lg: 14px;
 
-  --bg: #e6e6e6;
-  --surface: #f7f7f7;
+  --bg: #f2f2f5;
+  --surface: #ffffff;
   --raised: #ffffff;
-  --control: #ececec;
-  --hover: #dcdcdc;
-  --border: #cfcfcf;
-  --border-strong: #a9a9a9;
-  --text: #101010;
-  --text-muted: #3d3d3d;
-  --text-faint: #666666;
+  --control: #ececf0;
+  --hover: #e2e2e8;
+  --border: #e4e4e9;
+  --border-strong: #c4c4cc;
+  --text: #1c1c1f;
+  --text-muted: #4a4a52;
+  --text-faint: #6e6e78;
   --accent: #107c10;
-  --accent-hover: #0c650c;
+  --accent-hover: #0d6b0d;
   --accent-text: #0b6a0b;
   --on-accent: #ffffff;
-  --focus: #000000;
+  --focus: #1c1c1f;
   --danger: #c50f1f;
   --success: #0b6a0b;
   --warning: #8a5300;
-  --shadow: 0 6px 24px rgb(0 0 0 / 0.18);
-  --band: rgb(0 0 0 / 0.55);
+  --shadow: 0 10px 34px rgb(20 20 30 / 0.14);
+  --shadow-soft: 0 2px 10px rgb(20 20 30 / 0.08);
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --bg: #181816;
-  --surface: #0c0d11;
-  --raised: #16171c;
-  --control: #1f2128;
-  --hover: #2a2d36;
-  --border: #262830;
-  --border-strong: #3a3d48;
-  --text: #ffffff;
-  --text-muted: #c3c6cf;
-  --text-faint: #8d919c;
+  --bg: #141416;
+  --surface: #1c1c1f;
+  --raised: #252529;
+  --control: #2a2a2f;
+  --hover: #34343a;
+  --border: #2c2c31;
+  --border-strong: #46464e;
+  --text: #f5f5f7;
+  --text-muted: #c9c9d0;
+  --text-faint: #9a9aa3;
   --accent: #107c10;
-  --accent-hover: #138f13;
-  --accent-text: #5fd35f;
+  --accent-hover: #149214;
+  --accent-text: #6fdc6f;
   --on-accent: #ffffff;
-  --focus: #ffffff;
-  --danger: #ff5a5f;
-  --success: #5fd35f;
-  --warning: #ffb000;
-  --shadow: 0 10px 40px rgb(0 0 0 / 0.5);
-  --band: rgb(214 218 228 / 0.9);
+  --focus: #f5f5f7;
+  --danger: #ff6b6b;
+  --success: #6fdc6f;
+  --warning: #ffb547;
+  --shadow: 0 14px 44px rgb(0 0 0 / 0.55);
+  --shadow-soft: 0 2px 12px rgb(0 0 0 / 0.35);
   color-scheme: dark;
 }
 
@@ -59,13 +61,16 @@
 
 body {
   margin: 0;
-  font: 14px/1.4 var(--font);
+  font: 14px/1.5 var(--font);
+  font-feature-settings: "cv11", "ss03";
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
   background: var(--bg);
   color: var(--text);
   user-select: none;
 }
 
-/* Editors fill their window and scroll inside it. */
+/* Editors and tool windows fill their window and scroll inside it. */
 :root.editor body {
   overflow: hidden;
 }
@@ -74,6 +79,7 @@ h1,
 h2,
 h3 {
   font-family: var(--font-display);
+  letter-spacing: -0.02em;
 }
 
 button,
@@ -82,9 +88,13 @@ select {
   font: inherit;
   color: inherit;
   background: var(--control);
-  border: 1px solid var(--border-strong);
+  border: 1px solid transparent;
   border-radius: var(--radius);
-  padding: 5px 10px;
+  padding: 6px 12px;
+}
+
+select {
+  border-color: var(--border);
 }
 
 select option {
@@ -93,7 +103,11 @@ select option {
 }
 
 button {
-  font-weight: 600;
+  font-weight: 550;
+  transition:
+    background-color 0.12s,
+    border-color 0.12s,
+    box-shadow 0.12s;
 }
 
 button:not(:disabled) {
@@ -102,27 +116,24 @@ button:not(:disabled) {
 
 button:not(:disabled):hover,
 select:hover {
-  border-color: var(--focus);
+  background: var(--hover);
 }
 
 button:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
 }
 
-/* The one action that matters in an area: Xbox green, bold, tall. */
+/* The one action that matters in an area: green, bold, tall. */
 button.primary {
-  min-height: 36px;
-  padding: 6px 18px;
+  min-height: 40px;
+  padding: 8px 20px;
   background: var(--accent);
-  border-color: var(--accent);
   color: var(--on-accent);
-  font-weight: 700;
+  font-weight: 650;
 }
 
 button.primary:not(:disabled):hover {
   background: var(--accent-hover);
-  border-color: var(--accent-hover);
-  box-shadow: 0 0 0 2px var(--focus);
 }
 
 input[type="checkbox"],
@@ -137,7 +148,40 @@ input[type="checkbox"] {
   height: 18px;
 }
 
-/* Xbox-like focus: a thick frame in the text colour. */
+/* An on/off switch. */
+input[type="checkbox"].switch {
+  appearance: none;
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+input[type="checkbox"].switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+  transition: transform 0.15s;
+}
+
+input[type="checkbox"].switch:checked {
+  background: var(--accent);
+}
+
+input[type="checkbox"].switch:checked::after {
+  transform: translateX(16px);
+}
+
+/* Focus from the keyboard: a clear ring in the text colour. */
 input:focus-visible,
 select:focus-visible,
 button:focus-visible,
@@ -155,7 +199,8 @@ label:focus-within:has(input[type="radio"]:focus-visible) {
 
 ::-webkit-scrollbar-thumb {
   background: var(--border-strong);
-  border: 2px solid transparent;
+  border: 3px solid transparent;
+  border-radius: 6px;
   background-clip: padding-box;
 }
 

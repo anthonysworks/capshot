@@ -5,7 +5,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 export type ImageFormat = "png" | "jpeg" | "webp";
 export type VideoCodec = "h264" | "hevc" | "av1";
 export type RecordingFormat = "mp4" | "gif";
-export type AfterCapture = "editor" | "preview" | "nothing";
+export type AfterCapture = "actions" | "editor" | "preview" | "nothing";
 export type Folder = "screenshots" | "recordings" | "logs";
 
 /** Mirrors `kadra_core::Config`. */
@@ -125,7 +125,7 @@ export interface OverlayImage {
 export interface Composition {
   overlays: OverlayImage[];
   cursor: { visible: boolean; scale: number; image: { png: string; hotspot: [number, number] } | null; halo: [number, number, number, number] | null } | null;
-  clicks: { ring: boolean; color: [number, number, number]; sound: boolean } | null;
+  clicks: { ring: boolean; color: [number, number, number]; sound: boolean; voice: "soft" | "pop" | "click" } | null;
   canvas: { ratio: [number, number]; colors: [number, number, number][]; padding: number } | null;
   /** Areas shown as blocks, in video pixels. */
   pixelate: { x: number; y: number; w: number; h: number; block: number; start: number; end: number }[];
@@ -152,6 +152,10 @@ export type ExportTask =
       /** null: the recording's frame rate, size. */
       fps: number | null;
       height: number | null;
+      /** 1: as recorded (up to 2); fades in seconds. */
+      volume: number;
+      fade_in: number;
+      fade_out: number;
     }
   | { kind: "gif"; gif: Config["gif"]; edit: VideoEdit | null };
 
@@ -193,3 +197,42 @@ export const editorSaveAs = (path: string, extension: "mp4" | "gif") =>
 
 /** Deletes a recording that was never saved and closes its editor. */
 export const editorDiscard = (path: string) => invoke<void>("editor_discard", { path });
+
+/** Asks where to save an edited image; resolves to the file, or null. */
+export const editorImageSaveAs = (path: string) => invoke<string | null>("editor_image_save_as", { path });
+
+/** Writes an image (PNG bytes) to a file picked with `editorImageSaveAs`. */
+export const editorSaveTo = (path: string, output: string, png: Uint8Array) =>
+  invoke<string>("editor_save_to", png, {
+    headers: { "x-path": encodeURIComponent(path), "x-output": encodeURIComponent(output) },
+  });
+
+// ── Quick actions after a capture ───────────────────────────────────────
+
+export interface QuickInfo {
+  video: boolean;
+  /** Already in its destination folder. */
+  saved: boolean;
+  /** Folder Save puts it in. */
+  folder: string;
+  bytes: number;
+}
+
+export const quickInfo = (path: string) => invoke<QuickInfo>("quick_info", { path });
+/** Saves the capture to its folder; resolves to its new path. */
+export const quickSave = (path: string) => invoke<string>("quick_save", { path });
+/** Saves where the user picks; resolves to the new path, or null. */
+export const quickSaveAs = (path: string) => invoke<string | null>("quick_save_as", { path });
+export const quickCopy = (path: string) => invoke<void>("quick_copy", { path });
+/** Opens the capture in the editor and closes the window. */
+export const quickEdit = (path: string) => invoke<void>("quick_edit", { path });
+/** Keeps the screenshot on screen in a small window. */
+export const quickPin = (path: string) => invoke<void>("quick_pin", { path });
+/** Text in the screenshot (Windows OCR). */
+export const quickText = (path: string) => invoke<string>("quick_text", { path });
+/** Contents of the QR codes in the screenshot. */
+export const quickCodes = (path: string) => invoke<string[]>("quick_codes", { path });
+/** Deletes an unsaved recording and closes the window. */
+export const quickDiscard = (path: string) => invoke<void>("quick_discard", { path });
+/** Puts text on the clipboard. */
+export const copyText = (text: string) => invoke<void>("copy_text", { text });

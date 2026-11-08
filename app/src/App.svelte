@@ -32,10 +32,15 @@
   let conversions = $state<JobProgress[]>([]);
 
   const AFTER: { value: AfterCapture; title: string; text: string }[] = [
+    {
+      value: "actions",
+      title: "Show actions",
+      text: "Copy, save, edit, read its text or QR code. Saved only when you ask.",
+    },
     { value: "editor", title: "Open the editor", text: "Annotate or trim right away." },
     {
       value: "preview",
-      title: "Quick",
+      title: "Thumbnail",
       text: "Copied, with a thumbnail in the corner; click it to open the editor.",
     },
     { value: "nothing", title: "Silent", text: "Copied and saved, nothing on screen." },
@@ -312,7 +317,14 @@
             </label>
             <label class="row">
               <span>Quality</span>
-              <input type="range" min="15" max="35" bind:value={config.recording.quality} />
+              <!-- Better to the right: the setting is an encoder value, lower is better. -->
+              <input
+                type="range"
+                min="15"
+                max="35"
+                value={50 - config.recording.quality}
+                oninput={(e) => config && (config.recording.quality = 50 - Number(e.currentTarget.value))}
+              />
               <span class="value"
                 >{config.recording.quality <= 20 ? "High" : config.recording.quality <= 26 ? "Balanced" : "Small"}</span
               >
@@ -481,12 +493,12 @@
     height: 100vh;
   }
 
-  /* Left rail: one category at a time, like the Xbox settings. */
+  /* Left rail: one category at a time. */
   .rail {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 16px 0;
+    gap: 4px;
+    padding: 22px 0;
     background: var(--surface);
     border-right: 1px solid var(--border);
     overflow-y: auto;
@@ -495,7 +507,7 @@
     display: flex;
     align-items: baseline;
     gap: 8px;
-    padding: 4px 20px 18px;
+    padding: 4px 24px 22px;
   }
   .brand strong {
     font-family: var(--font-display);
@@ -510,16 +522,16 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    margin: 0 8px;
-    padding: 9px 12px;
-    border: 2px solid transparent;
+    margin: 0 12px;
+    padding: 10px 14px;
+    border: none;
     background: transparent;
     color: var(--text-muted);
     font-size: 15px;
     text-align: left;
   }
   .category:not(:disabled):hover {
-    border-color: var(--focus);
+    background: var(--hover);
     color: var(--text);
   }
   .category.active {
@@ -556,33 +568,34 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 24px 28px 28px;
+    padding: 32px 40px 40px;
   }
   h1 {
-    margin: 0 0 16px;
+    margin: 0 0 24px;
     font-size: 28px;
-    font-weight: 700;
+    font-weight: 650;
   }
   .lead {
     margin: -6px 0 14px;
     color: var(--text-muted);
   }
   section {
-    margin-bottom: 14px;
-    padding: 14px 18px;
+    margin-bottom: 20px;
+    padding: 20px 24px;
+    border-radius: var(--radius-lg);
     background: var(--raised);
-    border: 1px solid var(--border);
+    box-shadow: var(--shadow-soft);
   }
   h2 {
-    margin: 0 0 10px;
+    margin: 0 0 14px;
     font-size: 15px;
-    font-weight: 700;
+    font-weight: 650;
   }
   .row {
     display: flex;
     align-items: center;
-    gap: 12px;
-    min-height: 40px;
+    gap: 14px;
+    min-height: 44px;
   }
   .row > span:first-child,
   .row.check > span {
@@ -619,26 +632,26 @@
     font-weight: 600;
   }
 
-  /* Choice tiles: square, framed in the text colour when hovered, green
-     when chosen. */
+  /* Choice tiles, green when chosen. */
   .tiles {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 8px;
-    margin-bottom: 8px;
+    gap: 10px;
+    margin-bottom: 12px;
   }
   .tile {
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    padding: 12px 14px;
-    border: 2px solid var(--border);
+    gap: 4px;
+    padding: 14px 16px;
+    border: 2px solid transparent;
+    border-radius: var(--radius);
     background: var(--control);
     cursor: pointer;
   }
   .tile:hover {
-    border-color: var(--focus);
+    background: var(--hover);
   }
   .tile input {
     position: absolute;
@@ -665,6 +678,7 @@
     place-items: center;
     width: 20px;
     height: 20px;
+    border-radius: 50%;
     background: var(--accent);
     color: var(--on-accent);
     font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
@@ -674,24 +688,26 @@
     display: flex;
     height: 34px;
     margin-bottom: 6px;
-    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: inset 0 0 0 1px var(--border-strong);
   }
   .swatch i {
     flex: 1;
   }
   .theme-dark .swatch i:first-child,
   .theme-system .swatch i:first-child {
-    background: #0c0d11;
+    background: #1c1c1f;
   }
   .theme-dark .swatch i:last-child {
-    background: #181816;
+    background: #141416;
   }
   .theme-light .swatch i:first-child {
-    background: #f7f7f7;
+    background: #ffffff;
   }
   .theme-light .swatch i:last-child,
   .theme-system .swatch i:last-child {
-    background: #e6e6e6;
+    background: #f2f2f5;
   }
 
   dl {
@@ -714,8 +730,9 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 18px;
+    padding: 22px;
     border: 2px dashed var(--border-strong);
+    border-radius: var(--radius-lg);
     color: var(--text-muted);
   }
   .drop strong {
@@ -754,7 +771,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 12px 28px;
+    padding: 14px 40px;
     background: var(--surface);
     border-top: 1px solid var(--border);
   }
@@ -764,8 +781,8 @@
     margin-left: auto;
   }
   .actions button {
-    min-height: 36px;
-    padding: 6px 18px;
+    min-height: 40px;
+    padding: 8px 20px;
   }
   .save {
     min-width: 120px;

@@ -119,3 +119,15 @@ export function label(t: number, step: number) {
 }
 
 export const speedLabel = (speed: number) => `${speed}×`;
+
+/** Removes the cut at the start of segment `i`, joining it with the one
+ * before. The joined part is kept if either side was, at the speed of the
+ * kept side (the left one when both were). */
+export function join(segments: Segment[], i: number): Segment[] {
+  const a = segments[i - 1];
+  const b = segments[i];
+  if (!a || !b) return segments;
+  const kept = a.kept || b.kept;
+  const speed = a.kept || !b.kept ? a.speed : b.speed;
+  return [...segments.slice(0, i - 1), { start: a.start, end: b.end, kept, speed }, ...segments.slice(i + 1)];
+}

@@ -42,6 +42,26 @@ export interface Shape {
   /** Curved arrow: how far its middle sits from the straight line, as a
    * share of its length (negative: the other side). */
   bend?: number;
+  /** Text style. */
+  font?: TextFont;
+  bold?: boolean;
+  italic?: boolean;
+}
+
+export type TextFont = "sans" | "serif" | "mono" | "hand";
+
+/** Typefaces offered for texts (all shipped with Windows). */
+export const TEXT_FONTS: { value: TextFont; label: string; family: string }[] = [
+  { value: "sans", label: "Sans", family: `"Segoe UI Variable Text", "Segoe UI", sans-serif` },
+  { value: "serif", label: "Serif", family: `Georgia, "Times New Roman", serif` },
+  { value: "mono", label: "Mono", family: `"Cascadia Mono", Consolas, monospace` },
+  { value: "hand", label: "Hand", family: `"Segoe Print", "Comic Sans MS", cursive` },
+];
+
+/** Canvas font of a text shape. */
+export function textFont(s: Shape, size = fontSize(s.size)): string {
+  const family = TEXT_FONTS.find((f) => f.value === s.font)?.family ?? TEXT_FONTS[0]!.family;
+  return `${s.italic ? "italic " : ""}${s.bold === false ? 400 : 600} ${size}px ${family}`;
 }
 
 export interface Rect {
@@ -85,6 +105,22 @@ export function bendTowards(s: Shape, p: Point): number {
   return Math.max(-1.5, Math.min(1.5, bend));
 }
 
+/** Bend of a curved arrow drawn along `path`: it goes through the point
+ * farthest from the straight line, the side the hand went; a straight drag
+ * gives a gentle arc bowing upwards. */
+export function drawnBend(s: Shape, path: Point[]): number {
+  const dx = s.x2 - s.x1;
+  const dy = s.y2 - s.y1;
+  const length = Math.hypot(dx, dy);
+  let best = 0;
+  for (const q of path) {
+    const b = bendTowards(s, q);
+    if (Math.abs(b) > Math.abs(best)) best = b;
+  }
+  if (length > 0 && Math.abs(best) > 0.06) return best;
+  return dx !== 0 ? -Math.sign(dx) * DEFAULT_BEND : Math.sign(dy || 1) * DEFAULT_BEND;
+}
+
 /** Points along a curved arrow, for hit testing and bounds. */
 function curveSamples(s: Shape, count = 24): Point[] {
   const { control: c } = curvePoints(s);
@@ -119,7 +155,7 @@ export function contrast(color: string): string {
 
 function textBox(ctx: CanvasRenderingContext2D, s: Shape): Rect {
   const size = fontSize(s.size);
-  ctx.font = `600 ${size}px ${FONT}`;
+  ctx.font = textFont(s, size);
   const lines = (s.text ?? "").split("\n");
   const w = Math.max(...lines.map((l) => ctx.measureText(l).width), 4);
   const pad = s.fill === "none" ? 0 : size * 0.3;
@@ -395,7 +431,7 @@ export function renderAnnotations(ctx: CanvasRenderingContext2D, shapes: Shape[]
           ctx.lineWidth = Math.max(2, size / 7);
           ctx.strokeStyle = contrast(s.color);
         }
-        ctx.font = `600 ${size}px ${FONT}`;
+        ctx.font = textFont(s, size);
         ctx.textBaseline = "top";
         ctx.fillStyle = ink;
         (s.text ?? "").split("\n").forEach((line, i) => {

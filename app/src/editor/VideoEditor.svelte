@@ -1,7 +1,7 @@
 <script lang="ts">
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     type Composition,
     type Config,
@@ -18,13 +18,12 @@
     editorVideoSources,
     getConfig,
     onJobProgress,
-    showInFolder,
   } from "../lib/api";
   import Icon from "./Icon.svelte";
   import type { IconName } from "./icons";
   import Kbd from "./Kbd.svelte";
   import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, cursorAt, drawCursor, loadShapes } from "./cursors";
-  import { ditherBand } from "./dither";
+  import { VIVID } from "./colors";
   import {
     BACKGROUNDS,
     FREEHAND,
@@ -33,10 +32,14 @@
     type Rect,
     type Shape,
     type ShapeKind,
+    drawnBend,
     bounds,
     fontSize,
     hit,
     normalize,
+    TEXT_FONTS,
+    textFont,
+    type TextFont,
     renderAnnotations,
   } from "./shapes";
   import {
@@ -47,6 +50,8 @@
     fitLayout,
     packRows,
     plainLayout,
+    CLICK_SOUNDS,
+    type ClickSound,
     playClick,
     ratioCrop,
     resizeShape,
@@ -58,6 +63,7 @@
     type Trim,
     format,
     indexAt,
+    join,
     label,
     nextKept,
     outputLength,
@@ -88,26 +94,24 @@
     { tool: "number", icon: "number", label: "Numbered step", key: "N" },
     { tool: "pixelate", icon: "pixelate", label: "Pixelate: hides what is under it", key: "B" },
   ];
-  const COLORS = ["#e5484d", "#f5a524", "#ffd60a", "#30a46c", "#3b82f6", "#ffffff", "#111111"];
+  const COLORS = VIVID;
   const LEVELS = [
     { level: 1, label: "Thin" },
     { level: 2, label: "Medium" },
     { level: 4, label: "Thick" },
   ];
-  const HEIGHTS: { value: number | null; label: string }[] = [
-    { value: null, label: "Original" },
-    { value: 2160, label: "2160p" },
-    { value: 1440, label: "1440p" },
-    { value: 1080, label: "1080p" },
-    { value: 720, label: "720p" },
-    { value: 480, label: "480p" },
+  /** Smaller sizes and rates offered besides the recording's own. */
+  const HEIGHTS = [2160, 1440, 1080, 720, 480];
+  const FRAME_RATES = [60, 30, 24];
+  const FADES = [0, 0.5, 1, 2];
+  /** Text backgrounds. */
+  const FILLS: { value: Shape["fill"]; label: string }[] = [
+    { value: "none", label: "Outlined text" },
+    { value: "soft", label: "On a tinted box" },
+    { value: "solid", label: "On a solid box" },
   ];
-  const FRAME_RATES: { value: number | null; label: string }[] = [
-    { value: null, label: "Original" },
-    { value: 60, label: "60 fps" },
-    { value: 30, label: "30 fps" },
-    { value: 24, label: "24 fps" },
-  ];
+  /** The arrow pointer, in a 32 px box (as drawn by `drawCursor`). */
+  const ARROW = "M2 2L2 24L7.5 19L11.5 28L15 26.5L11 17.5L18.5 17.5Z";
   /** Pixel block of the pixelate tool, by thickness. */
   const BLOCKS: Record<number, number> = { 1: 8, 2: 14, 4: 24 };
   const RATIOS: { label: string; ratio: [number, number] | null }[] = [
@@ -151,6 +155,10 @@
   let trim = $state<Trim>({ start: 0, end: 0 });
   let selectedSegment = $state<number | null>(null);
   let audio = $state(true);
+  /** Sound level (1: as recorded, up to 2) and fades, in seconds. */
+  let volume = $state(1);
+  let fadeIn = $state(0);
+  let fadeOut = $state(0);
   /** What is saved, and how. */
   let exportKind = $state<"mp4" | "gif">("mp4");
   let height = $state<number | null>(null);
@@ -163,7 +171,6 @@
   /** Export folder, and whether the recording is still a draft. */
   let folder = $state("");
   let unsaved = $state(false);
-  let discardArmed = $state(false);
   /** Asking whether to close without saving. */
   let closing = $state(false);
   /** Something was saved (or copied) from this draft. */
@@ -187,6 +194,7 @@
   let clickRing = $state(false);
   let clickColor = $state("#ffd60a");
   let clickSound = $state(false);
+  let clickVoice = $state<ClickSound>("soft");
   let overlays = $state<Overlay[]>([]);
   let selectedOverlay = $state<number | null>(null);
   let tool = $state<Tool>("select");
@@ -210,7 +218,13 @@
   let draft = $state<Shape | null>(null);
   let zoom = $state(1);
   let viewWidth = $state(800);
-  let menu = $state<"speed" | null>(null);
+  let menu = $state<"speed" | "sound" | null>(null);
+  /** A new format is being framed: Cancel goes back to the one before. */
+  let formatPending = false;
+  /** Playback errors in a row (the player reloads on the first ones). */
+  let failures = 0;
+  /** While drawing a curved arrow: the path followed, to bend it that way. */
+  let curvePath: Point[] = [];
   /** Resize handle under the pointer (select tool), or -1. */
   let hover = $state(-1);
   let nextId = 1;
@@ -311,7 +325,11 @@
       const i = jobs.findIndex((j) => j.job === p.job);
       const old = jobs[i];
       if (old) jobs[i] = { ...p, kind: old.kind };
-      if (old && p.output && p.output !== old.output) notify(old.kind === "copy" ? "Copied to the clipboard" : "Exported");
+      if (old && p.output && p.output !== old.output) {
+        savedOnce = true;
+        notify(old.kind === "copy" ? "Copied to the clipboard" : `Saved · ${name(p.output)}`);
+      }
+      if (old && p.error && !old.error) notify(`Not saved: ${p.error}`);
     });
     const observer = new ResizeObserver(() => {
       playerSize = { w: player.clientWidth, h: player.clientHeight };
@@ -370,6 +388,27 @@
   async function saveThenStay() {
     closing = false;
     await exportAs(exportKind);
+  }
+
+  /** The player stopped with an error (the system decoder can fail after
+   * a while, e.g. while an export uses the GPU): reload it where it was.
+   * Only repeated failures are reported. */
+  function playbackFailed() {
+    if (failures++ >= 3) {
+      error = "This video cannot be played here, but it can still be exported.";
+      return;
+    }
+    const at = time;
+    const resume = playing;
+    video.addEventListener(
+      "loadeddata",
+      () => {
+        video.currentTime = at;
+        if (resume) video.play().catch(() => {});
+      },
+      { once: true },
+    );
+    video.load();
   }
 
   function loaded() {
@@ -620,6 +659,24 @@
   /** Every frame while playing: skip removed parts, stop at the out point,
    * play each part at its speed, sound the clicks, keep the playhead in
    * view. */
+  /** Time in the result of source time `t`. */
+  function outputTime(t: number) {
+    let out = 0;
+    for (const p of kept) {
+      if (t < p.start) break;
+      out += (Math.min(t, p.end) - p.start) / p.speed;
+    }
+    return out;
+  }
+
+  /** Sound level at `t` seconds of the result. */
+  function soundLevel(t: number) {
+    let g = volume;
+    if (fadeIn > 0) g *= Math.max(0, Math.min(1, t / fadeIn));
+    if (fadeOut > 0) g *= Math.max(0, Math.min(1, (output - t) / fadeOut));
+    return g;
+  }
+
   function follow() {
     if (!video) return;
     time = video.currentTime;
@@ -636,12 +693,16 @@
     if (next > time + 0.01) video.currentTime = next;
     const rate = partAt(kept, next)?.speed ?? 1;
     if (video.playbackRate !== rate) video.playbackRate = rate;
+    // Volume and fades, as in the export (the preview cannot go above 100%).
+    video.muted = !audio;
+    const level = soundLevel(outputTime(next));
+    if (Math.abs(video.volume - Math.min(1, level)) > 0.01) video.volume = Math.min(1, level);
     // Clicks passed since the last frame (not across a jump).
     if (clickSound && cursorTrack && time > lastClickCheck && time - lastClickCheck < 0.5) {
       for (const c of cursorTrack.clicks) {
         if (c.t > lastClickCheck && c.t <= time) {
           audioContext ??= new AudioContext();
-          playClick(audioContext);
+          playClick(audioContext, clickVoice);
         }
       }
     }
@@ -673,7 +734,7 @@
   // Swapping to the copy without cursor keeps the position.
   $effect(() => {
     void source;
-    const at = time;
+    const at = untrack(() => time);
     if (video && cleanSource) {
       video.addEventListener("loadedmetadata", () => (video.currentTime = at), { once: true });
     }
@@ -701,6 +762,12 @@
     const state = from.pop();
     if (state === undefined) return;
     to.push(snapshot());
+    formatPending = false;
+    apply(state);
+  }
+
+  /** Puts back a state saved by `snapshot`. */
+  function apply(state: string) {
     const parsed = JSON.parse(state);
     segments = parsed.segments;
     trim = parsed.trim;
@@ -721,6 +788,12 @@
   function splitHere() {
     commit(() => (segments = split(segments, time)));
     selectedSegment = indexAt(segments, time);
+  }
+
+  /** Removes the cut at the start of part `i`. */
+  function joinAt(i: number) {
+    commit(() => (segments = join(segments, i)));
+    selectedSegment = null;
   }
 
   function removePart(i = selectedSegment ?? indexAt(segments, time)) {
@@ -857,6 +930,8 @@
   /** Keeps the frame being edited; the whole frame means no crop. */
   function applyCrop() {
     const r = cropDraft;
+    const pending = formatPending;
+    formatPending = false;
     cropping = false;
     cropDraft = null;
     if (!r) return;
@@ -864,17 +939,31 @@
     const next = { x: even(r.x), y: even(r.y), w: even(r.w), h: even(r.h) };
     const entire = next.x === 0 && next.y === 0 && next.w >= (vw & ~1) && next.h >= (vh & ~1);
     const value = entire && !lockedRatio ? null : next;
-    if (JSON.stringify(value) !== JSON.stringify(crop)) commit(() => (crop = value));
+    if (JSON.stringify(value) === JSON.stringify(crop)) return;
+    // Framing a new format is one step with choosing it.
+    if (pending) crop = value;
+    else commit(() => (crop = value));
   }
 
+  /** Leaves the frame as it was; a format just chosen is undone. */
   function cancelCrop() {
     cropping = false;
     cropDraft = null;
+    if (!formatPending) return;
+    formatPending = false;
+    const before = past.pop();
+    if (before !== undefined) apply(before);
+  }
+
+  /** A format change, framed next: Cancel goes back to before the first. */
+  function changeFormat(change: () => void) {
+    if (formatPending) change();
+    else commit(change);
   }
 
   function chooseRatio(r: [number, number] | null) {
     if (JSON.stringify(r) === JSON.stringify(ratio)) return;
-    commit(() => {
+    changeFormat(() => {
       const wasFill = ratio && fit === "fill";
       ratio = r;
       if (!r) {
@@ -887,17 +976,28 @@
         crop = ratioCrop(full, r, centre);
       }
     });
-    if (r && fit === "fill") startCrop();
+    if (r && fit === "fill") {
+      startCrop();
+      formatPending = true;
+    } else {
+      formatPending = false;
+    }
   }
 
   function chooseFit(mode: "fill" | "fit") {
     if (mode === fit || !ratio) return;
-    commit(() => {
+    changeFormat(() => {
       fit = mode;
       crop = mode === "fill" && ratio ? ratioCrop(full, ratio) : null;
     });
-    if (mode === "fill") startCrop();
-    else cancelCrop();
+    if (mode === "fill") {
+      startCrop();
+      formatPending = true;
+    } else {
+      formatPending = false;
+      cropping = false;
+      cropDraft = null;
+    }
   }
 
   // ── Overlays ───────────────────────────────────────────────────────────
@@ -1005,6 +1105,7 @@
       return;
     }
     drag = { kind: "draw", start: p, moved: false };
+    curvePath = [p];
     draft = make(tool, p, FREEHAND.includes(tool) ? { points: [p] } : {});
   }
 
@@ -1049,6 +1150,10 @@
       } else {
         draft.x2 = p.x;
         draft.y2 = p.y;
+      }
+      if (draft.kind === "curve") {
+        curvePath.push(p);
+        draft.bend = drawnBend(draft, curvePath);
       }
     }
   }
@@ -1114,7 +1219,8 @@
     const existing = overlays.find((o) => o.id === editing?.id);
     const size = fontSize(existing?.shape.size ?? (level + 1) * unit) * sourceScale;
     const at = toPlayer(editing);
-    return `left:${at.x}px;top:${at.y}px;font-size:${size}px;color:${existing?.shape.color ?? color}`;
+    const font = existing ? textFont(existing.shape, size) : `600 ${size}px "Segoe UI Variable Text", "Segoe UI", sans-serif`;
+    return `left:${at.x}px;top:${at.y}px;font:${font};color:${existing?.shape.color ?? color}`;
   });
 
   function removeOverlay() {
@@ -1124,13 +1230,27 @@
     commit(() => (overlays = overlays.filter((o) => o.id !== id)));
   }
 
-  function setOverlayTime(edge: "start" | "end") {
+  /** Changes the style of the selected text. */
+  function styleText(patch: Partial<Pick<Shape, "font" | "bold" | "italic" | "fill">>) {
+    const o = selectedItem;
+    if (!o || o.shape.kind !== "text") return;
+    commit(() => Object.assign(o.shape, patch));
+  }
+
+  function duplicateOverlay() {
     const o = selectedItem;
     if (!o) return;
-    commit(() => {
-      if (edge === "start") o.start = Math.min(time, o.end - 0.1);
-      else o.end = Math.max(time, o.start + 0.1);
-    });
+    const shape = $state.snapshot(o.shape) as Shape;
+    const shift = 24 * unit;
+    shape.id = nextId++;
+    shape.x1 += shift;
+    shape.x2 += shift;
+    shape.y1 += shift;
+    shape.y2 += shift;
+    if (shape.points) shape.points = shape.points.map((q) => ({ x: q.x + shift, y: q.y + shift }));
+    const copy = { id: shape.id, shape, start: o.start, end: o.end };
+    commit(() => overlays.push(copy));
+    selectedOverlay = copy.id;
   }
 
   /** Toolbox colour and thickness also apply to the selected item. */
@@ -1188,7 +1308,10 @@
       cursor: customCursor
         ? { visible: cursorVisible, scale: cursorScale, image, halo: halo ? [...hexRgb(haloColor), 90] : null }
         : null,
-      clicks: clickRing || clickSound ? { ring: clickRing, color: hexRgb(clickColor), sound: clickSound } : null,
+      clicks:
+        clickRing || clickSound
+          ? { ring: clickRing, color: hexRgb(clickColor), sound: clickSound, voice: clickVoice }
+          : null,
       canvas: ratio && fit === "fit" ? { ratio: [ratio[0], ratio[1]], colors: bg.map(hexRgb), padding: margin } : null,
       pixelate: overlays
         .filter((o) => o.shape.kind === "pixelate")
@@ -1230,7 +1353,11 @@
       cursorVisible &&
       cursorScale === 1 &&
       cursorStyle === "original" &&
-      !halo,
+      !halo &&
+      audio &&
+      volume === 1 &&
+      !fadeIn &&
+      !fadeOut,
   );
 
   /** Encoder quality (0 best – 51) for the quality level shown. */
@@ -1243,7 +1370,7 @@
       const job = await editorExport(
         path,
         kind === "mp4"
-          ? { kind, edit: edit(), audio, quality: crf, fps, height }
+          ? { kind, edit: edit(), audio, quality: crf, fps, height, volume, fade_in: fadeIn, fade_out: fadeOut }
           : {
               kind,
               gif: {
@@ -1287,23 +1414,13 @@
     if (chosen) folder = chosen;
   }
 
-  /** Two clicks: the recording is deleted for good. */
-  let discardTimer: ReturnType<typeof setTimeout> | undefined;
-  async function discard() {
-    if (!discardArmed) {
-      discardArmed = true;
-      clearTimeout(discardTimer);
-      discardTimer = setTimeout(() => (discardArmed = false), 3000);
-      return;
-    }
-    try {
-      await editorDiscard(path);
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
   /** Size of the exported frame, after crop, format and height. */
+  /** Size of the exported frame at full resolution. */
+  const exportBase = $derived.by(() => {
+    if (!vw) return { w: 0, h: 0 };
+    const fitted = ratio && fit === "fit" ? fitLayout(crop ?? full, ratio, margin).out : null;
+    return { w: Math.round(fitted?.w ?? crop?.w ?? vw) & ~1, h: Math.round(fitted?.h ?? crop?.h ?? vh) & ~1 };
+  });
   const exportSize = $derived.by(() => {
     if (!vw) return { w: 0, h: 0 };
     const fitted = ratio && fit === "fit" ? fitLayout(crop ?? full, ratio, margin).out : null;
@@ -1344,10 +1461,40 @@
     toastTimer = setTimeout(() => (toast = ""), 3000);
   }
 
-  function listen() {
+  function listen(voice: ClickSound) {
+    clickVoice = voice;
     audioContext ??= new AudioContext();
-    playClick(audioContext);
+    playClick(audioContext, voice);
   }
+
+  /** The export being written (shown in the Save button), if any. */
+  const running = $derived(jobs.find((j) => !j.output && !j.error && j.kind !== "copy") ?? null);
+
+  /** Where the toolbar of the selected item sits, above it (or below when
+   * there is no room), in player pixels. */
+  const itemBar = $derived.by(() => {
+    void time;
+    const o = selectedItem;
+    if (!o || cropping || editing || drag || time < o.start || time >= o.end || !stage) return null;
+    const ctx = stage.getContext("2d");
+    if (!ctx) return null;
+    const b = bounds(ctx, o.shape);
+    const top = toPlayer({ x: b.x, y: b.y });
+    const bottom = toPlayer({ x: b.x + b.w, y: b.y + b.h });
+    const x = Math.max(8, Math.min(playerSize.w - 8, (top.x + bottom.x) / 2));
+    return top.y > 60 ? { x, y: top.y - 12, below: false } : { x, y: bottom.y + 12, below: true };
+  });
+
+  /** Options of the resolution and frame rate menus: the recording's own
+   * value first, then smaller ones. */
+  const heightOptions = $derived([
+    { value: null, label: `${exportBase.h}p` },
+    ...HEIGHTS.filter((h) => h < exportBase.h).map((h) => ({ value: h, label: `${h}p` })),
+  ]);
+  const fpsOptions = $derived([
+    { value: null, label: `${sourceFps} fps` },
+    ...FRAME_RATES.filter((r) => r < sourceFps).map((r) => ({ value: r, label: `${r} fps` })),
+  ]);
 
   // ── Keyboard ───────────────────────────────────────────────────────────
 
@@ -1460,13 +1607,11 @@
           ? `Click or drag on the video · shows ${OVERLAY_LENGTH} s`
           : "",
   );
-  const DITHER_TOP = ditherBand("top");
-  const DITHER_BOTTOM = ditherBand("bottom");
 </script>
 
 <svelte:window onkeydown={keyDown} />
 
-<div class="editor" style="--dither-top:{DITHER_TOP};--dither-bottom:{DITHER_BOTTOM}">
+<div class="editor">
   {#if closing}
     <div class="backdrop">
       <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="close-title">
@@ -1558,7 +1703,8 @@
         onloadedmetadata={loaded}
         onplay={() => (playing = true)}
         onpause={() => (playing = false)}
-        onerror={() => (error = "This video cannot be played here, but it can still be exported.")}
+        onerror={playbackFailed}
+        onseeked={() => (failures = 0)}
       ></video>
       <canvas
         bind:this={stage}
@@ -1592,6 +1738,40 @@
       {#if error}<p class="error">{error}</p>{/if}
       {#if toast}<div class="toast" role="status">{toast}</div>{/if}
       {#if hint}<div class="hint">{hint}</div>{/if}
+      {#if itemBar && selectedItem}
+        {@const s = selectedItem.shape}
+        <div
+          class="item-bar"
+          class:below={itemBar.below}
+          style="left:{itemBar.x}px;top:{itemBar.y}px"
+          onpointerdown={(e) => e.stopPropagation()}
+          role="toolbar"
+          aria-label="Selected item"
+          tabindex="-1"
+        >
+          {#if s.kind === "text"}
+            {#each TEXT_FONTS as f (f.value)}
+              <button type="button" class="ib" class:active={(s.font ?? "sans") === f.value} style="font-family:{f.family}" title={f.label} onclick={() => styleText({ font: f.value })}
+                >Aa</button
+              >
+            {/each}
+            <span class="ib-sep"></span>
+            <button type="button" class="ib" class:active={s.bold !== false} style="font-weight:700" title="Bold" onclick={() => styleText({ bold: s.bold === false })}>B</button>
+            <button type="button" class="ib" class:active={!!s.italic} style="font-style:italic;font-family:Georgia,serif" title="Italic" onclick={() => styleText({ italic: !s.italic })}
+              >I</button
+            >
+            <span class="ib-sep"></span>
+            {#each FILLS as fl (fl.value)}
+              <button type="button" class="ib" class:active={s.fill === fl.value} title={fl.label} onclick={() => styleText({ fill: fl.value })}
+                ><span class="fill-demo {fl.value}" style="--c:{s.color}">A</span></button
+              >
+            {/each}
+            <span class="ib-sep"></span>
+          {/if}
+          <button type="button" class="ib" title="Duplicate" aria-label="Duplicate" onclick={duplicateOverlay}><Icon name="duplicate" /></button>
+          <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeOverlay}><Icon name="trash" /></button>
+        </div>
+      {/if}
     </div>
 
     <footer class="dock">
@@ -1631,6 +1811,47 @@
                 <div class="all">
                   All parts
                   {#each [1, 1.5, 2] as sp (sp)}<button type="button" class="chip" onclick={() => allSpeeds(sp)}>{speedLabel(sp)}</button>{/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+          <div class="anchor">
+            <button
+              type="button"
+              class="act opens-menu"
+              class:on={!audio || volume !== 1 || fadeIn > 0 || fadeOut > 0}
+              disabled={!duration}
+              aria-expanded={menu === "sound"}
+              title="Sound"
+              onclick={() => (menu = menu === "sound" ? null : "sound")}
+              ><Icon name={audio ? "volume" : "mute"} /> {audio ? `${Math.round(volume * 100)}%` : "Muted"} <Icon name="chevron" /></button
+            >
+            {#if menu === "sound"}
+              <div class="popover sound" role="dialog" aria-label="Sound">
+                <label class="switch-row"><span>Sound</span><input type="checkbox" class="switch" bind:checked={audio} /></label>
+                <label class="field" class:off={!audio}
+                  >Volume <input type="range" min="0" max="2" step="0.05" bind:value={volume} disabled={!audio} />
+                  <span class="value">{Math.round(volume * 100)}%</span></label
+                >
+                <div class="field" class:off={!audio}>
+                  <span>Fade in</span>
+                  <div class="segmented tiny" role="radiogroup" aria-label="Fade in">
+                    {#each FADES as f (f)}
+                      <button type="button" role="radio" aria-checked={fadeIn === f} class:active={fadeIn === f} disabled={!audio} onclick={() => (fadeIn = f)}
+                        >{f ? `${f}s` : "Off"}</button
+                      >
+                    {/each}
+                  </div>
+                </div>
+                <div class="field" class:off={!audio}>
+                  <span>Fade out</span>
+                  <div class="segmented tiny" role="radiogroup" aria-label="Fade out">
+                    {#each FADES as f (f)}
+                      <button type="button" role="radio" aria-checked={fadeOut === f} class:active={fadeOut === f} disabled={!audio} onclick={() => (fadeOut = f)}
+                        >{f ? `${f}s` : "Off"}</button
+                      >
+                    {/each}
+                  </div>
                 </div>
               </div>
             {/if}
@@ -1700,7 +1921,6 @@
                 class="segment"
                 class:removed={!sg.kept}
                 class:selected={selectedSegment === i}
-                class:cut={i > 0}
                 style="left:{percent(sg.start)}%;width:{percent(sg.end) - percent(sg.start)}%"
               >
                 {#if sg.kept && sg.speed !== 1}<span class="badge">{speedLabel(sg.speed)}</span>{/if}
@@ -1727,6 +1947,21 @@
                 </div>
               </div>
             {/each}
+            <!-- Cuts: a clear line between parts; hovering shows how to join them back. -->
+            {#each segments as sg, i (sg.start)}
+              {#if i > 0}
+                <div class="cut-mark" style="left:{percent(sg.start)}%">
+                  <button
+                    type="button"
+                    class="join"
+                    title="Remove this split (join the parts)"
+                    aria-label="Remove this split"
+                    onpointerdown={(e) => e.stopPropagation()}
+                    onclick={() => joinAt(i)}><Icon name="join" /></button
+                  >
+                </div>
+              {/if}
+            {/each}
             <div class="outside" style="left:0;width:{percent(trim.start)}%"></div>
             <div class="outside" style="left:{percent(trim.end)}%;right:0"></div>
             <div class="trim-frame" style="left:{percent(trim.start)}%;width:{percent(trim.end) - percent(trim.start)}%"></div>
@@ -1737,9 +1972,6 @@
           </div>
 
           <div class="lanes" style="height:{rows.count * ROW_H + 6}px">
-            {#if !overlays.length}
-              <span class="lane-hint">Texts and shapes appear here — drag a bar to choose when it shows</span>
-            {/if}
             {#each overlays as o (o.id)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
@@ -1771,24 +2003,13 @@
 
   <aside class="side-panel">
     <header class="panel-head">
-      <div class="file" title={path}><span class="glyph"><Icon name="play" /></span>{name(path)}</div>
+      <div class="file" title={path}>{name(path)}</div>
       <div class="sub">{format(output)}{outputSize ? ` · ${outputSize}` : ""}{kept.length > 1 ? ` · ${kept.length} parts` : ""}</div>
     </header>
 
     <div class="panel-scroll">
-      {#if selectedItem}
-        <details open>
-          <summary>Selected item</summary>
-          <p class="note">Shows {format(selectedItem.start)} → {format(selectedItem.end)}.</p>
-          <div class="pair">
-            <button type="button" onclick={() => setOverlayTime("start")}>From playhead</button>
-            <button type="button" onclick={() => setOverlayTime("end")}>Until playhead</button>
-          </div>
-          <button type="button" class="wide danger-text" onclick={removeOverlay}><Icon name="trash" /> Delete <Kbd keys="Del" /></button>
-        </details>
-      {/if}
-      <details open>
-        <summary>Format</summary>
+      <section>
+        <h3>Format</h3>
         <div class="ratios">
           {#each RATIOS as r (r.label)}
             {@const active = (ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)}
@@ -1806,10 +2027,10 @@
         {#if ratio}
           <div class="segmented" role="radiogroup" aria-label="How the video fills the format">
             <button type="button" class:active={fit === "fill"} role="radio" aria-checked={fit === "fill"} onclick={() => chooseFit("fill")}
-              >Fill · crop</button
+              >Fill</button
             >
             <button type="button" class:active={fit === "fit"} role="radio" aria-checked={fit === "fit"} onclick={() => chooseFit("fit")}
-              >Fit · background</button
+              >Fit on background</button
             >
           </div>
           {#if fit === "fit"}
@@ -1827,8 +2048,6 @@
               {/each}
             </div>
             <label class="field">Margin <input type="range" min="0" max="0.2" step="0.01" bind:value={margin} /></label>
-          {:else}
-            <p class="note">The video fills the {ratio.join(":")} frame, no borders: drag it to choose what stays visible.</p>
           {/if}
         {/if}
         <div class="pair">
@@ -1837,74 +2056,140 @@
           >
           <button type="button" disabled={!crop || !!(ratio && fit === "fill")} onclick={() => commit(() => (crop = null))}>Reset</button>
         </div>
-      </details>
-      <details open>
-        <summary>Cursor</summary>
+      </section>
+
+      <section>
+        <h3>Cursor and clicks</h3>
         {#if !cursorTrack}
           <p class="note">Needs a Kadra recording made with “editable cursor” on (Settings › Recording).</p>
-        {:else if cursorEditable}
-          <label class="check"><input type="checkbox" bind:checked={cursorVisible} /> Show the pointer</label>
-          <label class="field"
-            >Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} />
-            <span class="value">{cursorScale}×</span></label
-          >
-          <label class="field"
-            >Style
-            <select bind:value={cursorStyle}>{#each CURSOR_STYLES as cs (cs.value)}<option value={cs.value}>{cs.label}</option>{/each}</select>
-            {#if cursorStyle !== "original"}<input type="color" bind:value={cursorColor} class="mini" title="Pointer colour" />{/if}
-          </label>
-          <label class="check"
-            ><input type="checkbox" bind:checked={halo} /> Halo <input type="color" bind:value={haloColor} class="mini" title="Halo colour" /></label
-          >
         {:else}
-          <p class="note">The copy without cursor of this recording is gone: only clicks can be marked.</p>
-        {/if}
-      </details>
-      {#if cursorTrack}
-        <details open>
-          <summary>Clicks</summary>
-          <label class="check"
-            ><input type="checkbox" bind:checked={clickRing} /> Ring
-            <input type="color" bind:value={clickColor} class="mini" title="Ring colour" /></label
-          >
-          <div class="check">
-            <label><input type="checkbox" bind:checked={clickSound} /> Soft click sound</label>
-            <button type="button" class="ghost tiny" onclick={listen}>Listen</button>
+          {#if cursorEditable}
+            <div class="looks" role="radiogroup" aria-label="Pointer">
+              <button type="button" role="radio" class="look" class:active={!cursorVisible} aria-checked={!cursorVisible} onclick={() => (cursorVisible = false)}>
+                <svg viewBox="0 0 32 32" aria-hidden="true"><path d={ARROW} class="ghost-arrow" /><path d="M5 27L27 5" class="slash" /></svg>
+                Hidden
+              </button>
+              {#each CURSOR_STYLES as cs (cs.value)}
+                {@const active = cursorVisible && cursorStyle === cs.value}
+                <button
+                  type="button"
+                  role="radio"
+                  class="look"
+                  class:active
+                  aria-checked={active}
+                  onclick={() => {
+                    cursorVisible = true;
+                    cursorStyle = cs.value;
+                  }}
+                >
+                  {#if cs.value === "original" && cursorTrack.shapes[0]}
+                    <img src="data:image/png;base64,{cursorTrack.shapes[0].png}" alt="" />
+                  {:else if cs.value === "dot"}
+                    <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="9" fill={cursorColor} stroke="#fff" stroke-width="2" /></svg>
+                  {:else}
+                    <svg viewBox="0 0 32 32" aria-hidden="true"
+                      ><path d={ARROW} fill={cs.value === "dark" ? "#111" : "#fff"} stroke={cs.value === "dark" ? "#fff" : "#111"} stroke-width="1.6" stroke-linejoin="round" /></svg
+                    >
+                  {/if}
+                  {cs.label}
+                </button>
+              {/each}
+            </div>
+            {#if cursorVisible}
+              <label class="field"
+                >Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} />
+                <span class="value">{cursorScale}×</span></label
+              >
+              {#if cursorStyle === "dot"}
+                <div class="field">
+                  <span>Colour</span>
+                  <div class="mini-swatches">
+                    {#each VIVID.slice(0, 6) as c (c)}
+                      <button type="button" class="swatch" class:active={cursorColor === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => (cursorColor = c)}></button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            {/if}
+          {:else}
+            <p class="note">The copy without cursor of this recording is gone: only clicks can be shown.</p>
+          {/if}
+
+          <div class="effects">
+            {#if cursorEditable}
+              <div class="effect" class:active={halo}>
+                <button type="button" aria-pressed={halo} onclick={() => (halo = !halo)}>
+                  <svg viewBox="0 0 40 40" aria-hidden="true"
+                    ><circle cx="16" cy="16" r="13" fill={haloColor} opacity="0.45" /><path d={ARROW} transform="translate(9 9) scale(0.7)" fill="#fff" stroke="#111" stroke-width="2" /></svg
+                  >
+                  <span>Halo</span>
+                </button>
+                <input type="color" bind:value={haloColor} class="dot-color" title="Halo colour" />
+              </div>
+            {/if}
+            <div class="effect" class:active={clickRing}>
+              <button type="button" aria-pressed={clickRing} onclick={() => (clickRing = !clickRing)}>
+                <svg viewBox="0 0 40 40" aria-hidden="true"
+                  ><circle cx="16" cy="16" r="12" fill="none" stroke={clickColor} stroke-width="3" /><circle cx="16" cy="16" r="6" fill="none" stroke={clickColor} stroke-width="2" opacity="0.5" /><path d={ARROW} transform="translate(13 13) scale(0.7)" fill="#fff" stroke="#111" stroke-width="2" /></svg
+                >
+                <span>Click ring</span>
+              </button>
+              <input type="color" bind:value={clickColor} class="dot-color" title="Ring colour" />
+            </div>
           </div>
-        </details>
-      {/if}
+
+          <div class="field stacked">
+            <span>Click sound</span>
+            <div class="segmented wrap" role="radiogroup" aria-label="Click sound">
+              <button type="button" role="radio" aria-checked={!clickSound} class:active={!clickSound} onclick={() => (clickSound = false)}>Off</button>
+              {#each CLICK_SOUNDS as cs (cs.value)}
+                {@const active = clickSound && clickVoice === cs.value}
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  class:active
+                  title="Plays it once"
+                  onclick={() => {
+                    clickSound = true;
+                    listen(cs.value);
+                  }}>{cs.label}</button
+                >
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </section>
     </div>
 
     <div class="export-card">
-      <div class="card-head">
-        <span class="card-title">Export</span>
-        <div class="segmented small" role="radiogroup" aria-label="Format">
-          <button type="button" role="radio" aria-checked={exportKind === "mp4"} class:active={exportKind === "mp4"} onclick={() => (exportKind = "mp4")}
-            >MP4</button
-          >
-          <button type="button" role="radio" aria-checked={exportKind === "gif"} class:active={exportKind === "gif"} onclick={() => (exportKind = "gif")}
-            >GIF</button
-          >
-        </div>
+      <div class="segmented" role="radiogroup" aria-label="Format">
+        <button type="button" role="radio" aria-checked={exportKind === "mp4"} class:active={exportKind === "mp4"} onclick={() => (exportKind = "mp4")}
+          >MP4</button
+        >
+        <button type="button" role="radio" aria-checked={exportKind === "gif"} class:active={exportKind === "gif"} onclick={() => (exportKind = "gif")}
+          >GIF</button
+        >
       </div>
       {#if exportKind === "mp4"}
         <div class="settings">
           <label class="field">Resolution
-            <select bind:value={height}>{#each HEIGHTS as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
+            <select bind:value={height}>{#each heightOptions as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
           </label>
           <label class="field">Frame rate
-            <select bind:value={fps}>{#each FRAME_RATES as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
+            <select bind:value={fps}>{#each fpsOptions as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
           </label>
           <label class="field">Quality
             <input type="range" min="0" max="100" step="5" bind:value={qualityLevel} />
             <span class="value wide">{qualityName}</span>
           </label>
-          <label class="check"><input type="checkbox" bind:checked={audio} /> Sound</label>
         </div>
       {:else}
         <div class="settings">
           <label class="field">Width
-            <select bind:value={gifWidth}>{#each GIF_WIDTHS as w (w)}<option value={w}>{w === 0 ? "Original" : `${w} px`}</option>{/each}</select>
+            <select bind:value={gifWidth}
+              >{#each GIF_WIDTHS.filter((w) => w === 0 || w < exportBase.w) as w (w)}<option value={w}>{w === 0 ? `${exportBase.w} px` : `${w} px`}</option>{/each}</select
+            >
           </label>
           <label class="field">Frame rate
             <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
@@ -1923,53 +2208,42 @@
         <Icon name="folder" /><span>{folder || "…"}</span>
       </button>
       <div class="meta">
-        <span class="engine"><Icon name="speed" /> {exportKind === "mp4" ? "GPU · H.264" : "Built-in"}</span>
-        <span>{exportSize.w ? `${exportSize.w}×${exportSize.h}` : ""}{estimate ? ` · ≈ ${size(estimate)}` : ""}</span>
+        <span>{exportSize.w ? `${exportSize.w}×${exportSize.h}` : ""}</span>
+        <span>{estimate ? `≈ ${size(estimate)}` : ""}</span>
       </div>
-      <div class="save-row">
-        <button type="button" class="save" onclick={() => exportAs(exportKind)} disabled={!duration || !config}
-          ><Icon name="save" /> Save {exportKind.toUpperCase()}</button
+      <button
+        type="button"
+        class="save"
+        style={running ? `--done:${Math.round(running.done * 100)}%` : ""}
+        class:busy={!!running}
+        onclick={() => exportAs(exportKind)}
+        disabled={!duration || !config}
+      >
+        {#if running}
+          Saving… {Math.round(running.done * 100)}%
+        {:else}
+          <Icon name="save" /> Save {exportKind.toUpperCase()}
+        {/if}
+      </button>
+      <div class="pair secondary">
+        <button type="button" class="light" onclick={saveAs} disabled={!duration || !config} title="Pick a name and a place"
+          ><Icon name="saveCopy" /> Save as…</button
         >
-        <button type="button" class="square" onclick={saveAs} disabled={!duration || !config} title="Save as…" aria-label="Save as"
-          ><Icon name="saveCopy" /></button
-        >
-        <button type="button" class="square" onclick={copyVideo} disabled={!duration} title="Copy to the clipboard (Ctrl+C)" aria-label="Copy"
-          ><Icon name="copy" /></button
+        <button type="button" class="light" onclick={copyVideo} disabled={!duration} title="Copy to the clipboard (Ctrl+C)"
+          ><Icon name="copy" /> Copy</button
         >
       </div>
-      {#if unsaved}
-        <p class="draft-note">
-          Not saved yet: only what you save is kept. Closing the editor deletes the recording.
-          <button type="button" class="link danger-text" onclick={discard}>{discardArmed ? "Click again to delete it" : "Discard recording"}</button>
-        </p>
-      {/if}
-      {#each jobs.slice(0, 3) as j (j.job)}
-        <div class="job">
-          <span class="kind">{j.kind === "copy" ? "Copy" : j.kind.toUpperCase()}</span>
-          {#if j.error}
-            <span class="failed" title={j.error}>{j.error}</span>
-          {:else if j.output}
-            <span class="name" title={j.output}>{name(j.output)} · {size(j.bytes ?? 0)}</span>
-            <button type="button" class="round small" title="Show in folder" aria-label="Show in folder" onclick={() => j.output && showInFolder(j.output)}
-              ><Icon name="folder" /></button
-            >
-          {:else}
-            <span class="bar-progress"><span style="width:{Math.round(j.done * 100)}%"></span></span>
-            <span class="pct">{Math.round(j.done * 100)}%</span>
-          {/if}
-        </div>
-      {/each}
     </div>
   </aside>
 </div>
 
 <style>
-  /* Square and contrasted, in the window's theme (docs/UI_DESIGN.md). */
+  /* Calm and airy, in the window's theme (docs/UI_DESIGN.md). */
   .editor {
-    --accent-soft: color-mix(in srgb, var(--accent) 24%, transparent);
+    --accent-soft: color-mix(in srgb, var(--accent) 22%, transparent);
     --trim: #f5c542;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) clamp(250px, 24vw, 300px);
+    grid-template-columns: minmax(0, 1fr) clamp(270px, 25vw, 320px);
     height: 100vh;
     min-width: 640px;
     overflow: hidden;
@@ -1981,55 +2255,50 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    padding: 0;
-    gap: 0;
-  }
-  .editor :global(button),
-  .editor :global(select),
-  .editor :global(input) {
-    color: var(--text);
-    background: var(--control);
-    border-color: var(--border-strong);
-  }
-  .editor :global(button:not(:disabled):hover),
-  .editor :global(select:hover) {
-    border-color: var(--focus);
   }
   button {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    border-radius: var(--radius);
-  }
-  button:hover:not(:disabled) {
-    background: var(--hover);
+    gap: 7px;
   }
   button.active {
     background: var(--accent) !important;
-    border-color: var(--accent) !important;
     color: var(--on-accent) !important;
   }
   .sep {
     width: 1px;
-    align-self: stretch;
-    margin: 6px 4px;
+    height: 22px;
+    margin: 0 6px;
     background: var(--border);
   }
   .muted {
-    color: var(--text-muted);
+    color: var(--text-faint);
   }
 
   /* Toolbox */
+  @container (max-width: 1060px) {
+    .toolbox .tool {
+      width: 32px;
+    }
+    .toolbox .colors {
+      gap: 5px;
+    }
+    .toolbox .colors .swatch,
+    .toolbox .custom {
+      width: 19px;
+      height: 19px;
+    }
+  }
   .toolbox {
     display: flex;
     flex-wrap: wrap;
+    container-type: inline-size;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--border);
+    gap: 6px;
+    padding: 10px 14px;
     background: var(--surface);
-    container-type: inline-size;
+    border-bottom: 1px solid var(--border);
   }
   .cluster {
     display: flex;
@@ -2037,7 +2306,7 @@
     gap: 2px;
   }
   .colors {
-    gap: 6px;
+    gap: 7px;
     padding: 0 4px;
   }
   .tool {
@@ -2047,18 +2316,7 @@
     width: 36px;
     height: 36px;
     padding: 0;
-    border: 1px solid transparent !important;
-    background: transparent !important;
-    border-radius: var(--radius);
-  }
-  .tool:hover:not(:disabled):not(.active) {
-    background: var(--hover) !important;
-    border-color: var(--focus) !important;
-  }
-  .tool.active {
-    background: var(--accent) !important;
-    border-color: var(--accent) !important;
-    color: var(--on-accent);
+    background: transparent;
   }
   .tool .key {
     position: absolute;
@@ -2067,27 +2325,26 @@
     font-size: 8px;
     font-weight: 700;
     font-family: var(--font-mono);
-    opacity: 0.5;
+    opacity: 0.45;
   }
   .swatch {
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     padding: 0;
-    border-radius: var(--radius);
+    border-radius: 50%;
     background: var(--swatch) !important;
-    border: 1px solid var(--border-strong) !important;
+    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
   }
   .swatch.active {
     background: var(--swatch) !important;
-    border-color: var(--surface) !important;
     outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
   .custom {
     position: relative;
-    width: 20px;
-    height: 20px;
-    border-radius: var(--radius);
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
     overflow: hidden;
     background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
   }
@@ -2100,7 +2357,7 @@
   .dot {
     width: var(--d);
     height: var(--d);
-    border-radius: var(--radius);
+    border-radius: 50%;
     background: currentColor;
   }
 
@@ -2111,22 +2368,22 @@
     z-index: 50;
     display: grid;
     place-items: center;
-    background: rgb(0 0 0 / 0.55);
+    background: rgb(0 0 0 / 0.45);
   }
   .dialog {
     width: min(440px, calc(100vw - 32px));
-    padding: 22px 24px;
+    padding: 26px 28px;
+    border-radius: var(--radius-lg);
     background: var(--surface);
-    border: 2px solid var(--focus);
     box-shadow: var(--shadow);
   }
   .dialog h2 {
     margin: 0 0 8px;
-    font-size: 22px;
-    font-weight: 700;
+    font-size: 21px;
+    font-weight: 650;
   }
   .dialog p {
-    margin: 0 0 18px;
+    margin: 0 0 22px;
     color: var(--text-muted);
   }
   .dialog-actions {
@@ -2136,27 +2393,24 @@
   }
   .pill.big {
     min-height: 40px;
-    padding: 6px 18px;
+    padding: 8px 20px;
   }
   .danger-fill {
     color: var(--danger) !important;
-    border-color: var(--danger) !important;
   }
   .danger-fill:hover:not(:disabled) {
     background: var(--danger) !important;
     color: #fff !important;
   }
 
-  /* Player */
+  /* Player: transparent around the picture, shown as a checkerboard. */
   .player {
     position: relative;
     flex: 1;
     min-height: 0;
     overflow: hidden;
-    /* Transparent around the picture, shown as a checkerboard like in the
-       image editor. */
     background:
-      repeating-conic-gradient(color-mix(in srgb, var(--bg) 92%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
+      repeating-conic-gradient(color-mix(in srgb, var(--bg) 94%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
       20px;
     touch-action: none;
   }
@@ -2167,7 +2421,6 @@
     opacity: 0;
     pointer-events: none;
   }
-  /* No frame or shadow: the video sits on the window background. */
   .stage {
     position: absolute;
   }
@@ -2178,8 +2431,6 @@
     margin: 0;
     border: 1px dashed var(--accent);
     background: transparent;
-    font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
-    font-weight: 600;
     line-height: 1.25;
     resize: none;
     overflow: hidden;
@@ -2189,16 +2440,15 @@
   .crop-bar {
     position: absolute;
     left: 50%;
-    bottom: 14px;
+    bottom: 16px;
     transform: translateX(-50%);
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 6px 6px 14px;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
+    padding: 6px 6px 6px 16px;
+    border-radius: var(--radius-lg);
     background: var(--surface);
-    backdrop-filter: blur(8px);
+    box-shadow: var(--shadow);
     cursor: default;
   }
   .crop-bar span {
@@ -2211,88 +2461,118 @@
   .error {
     position: absolute;
     left: 50%;
-    top: 14px;
+    top: 16px;
     transform: translateX(-50%);
-    padding: 7px 14px;
-    border-radius: var(--radius);
-    background: var(--raised);
-    border: 1px solid var(--border-strong);
+    max-width: calc(100% - 32px);
+    padding: 8px 16px;
+    border-radius: 999px;
+    background: var(--surface);
+    box-shadow: var(--shadow-soft);
     font-size: 13px;
+    font-weight: 550;
     pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .toast {
     top: auto;
-    bottom: 14px;
+    bottom: 16px;
   }
   .hint {
-    top: 12px;
-    max-width: calc(100% - 24px);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--text-muted);
     font-size: 12px;
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
-    color: var(--text);
-    font-weight: 600;
   }
   .error {
     color: var(--danger);
   }
 
+  /* Toolbar of the selected item, over the picture. */
+  .item-bar {
+    position: absolute;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    transform: translate(-50%, -100%);
+    cursor: default;
+  }
+  .item-bar.below {
+    transform: translate(-50%, 0);
+  }
+  .ib {
+    display: grid;
+    place-items: center;
+    min-width: 32px;
+    height: 32px;
+    padding: 0 6px;
+    background: transparent;
+    font-size: 14px;
+  }
+  .ib.danger:hover:not(:disabled) {
+    color: var(--danger);
+  }
+  .ib-sep {
+    width: 1px;
+    height: 20px;
+    margin: 0 3px;
+    background: var(--border);
+  }
+  .fill-demo {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    font-weight: 800;
+    font-size: 13px;
+  }
+  .fill-demo.none {
+    color: var(--c);
+    -webkit-text-stroke: 0.6px var(--text);
+  }
+  .fill-demo.soft {
+    background: color-mix(in srgb, var(--c) 70%, transparent);
+    color: #fff;
+  }
+  .fill-demo.solid {
+    background: var(--c);
+    color: #fff;
+  }
+
   .pill {
     justify-content: center;
-    padding: 6px 14px;
-    border: none !important;
-    border-radius: var(--radius);
+    padding: 6px 16px;
     background: var(--accent) !important;
     color: var(--on-accent) !important;
-    font-weight: 700;
+    font-weight: 650;
   }
   .pill:hover:not(:disabled) {
     background: var(--accent-hover) !important;
-    box-shadow: 0 0 0 2px var(--focus);
   }
   .ghost {
     justify-content: center;
-    padding: 6px 12px;
-    border: 1px solid var(--border-strong) !important;
-    border-radius: var(--radius);
-    background: transparent !important;
-  }
-  .ghost:hover:not(:disabled) {
-    background: var(--hover) !important;
-  }
-  .ghost.tiny {
-    padding: 1px 10px;
-    margin-left: auto;
-    font-size: 12px;
-  }
-  .link {
-    border: none !important;
-    background: none !important;
-    color: var(--text-muted);
-    padding: 2px 0;
-    margin-bottom: 4px;
-    font-size: 12px;
-  }
-  .link:hover {
-    color: var(--text);
+    padding: 6px 14px;
+    background: transparent;
   }
 
   /* Dock: transport and timeline */
   .dock {
-    padding: 8px 10px;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
     container-type: inline-size;
+    padding: 12px 16px 14px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
   }
   .controls {
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
+    gap: 12px;
+    margin-bottom: 12px;
   }
   .side {
     display: flex;
@@ -2304,29 +2584,20 @@
     justify-content: flex-end;
   }
   .act {
-    height: 36px;
+    height: 34px;
     padding: 0 12px;
-    border: 1px solid var(--border-strong) !important;
-    background: var(--raised) !important;
-    border-radius: var(--radius);
-    font-weight: 600;
     white-space: nowrap;
-  }
-  .act:hover:not(:disabled) {
-    background: var(--hover) !important;
   }
   .act.danger:hover:not(:disabled) {
     color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 50%, transparent) !important;
   }
   .act.on {
-    color: var(--trim);
-    border-color: color-mix(in srgb, var(--trim) 50%, transparent) !important;
+    background: color-mix(in srgb, var(--trim) 22%, var(--control));
   }
   .center {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
   .round {
     display: grid;
@@ -2334,26 +2605,22 @@
     width: 34px;
     height: 34px;
     padding: 0;
-    border-radius: var(--radius);
-    border: 1px solid var(--border-strong) !important;
-    background: var(--raised) !important;
+    border-radius: 50%;
+    background: transparent;
   }
   .round.small {
-    width: 26px;
-    height: 26px;
-  }
-  .round:hover:not(:disabled) {
-    background: var(--hover) !important;
+    width: 28px;
+    height: 28px;
   }
   .round.play {
-    width: 44px;
-    height: 44px;
-    border: none !important;
-    background: var(--text) !important;
-    color: var(--surface) !important;
+    width: 46px;
+    height: 46px;
+    background: var(--text);
+    color: var(--surface);
   }
   .round.play:hover {
-    box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text);
+    background: var(--text);
+    transform: scale(1.04);
   }
   .time {
     min-width: 140px;
@@ -2361,9 +2628,20 @@
   }
   .hint-keys {
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--text-faint);
     white-space: nowrap;
     overflow: hidden;
+  }
+  /* Narrow windows: icons only, no key hints. */
+  @container (max-width: 1180px) {
+    .act .lbl,
+    .act :global(.kbd),
+    .hint-keys {
+      display: none;
+    }
+    .act {
+      padding: 0 9px;
+    }
   }
   .zoom {
     display: flex;
@@ -2372,9 +2650,7 @@
   }
   .zoom input {
     width: 100px;
-    padding: 0;
-    accent-color: var(--accent);
-    background: transparent !important;
+    background: transparent;
   }
   .anchor {
     position: relative;
@@ -2382,15 +2658,14 @@
   .popover {
     position: absolute;
     z-index: 20;
-    padding: 8px;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
+    bottom: calc(100% + 10px);
+    left: 0;
+    padding: 10px;
+    border-radius: var(--radius-lg);
     background: var(--raised);
     box-shadow: var(--shadow);
   }
   .speeds {
-    bottom: calc(100% + 8px);
-    left: 0;
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 4px;
@@ -2399,29 +2674,43 @@
   .speeds > button {
     justify-content: center;
     font-family: var(--font-mono);
-    border-color: transparent;
+    background: transparent;
   }
   .speeds .all {
     grid-column: 1 / -1;
     display: flex;
     align-items: center;
     gap: 4px;
-    margin-top: 4px;
-    padding-top: 8px;
+    margin-top: 6px;
+    padding-top: 10px;
     border-top: 1px solid var(--border);
     font-size: 12px;
     color: var(--text-muted);
   }
   .chip {
-    padding: 2px 9px;
-    border-radius: var(--radius);
+    padding: 2px 10px;
+  }
+  .sound {
+    display: grid;
+    gap: 12px;
+    width: 280px;
+    padding: 16px;
+  }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-weight: 600;
+  }
+  .off {
+    opacity: 0.45;
   }
 
   /* Timeline */
   .scroller {
     overflow-x: auto;
     overflow-y: hidden;
-    padding: 0 12px;
+    padding: 0 14px;
     scrollbar-width: thin;
     scrollbar-color: var(--border-strong) transparent;
   }
@@ -2433,7 +2722,7 @@
   }
   .ruler {
     position: relative;
-    height: 18px;
+    height: 20px;
     cursor: ew-resize;
   }
   .tick {
@@ -2445,7 +2734,7 @@
     font-size: 10px;
     line-height: 10px;
     font-family: var(--font-mono);
-    color: var(--text-muted);
+    color: var(--text-faint);
     white-space: nowrap;
     pointer-events: none;
   }
@@ -2467,21 +2756,11 @@
     top: 0;
     height: 100%;
     object-fit: cover;
-    border-right: 1px solid rgb(0 0 0 / 0.35);
   }
   .segment {
     position: absolute;
     top: 0;
     bottom: 0;
-  }
-  .segment.cut::before {
-    content: "";
-    position: absolute;
-    left: -1.5px;
-    top: 0;
-    bottom: 0;
-    width: 3px;
-    background: var(--surface);
   }
   .segment.removed {
     background: repeating-linear-gradient(135deg, rgb(10 10 12 / 0.82) 0 6px, rgb(10 10 12 / 0.62) 6px 12px);
@@ -2489,24 +2768,25 @@
   .segment.selected {
     box-shadow: inset 0 0 0 2px var(--accent);
     background-color: var(--accent-soft);
+    border-radius: var(--radius);
   }
   .badge {
     position: absolute;
     left: 8px;
-    bottom: 5px;
-    padding: 0 6px;
-    border-radius: var(--radius);
+    bottom: 6px;
+    padding: 0 7px;
+    border-radius: 999px;
     background: var(--trim);
     color: #1a1400;
-    font: 700 11px/17px var(--font-mono);
+    font: 700 11px/18px var(--font-mono);
     pointer-events: none;
   }
   .part-tools {
     position: absolute;
-    top: 5px;
-    right: 5px;
+    top: 6px;
+    right: 8px;
     display: none;
-    gap: 3px;
+    gap: 4px;
     z-index: 3;
   }
   .segment:hover .part-tools,
@@ -2516,22 +2796,82 @@
   .part-tools button {
     height: 24px;
     min-width: 24px;
-    padding: 0 6px;
+    padding: 0 7px;
     justify-content: center;
-    border: none !important;
-    border-radius: var(--radius);
-    background: var(--surface) !important;
+    border-radius: 6px;
+    background: var(--surface);
     color: var(--text);
-    border: 1px solid var(--border-strong) !important;
+    box-shadow: var(--shadow-soft);
     font: 600 11px var(--font-mono);
   }
   .part-tools button:hover {
-    background: var(--text) !important;
+    background: var(--text);
     color: var(--surface);
   }
   .part-tools :global(svg) {
     width: 14px;
     height: 14px;
+  }
+  /* A cut: a bright gap between two parts, with a join button on hover. */
+  .cut-mark {
+    position: absolute;
+    top: -6px;
+    bottom: -6px;
+    width: 18px;
+    margin-left: -9px;
+    z-index: 4;
+    display: flex;
+    justify-content: center;
+    cursor: default;
+  }
+  .cut-mark::before {
+    content: "";
+    position: absolute;
+    left: 7px;
+    top: 6px;
+    bottom: 6px;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px rgb(0 0 0 / 0.5);
+  }
+  .cut-mark::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 0;
+    border: 5px solid transparent;
+    border-top-color: var(--text);
+  }
+  .join {
+    position: relative;
+    z-index: 1;
+    align-self: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-soft);
+    opacity: 0;
+    transform: scale(0.8);
+    transition:
+      opacity 0.12s,
+      transform 0.12s;
+  }
+  .cut-mark:hover .join {
+    opacity: 1;
+    transform: none;
+  }
+  .join:hover {
+    background: var(--accent) !important;
+    color: var(--on-accent);
+  }
+  .join :global(svg) {
+    width: 16px;
+    height: 16px;
   }
   .outside {
     position: absolute;
@@ -2555,14 +2895,14 @@
     width: 14px;
     background: var(--trim);
     cursor: ew-resize;
-    z-index: 4;
+    z-index: 5;
   }
   .handle.start {
-    border-radius: var(--radius);
+    border-radius: 6px 0 0 6px;
     transform: translateX(-12px);
   }
   .handle.end {
-    border-radius: var(--radius);
+    border-radius: 0 6px 6px 0;
     transform: translateX(-2px);
   }
   .handle::after {
@@ -2581,30 +2921,17 @@
   }
   .lanes {
     position: relative;
-    margin-top: 6px;
-    border-radius: var(--radius);
-    background: var(--raised);
-    border: 1px solid var(--border);
+    margin-top: 8px;
     transition: height 0.15s;
-  }
-  .lane-hint {
-    position: absolute;
-    left: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 11px;
-    color: var(--text-muted);
-    pointer-events: none;
-    white-space: nowrap;
   }
   .bar {
     position: absolute;
     height: 22px;
     display: flex;
     align-items: center;
-    border-radius: var(--radius);
-    background: color-mix(in srgb, var(--bar) 30%, var(--raised));
-    border: 1px solid color-mix(in srgb, var(--bar) 70%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bar) 28%, var(--raised));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bar) 60%, transparent);
     cursor: grab;
     overflow: hidden;
   }
@@ -2646,9 +2973,8 @@
     width: 2px;
     margin-left: -1px;
     background: var(--focus);
-    box-shadow: 0 0 0 1px var(--surface);
     pointer-events: none;
-    z-index: 5;
+    z-index: 6;
   }
   .knob {
     position: absolute;
@@ -2656,7 +2982,7 @@
     left: -5px;
     width: 12px;
     height: 12px;
-    border-radius: var(--radius);
+    border-radius: 50%;
     background: var(--focus);
   }
 
@@ -2665,457 +2991,296 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border-left: 1px solid var(--border);
     background: var(--surface);
-    overflow: hidden;
+    border-left: 1px solid var(--border);
   }
   .panel-head {
-    padding: 14px 16px 12px;
-    border-bottom: 1px solid var(--border);
-    position: relative;
-    isolation: isolate;
-  }
-  /* Pixel bands, drawn in the theme's band colour through the tile. */
-  .panel-head::before,
-  .export-card::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    height: 48px;
-    z-index: -1;
-    background: var(--band);
-    pointer-events: none;
-  }
-  .panel-head::before {
-    top: 0;
-    mask: var(--dither-top) repeat-x left top / auto 48px;
-  }
-  .export-card::before {
-    bottom: 0;
-    mask: var(--dither-bottom) repeat-x left bottom / auto 48px;
+    padding: 20px 22px 6px;
   }
   .file {
-    display: flex;
-    align-items: center;
-    gap: 8px;
     font-size: 15px;
-    font-weight: 600;
+    font-weight: 650;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .glyph {
-    flex: none;
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius);
-    background: var(--accent-soft);
-    color: var(--accent);
-  }
-  .glyph :global(svg) {
-    width: 12px;
-    height: 12px;
-  }
   .sub {
-    margin-top: 4px;
-    font: 12px var(--font-mono);
-    color: var(--text-muted);
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
   }
   .panel-scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border-strong) transparent;
+    padding: 4px 22px 16px;
   }
-  details {
-    padding: 10px 16px 14px;
-    border-bottom: 1px solid var(--border);
+  section {
+    display: grid;
+    gap: 12px;
+    padding: 16px 0 20px;
   }
-  summary {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+  section + section {
+    border-top: 1px solid var(--border);
+  }
+  h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 650;
     color: var(--text-muted);
-    cursor: pointer;
-    list-style: none;
-  }
-  summary::-webkit-details-marker {
-    display: none;
-  }
-  summary::after {
-    content: "";
-    margin-left: auto;
-    width: 6px;
-    height: 6px;
-    border-right: 1.5px solid currentColor;
-    border-bottom: 1.5px solid currentColor;
-    transform: rotate(45deg);
-  }
-  details:not([open]) summary {
-    margin-bottom: 0;
-  }
-  details:not([open]) summary::after {
-    transform: rotate(-45deg);
-  }
-  summary:hover {
-    color: var(--text);
   }
   .ratios {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 6px;
-    margin-bottom: 10px;
   }
   .ratio {
     flex-direction: column;
     justify-content: center;
-    gap: 4px;
-    height: 56px;
-    padding: 4px;
+    gap: 6px;
+    height: 62px;
+    padding: 6px 4px;
     font-size: 12px;
-    border-radius: var(--radius);
   }
   .ratio .shape {
     display: block;
     border: 1.5px solid currentColor;
-    border-radius: var(--radius);
-    opacity: 0.8;
+    border-radius: 3px;
+    opacity: 0.85;
   }
   .segmented {
     display: flex;
+    gap: 2px;
     padding: 3px;
-    gap: 3px;
-    margin-bottom: 10px;
-    border-radius: var(--radius);
-    background: var(--bg);
-    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--control);
   }
   .segmented button {
     flex: 1;
     justify-content: center;
-    padding: 4px 6px;
-    font-size: 12px;
-    border: 1px solid transparent !important;
-    background: transparent !important;
-    border-radius: var(--radius);
+    padding: 6px 8px;
+    border-radius: 7px;
+    background: transparent;
+    font-size: 13px;
+    white-space: nowrap;
   }
-  .segmented button.active {
-    background: var(--accent) !important;
-    border-color: var(--accent) !important;
-    color: var(--on-accent) !important;
+  .segmented.wrap {
+    flex-wrap: wrap;
+  }
+  .segmented.wrap button {
+    flex: 1 1 40%;
+  }
+  .segmented.tiny button {
+    padding: 3px 6px;
+    font-size: 12px;
   }
   .chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    margin: 4px 0 8px;
+    gap: 8px;
   }
   .wide-swatch {
-    width: 36px;
-    border-radius: var(--radius);
+    width: 34px;
+    border-radius: 6px;
   }
   .pair {
+    display: flex;
+    gap: 8px;
+  }
+  .pair button {
+    flex: 1;
+    justify-content: center;
+  }
+  .note {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .field {
+    display: grid;
+    grid-template-columns: 84px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .field.stacked {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .field select {
+    min-width: 0;
+  }
+  .field input[type="range"] {
+    width: 100%;
+    background: transparent;
+  }
+  .value {
+    min-width: 40px;
+    text-align: right;
+    font-size: 12px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+
+  /* Cursor looks and effects, drawn as they will appear. */
+  .looks {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+    gap: 6px;
+  }
+  .look {
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    height: 72px;
+    padding: 6px 4px;
+    font-size: 11px;
+    font-weight: 550;
+    text-align: center;
+    line-height: 1.2;
+  }
+  .look svg,
+  .look img {
+    width: 26px;
+    height: 26px;
+    object-fit: contain;
+  }
+  .look.active svg path {
+    filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.4));
+  }
+  .ghost-arrow {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    opacity: 0.5;
+  }
+  .slash {
+    stroke: currentColor;
+    stroke-width: 2.4;
+    stroke-linecap: round;
+  }
+  .mini-swatches {
+    display: flex;
+    gap: 6px;
+  }
+  .mini-swatches .swatch {
+    width: 20px;
+    height: 20px;
+  }
+  .effects {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 6px;
   }
-  .pair button {
-    justify-content: center;
+  .effect {
+    position: relative;
   }
-  button.wide {
+  .effect > button {
     width: 100%;
+    flex-direction: column;
     justify-content: center;
-    margin-top: 6px;
-  }
-  .danger-text:hover {
-    color: var(--danger);
-  }
-  .note {
+    gap: 4px;
+    height: 76px;
     font-size: 12px;
-    color: var(--text-muted);
-    margin: 0 0 8px;
   }
-  .check,
-  .field {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 7px 0;
-    font-size: 13px;
+  .effect.active > button {
+    background: var(--accent);
+    color: var(--on-accent);
   }
-  .check label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .effect svg {
+    width: 36px;
+    height: 36px;
   }
-  .editor input[type="checkbox"] {
-    accent-color: var(--accent);
-  }
-  .field input[type="range"] {
-    flex: 1;
-    min-width: 0;
+  .dot-color {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 18px;
+    height: 18px;
     padding: 0;
-    accent-color: var(--accent);
-    background: transparent !important;
+    border-radius: 50%;
+    border: 2px solid var(--surface) !important;
+    overflow: hidden;
+    cursor: pointer;
   }
-  .field select {
-    flex: 1;
-    min-width: 0;
-  }
-  .value {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    min-width: 32px;
-  }
-  .mini {
-    width: 26px;
-    height: 22px;
+  .dot-color::-webkit-color-swatch-wrapper {
     padding: 0;
-    border: none !important;
-    background: none !important;
-    margin-left: auto;
+  }
+  .dot-color::-webkit-color-swatch {
+    border: none;
+    border-radius: 50%;
   }
 
-  /* Export card */
+  /* Export, always at the bottom of the panel. */
   .export-card {
-    padding: 12px 14px 16px;
+    display: grid;
+    gap: 12px;
+    padding: 18px 22px 22px;
     border-top: 1px solid var(--border);
-    position: relative;
-    isolation: isolate;
-    background: var(--surface);
-  }
-  .card-title {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-  }
-  .card-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
-  }
-  .segmented.small {
-    margin: 0;
-    width: 120px;
   }
   .settings {
-    margin-bottom: 10px;
-  }
-  .settings .field {
     display: grid;
-    grid-template-columns: 76px minmax(0, 1fr) auto;
-    margin: 6px 0;
-  }
-  .settings .field select {
-    grid-column: 2 / 4;
+    gap: 10px;
   }
   .value.wide {
-    min-width: 0;
-    font-family: var(--font);
-    color: var(--text-muted);
-    text-align: right;
-  }
-  .checks {
-    gap: 0;
+    min-width: 88px;
   }
   .checks .check {
-    margin: 4px 0;
+    flex: 1;
   }
-  /* Destination, engine and size, then the save buttons. */
   .destination {
-    width: 100%;
     justify-content: flex-start;
-    gap: 10px;
-    padding: 9px 12px;
-    border: 1px solid var(--border-strong) !important;
-    border-radius: var(--radius);
-    background: var(--control) !important;
-    font-size: 13px;
+    gap: 8px;
+    padding: 8px 10px;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
   }
   .destination span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .destination:hover {
-    border-color: var(--accent) !important;
+    direction: rtl;
+    text-align: left;
   }
   .meta {
     display: flex;
-    align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    margin: 8px 2px 10px;
     font-size: 12px;
-    color: var(--text-muted);
-  }
-  .engine {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    color: var(--accent-text);
-    font-weight: 600;
-  }
-  .engine :global(svg) {
-    width: 14px;
-    height: 14px;
-  }
-  .save-row {
-    display: flex;
-    gap: 8px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
   }
   .save {
-    flex: 1;
     justify-content: center;
-    height: 44px;
-    border: none !important;
-    border-radius: var(--radius);
+    min-height: 46px;
     background: var(--accent) !important;
     color: var(--on-accent) !important;
     font-size: 15px;
-    font-weight: 700;
+    font-weight: 650;
   }
   .save:hover:not(:disabled) {
     background: var(--accent-hover) !important;
-    box-shadow: 0 0 0 2px var(--focus);
   }
-  .square {
-    justify-content: center;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    border: 1px solid var(--border-strong) !important;
-    border-radius: var(--radius);
-    background: var(--control) !important;
+  .save.busy {
+    background: linear-gradient(90deg, var(--accent) var(--done), color-mix(in srgb, var(--accent) 45%, var(--control)) var(--done)) !important;
   }
-  .square:hover:not(:disabled) {
-    background: var(--hover) !important;
+  /* Secondary actions in white, easy to see in both themes. */
+  .light {
+    min-height: 38px;
+    background: #ffffff !important;
+    color: #1c1c1f !important;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.14);
   }
-  .draft-note {
-    margin: 10px 2px 0;
-    font-size: 11.5px;
-    line-height: 1.45;
-    color: var(--text-muted);
-  }
-  .draft-note .link {
-    display: block;
-    margin-top: 2px;
-  }
-  .job {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 28px;
-    margin-top: 6px;
-    font-size: 12px;
-  }
-  .job .kind {
-    font-weight: 600;
-    min-width: 34px;
-  }
-  .job .name,
-  .failed {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .bar-progress {
-    flex: 1;
-    height: 4px;
-    border-radius: var(--radius);
-    background: var(--border);
-    overflow: hidden;
-  }
-  .bar-progress span {
-    display: block;
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.2s;
-  }
-  .pct {
-    font-family: var(--font-mono);
-    color: var(--text-muted);
-  }
-  .failed {
-    color: var(--danger);
-  }
-
-  /* Smaller windows: the transport row gives up hints, shortcuts, then
-   * labels, so play stays centred and nothing overlaps. */
-  @container (max-width: 980px) {
-    .hint-keys {
-      display: none;
-    }
-  }
-  @container (max-width: 820px) {
-    .act :global(.kbd) {
-      display: none;
-    }
-    .zoom input {
-      width: 64px;
-    }
-    .time {
-      min-width: 0;
-      font-size: 12px;
-    }
-  }
-  @container (max-width: 660px) {
-    .act .lbl,
-    .zoom input {
-      display: none;
-    }
-    .act {
-      padding: 0 9px;
-    }
-    .center {
-      gap: 5px;
-    }
-    .round.play {
-      width: 38px;
-      height: 38px;
-    }
-    .round.skip {
-      display: none;
-    }
-  }
-  /* The tool bar stays on one row as long as it can. */
-  @container (max-width: 900px) {
-    .tool {
-      width: 31px;
-      height: 31px;
-    }
-    .colors {
-      gap: 4px;
-    }
-    .swatch,
-    .custom {
-      width: 17px;
-      height: 17px;
-    }
-    .sep {
-      margin: 6px 2px;
-    }
-  }
-  /* Short windows: a thinner timeline leaves room for the picture. */
-  @media (max-height: 720px) {
-    .track {
-      height: 44px !important;
-    }
-    .ratio {
-      height: 46px;
-    }
+  .light:hover:not(:disabled) {
+    background: #ececf0 !important;
   }
 </style>
