@@ -110,6 +110,15 @@
     { value: "soft", label: "On a tinted box" },
     { value: "solid", label: "On a solid box" },
   ];
+  /** Sections of the side panel, from the rail on the left. */
+  const PANELS: { id: "background" | "cursor" | "format" | "export"; icon: IconName; label: string }[] = [
+    { id: "background", icon: "frame", label: "Background and frame" },
+    { id: "cursor", icon: "cursor", label: "Cursor and clicks" },
+    { id: "format", icon: "aspect", label: "Format and crop" },
+    { id: "export", icon: "export", label: "Export settings" },
+  ];
+  /** "Curved arrow (drag its middle…)" → "Curved arrow". */
+  const shortLabel = (label: string) => label.replace(/\s*[(:,—].*$/, "");
   /** The arrow pointer, in a 32 px box (as drawn by `drawCursor`). */
   const ARROW = "M2 2L2 24L7.5 19L11.5 28L15 26.5L11 17.5L18.5 17.5Z";
   /** Pixel block of the pixelate tool, by thickness. */
@@ -184,7 +193,11 @@
   /** With a ratio: crop to it (fill) or show all on a background (fit). */
   let fit = $state<"fill" | "fit">("fill");
   let background = $state(0);
-  let margin = $state(0.05);
+  let margin = $state(0.08);
+  /** Rounded corners (share of the shorter side) and shadow (0–1) of the
+   * video on its background. */
+  let radius = $state(0.04);
+  let shadow = $state(0.5);
   let cursorVisible = $state(true);
   let cursorScale = $state(1);
   let cursorStyle = $state<CursorStyle>("original");
@@ -218,7 +231,9 @@
   let draft = $state<Shape | null>(null);
   let zoom = $state(1);
   let viewWidth = $state(800);
-  let menu = $state<"speed" | "sound" | null>(null);
+  let menu = $state<"speed" | "sound" | "layer" | null>(null);
+  /** Section shown in the side panel. */
+  let panel = $state<"background" | "cursor" | "format" | "export">("background");
   /** A new format is being framed: Cancel goes back to the one before. */
   let formatPending = false;
   /** Playback errors in a row (the player reloads on the first ones). */
@@ -250,12 +265,16 @@
   const unit = $derived(Math.max(1, Math.round(Math.max(vw, vh) / 1400)));
   const full = $derived<Rect>({ x: 0, y: 0, w: vw || 1, h: vh || 1 });
 
+  /** The video sits on a background (with a margin, rounded corners and
+   * a shadow), in the chosen format or its own proportions. */
+  const framed = $derived(fit === "fit");
+  const canvasRatio = $derived<[number, number]>(ratio ?? [(crop ?? full).w, (crop ?? full).h]);
   /** What the export looks like (while cropping: the whole frame). */
   const layout = $derived<Layout>(
     cropping || !vw
       ? plainLayout(full)
-      : ratio && fit === "fit"
-        ? fitLayout(crop ?? full, ratio, margin)
+      : framed
+        ? fitLayout(crop ?? full, canvasRatio, margin)
         : plainLayout(crop ?? full),
   );
   /** CSS pixels per output pixel, and per source pixel. */
@@ -506,9 +525,25 @@
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, out.w, out.h);
     }
+    // On a background: rounded corners and a soft shadow, as in the export.
+    const corner = layout.background ? Math.max(0, Math.min(0.25, radius)) * Math.min(area.w, area.h) : 0;
+    if (layout.background && shadow > 0) {
+      const short = Math.min(area.w, area.h);
+      const blur = Math.max(6, short * 0.08);
+      ctx.save();
+      ctx.shadowColor = `rgba(0,0,0,${0.6 * Math.min(1, shadow)})`;
+      ctx.shadowBlur = blur * dpr * k;
+      ctx.shadowOffsetY = blur * 0.35 * dpr * k;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.roundRect(area.x, area.y, area.w, area.h, corner);
+      ctx.fill();
+      ctx.restore();
+    }
     ctx.save();
     ctx.beginPath();
-    ctx.rect(area.x, area.y, area.w, area.h);
+    if (corner > 0) ctx.roundRect(area.x, area.y, area.w, area.h, corner);
+    else ctx.rect(area.x, area.y, area.w, area.h);
     ctx.clip();
     ctx.imageSmoothingQuality = "high";
     if (video.readyState >= 2) ctx.drawImage(video, c.x, c.y, c.w, c.h, area.x, area.y, area.w, area.h);
@@ -985,10 +1020,16 @@
   }
 
   function chooseFit(mode: "fill" | "fit") {
-    if (mode === fit || !ratio) return;
+    if (mode === fit) return;
+    if (!ratio) {
+      // Own proportions: the background only adds a frame around.
+      commit(() => (fit = mode));
+      return;
+    }
+    const r = ratio;
     changeFormat(() => {
       fit = mode;
-      crop = mode === "fill" && ratio ? ratioCrop(full, ratio) : null;
+      crop = mode === "fill" ? ratioCrop(full, r) : null;
     });
     if (mode === "fill") {
       startCrop();
@@ -998,6 +1039,13 @@
       cropping = false;
       cropDraft = null;
     }
+  }
+
+  /** Picks a background (or none) for the video. */
+  function chooseBackground(index: number | null) {
+    if (index === null) return chooseFit("fill");
+    background = index;
+    chooseFit("fit");
   }
 
   // ── Overlays ───────────────────────────────────────────────────────────
@@ -1312,7 +1360,9 @@
         clickRing || clickSound
           ? { ring: clickRing, color: hexRgb(clickColor), sound: clickSound, voice: clickVoice }
           : null,
-      canvas: ratio && fit === "fit" ? { ratio: [ratio[0], ratio[1]], colors: bg.map(hexRgb), padding: margin } : null,
+      canvas: framed
+        ? { ratio: [Math.round(canvasRatio[0]), Math.round(canvasRatio[1])], colors: bg.map(hexRgb), padding: margin, radius, shadow }
+        : null,
       pixelate: overlays
         .filter((o) => o.shape.kind === "pixelate")
         .map((o) => {
@@ -1346,7 +1396,7 @@
       kept[0]!.speed === 1 &&
       kept[0]!.end - kept[0]!.start >= duration - 0.01 &&
       !crop &&
-      !(ratio && fit === "fit") &&
+      !framed &&
       !overlays.length &&
       !clickRing &&
       !clickSound &&
@@ -1415,15 +1465,17 @@
   }
 
   /** Size of the exported frame, after crop, format and height. */
+  /** Corner radius of the video on its background, in output pixels. */
+  const radiusPx = $derived(Math.round(radius * Math.min(layout.area.w, layout.area.h)));
   /** Size of the exported frame at full resolution. */
   const exportBase = $derived.by(() => {
     if (!vw) return { w: 0, h: 0 };
-    const fitted = ratio && fit === "fit" ? fitLayout(crop ?? full, ratio, margin).out : null;
+    const fitted = framed ? fitLayout(crop ?? full, canvasRatio, margin).out : null;
     return { w: Math.round(fitted?.w ?? crop?.w ?? vw) & ~1, h: Math.round(fitted?.h ?? crop?.h ?? vh) & ~1 };
   });
   const exportSize = $derived.by(() => {
     if (!vw) return { w: 0, h: 0 };
-    const fitted = ratio && fit === "fit" ? fitLayout(crop ?? full, ratio, margin).out : null;
+    const fitted = framed ? fitLayout(crop ?? full, canvasRatio, margin).out : null;
     let w = fitted?.w ?? crop?.w ?? vw;
     let h = fitted?.h ?? crop?.h ?? vh;
     if (exportKind === "mp4" && height && height < h) {
@@ -1590,7 +1642,7 @@
   );
   const outputSize = $derived.by(() => {
     if (!vw) return "";
-    const fitted = ratio && fit === "fit" ? fitLayout(crop ?? full, ratio, margin).out : null;
+    const fitted = framed ? fitLayout(crop ?? full, canvasRatio, margin).out : null;
     const w = fitted?.w ?? crop?.w ?? vw;
     const h = fitted?.h ?? crop?.h ?? vh;
     return `${Math.round(w) & ~1}×${Math.round(h) & ~1}`;
@@ -1625,64 +1677,320 @@
       </div>
     </div>
   {/if}
-  <div class="main">
-    <nav class="toolbox" aria-label="Tools">
-      <div class="cluster">
-        <button type="button" class="tool" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}
-          ><Icon name="undo" /></button
-        >
-        <button type="button" class="tool" title="Redo (Ctrl+Y)" aria-label="Redo" disabled={!future.length} onclick={redo}
-          ><Icon name="redo" /></button
-        >
-      </div>
-      <span class="sep"></span>
-      <div class="cluster" role="toolbar">
-        {#each TOOLS as t (t.tool)}
-          <button
-            type="button"
-            class="tool"
-            class:active={tool === t.tool && !cropping}
-            title="{t.label} ({t.key})"
-            aria-label={t.label}
-            aria-pressed={tool === t.tool && !cropping}
-            onclick={() => chooseTool(t.tool)}
-          >
-            <Icon name={t.icon} />
-            <span class="key">{t.key}</span>
-          </button>
-        {/each}
+  <header class="topbar">
+    <div class="tb-side">
+      <button type="button" class="icon-btn" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}><Icon name="undo" /></button>
+      <button type="button" class="icon-btn" title="Redo (Ctrl+Y)" aria-label="Redo" disabled={!future.length} onclick={redo}><Icon name="redo" /></button>
+    </div>
+    <div class="tb-title" title={path}>
+      <strong>{name(path)}</strong>
+      <span>{format(output)}{outputSize ? ` · ${outputSize}` : ""}</span>
+    </div>
+    <div class="tb-side right">
+      <button type="button" class="soft-btn" onclick={copyVideo} disabled={!duration} title="Copy to the clipboard (Ctrl+C)"
+        ><Icon name="copy" /> Copy</button
+      >
+      <button type="button" class="soft-btn" onclick={saveAs} disabled={!duration || !config} title="Pick a name and a place"
+        ><Icon name="saveCopy" /> Save as…</button
+      >
+      <button
+        type="button"
+        class="export"
+        class:busy={!!running}
+        style={running ? `--done:${Math.round(running.done * 100)}%` : ""}
+        onclick={() => exportAs(exportKind)}
+        disabled={!duration || !config}
+        title="Save to {folder || 'the export folder'} (Ctrl+E)"
+      >
+        {#if running}
+          Saving… {Math.round(running.done * 100)}%
+        {:else}
+          <Icon name="export" /> Export {exportKind.toUpperCase()}
+        {/if}
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="rail" aria-label="Sections">
+      {#each PANELS as p (p.id)}
         <button
           type="button"
-          class="tool"
-          class:active={cropping}
-          title="Crop: choose the area to keep (C)"
-          aria-label="Crop"
-          aria-pressed={cropping}
-          onclick={() => (cropping ? applyCrop() : startCrop())}
+          class="rail-btn"
+          class:active={panel === p.id}
+          title={p.label}
+          aria-label={p.label}
+          aria-pressed={panel === p.id}
+          onclick={() => (panel = p.id)}
         >
-          <Icon name="crop" />
-          <span class="key">C</span>
+          <Icon name={p.icon} />
+          {#if (p.id === "background" && framed) || (p.id === "format" && (ratio || crop)) || (p.id === "cursor" && (clickRing || clickSound || halo || cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible))}
+            <span class="badge-dot"></span>
+          {/if}
         </button>
-      </div>
-      <span class="sep"></span>
-      <div class="cluster colors" role="group" aria-label="Colour">
-        {#each COLORS as c (c)}
-          <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}
-          ></button>
-        {/each}
-        <label class="custom" title="Any colour"
-          ><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label
+      {/each}
+    </nav>
+
+    <aside class="panel" aria-label={PANELS.find((p) => p.id === panel)?.label}>
+      {#if panel === "background"}
+        <div class="sec-head">
+          <h3>Background</h3>
+          <button type="button" class="link" disabled={!framed} onclick={() => chooseBackground(null)}>Reset</button>
+        </div>
+        <div class="walls">
+          <button type="button" class="wall none" class:active={!framed} title="No background" aria-label="No background" onclick={() => chooseBackground(null)}
+            ><Icon name="close" /></button
+          >
+          {#each BACKGROUNDS as b, i (b.name)}
+            <button
+              type="button"
+              class="wall"
+              class:active={framed && background === i}
+              style="--wall:linear-gradient(135deg,{b.stops.join(',')})"
+              title={b.name}
+              aria-label={b.name}
+              onclick={() => chooseBackground(i)}
+            ></button>
+          {/each}
+        </div>
+        <div class="sec-head">
+          <h3>Frame</h3>
+          <button
+            type="button"
+            class="link"
+            onclick={() => {
+              radius = 0.04;
+              shadow = 0.5;
+            }}>Reset</button
+          >
+        </div>
+        <label class="range-pill" class:off={!framed} style="--v:{shadow * 100}%"
+          ><span>Shadow</span><input type="range" min="0" max="1" step="0.01" bind:value={shadow} disabled={!framed} /><b
+            >{Math.round(shadow * 100)}%</b
+          ></label
+        >
+        <label class="range-pill" class:off={!framed} style="--v:{(radius / 0.25) * 100}%"
+          ><span>Radius</span><input type="range" min="0" max="0.25" step="0.005" bind:value={radius} disabled={!framed} /><b
+            >{radiusPx} px</b
+          ></label
+        >
+        <div class="sec-head"><h3>Padding</h3></div>
+        <label class="range-pill" class:off={!framed} style="--v:{(margin / 0.2) * 100}%"
+          ><span>Padding</span><input type="range" min="0" max="0.2" step="0.005" bind:value={margin} disabled={!framed} /><b
+            >{Math.round(margin * 100)}%</b
+          ></label
+        >
+        {#if !framed}
+          <p class="note">Pick a background to set the video on it: padding, shadow and corners apply there.</p>
+        {/if}
+      {:else if panel === "cursor"}
+        <div class="sec-head"><h3>Cursor and clicks</h3></div>
+        <div class="stack">
+        {#if !cursorTrack}
+          <p class="note">Needs a Kadra recording made with “editable cursor” on (Settings › Recording).</p>
+        {:else}
+          {#if cursorEditable}
+            <div class="looks" role="radiogroup" aria-label="Pointer">
+              <button type="button" role="radio" class="look" class:active={!cursorVisible} aria-checked={!cursorVisible} onclick={() => (cursorVisible = false)}>
+                <svg viewBox="0 0 32 32" aria-hidden="true"><path d={ARROW} class="ghost-arrow" /><path d="M5 27L27 5" class="slash" /></svg>
+                Hidden
+              </button>
+              {#each CURSOR_STYLES as cs (cs.value)}
+                {@const active = cursorVisible && cursorStyle === cs.value}
+                <button
+                  type="button"
+                  role="radio"
+                  class="look"
+                  class:active
+                  aria-checked={active}
+                  onclick={() => {
+                    cursorVisible = true;
+                    cursorStyle = cs.value;
+                  }}
+                >
+                  {#if cs.value === "original" && cursorTrack.shapes[0]}
+                    <img src="data:image/png;base64,{cursorTrack.shapes[0].png}" alt="" />
+                  {:else if cs.value === "dot"}
+                    <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="9" fill={cursorColor} stroke="#fff" stroke-width="2" /></svg>
+                  {:else}
+                    <svg viewBox="0 0 32 32" aria-hidden="true"
+                      ><path d={ARROW} fill={cs.value === "dark" ? "#111" : "#fff"} stroke={cs.value === "dark" ? "#fff" : "#111"} stroke-width="1.6" stroke-linejoin="round" /></svg
+                    >
+                  {/if}
+                  {cs.label}
+                </button>
+              {/each}
+            </div>
+            {#if cursorVisible}
+              <label class="field"
+                >Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} />
+                <span class="value">{cursorScale}×</span></label
+              >
+              {#if cursorStyle === "dot"}
+                <div class="field">
+                  <span>Colour</span>
+                  <div class="mini-swatches">
+                    {#each VIVID.slice(0, 6) as c (c)}
+                      <button type="button" class="swatch" class:active={cursorColor === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => (cursorColor = c)}></button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            {/if}
+          {:else}
+            <p class="note">The copy without cursor of this recording is gone: only clicks can be shown.</p>
+          {/if}
+
+          <div class="effects">
+            {#if cursorEditable}
+              <div class="effect" class:active={halo}>
+                <button type="button" aria-pressed={halo} onclick={() => (halo = !halo)}>
+                  <svg viewBox="0 0 40 40" aria-hidden="true"
+                    ><circle cx="16" cy="16" r="13" fill={haloColor} opacity="0.45" /><path d={ARROW} transform="translate(9 9) scale(0.7)" fill="#fff" stroke="#111" stroke-width="2" /></svg
+                  >
+                  <span>Halo</span>
+                </button>
+                <input type="color" bind:value={haloColor} class="dot-color" title="Halo colour" />
+              </div>
+            {/if}
+            <div class="effect" class:active={clickRing}>
+              <button type="button" aria-pressed={clickRing} onclick={() => (clickRing = !clickRing)}>
+                <svg viewBox="0 0 40 40" aria-hidden="true"
+                  ><circle cx="16" cy="16" r="12" fill="none" stroke={clickColor} stroke-width="3" /><circle cx="16" cy="16" r="6" fill="none" stroke={clickColor} stroke-width="2" opacity="0.5" /><path d={ARROW} transform="translate(13 13) scale(0.7)" fill="#fff" stroke="#111" stroke-width="2" /></svg
+                >
+                <span>Click ring</span>
+              </button>
+              <input type="color" bind:value={clickColor} class="dot-color" title="Ring colour" />
+            </div>
+          </div>
+
+          <div class="field stacked">
+            <span>Click sound</span>
+            <div class="segmented wrap" role="radiogroup" aria-label="Click sound">
+              <button type="button" role="radio" aria-checked={!clickSound} class:active={!clickSound} onclick={() => (clickSound = false)}>Off</button>
+              {#each CLICK_SOUNDS as cs (cs.value)}
+                {@const active = clickSound && clickVoice === cs.value}
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  class:active
+                  title="Plays it once"
+                  onclick={() => {
+                    clickSound = true;
+                    listen(cs.value);
+                  }}>{cs.label}</button
+                >
+              {/each}
+            </div>
+          </div>
+        {/if}
+        </div>
+      {:else if panel === "format"}
+        <div class="sec-head">
+          <h3>Format</h3>
+          <button type="button" class="link" disabled={!ratio} onclick={() => chooseRatio(null)}>Reset</button>
+        </div>
+        <div class="ratios">
+          {#each RATIOS as r (r.label)}
+            {@const active = (ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)}
+            <button type="button" class="ratio" class:active onclick={() => chooseRatio(r.ratio)} aria-pressed={active}>
+              <span
+                class="shape"
+                style={r.ratio
+                  ? `aspect-ratio:${r.ratio[0]}/${r.ratio[1]};${r.ratio[0] >= r.ratio[1] ? "width:24px" : "height:24px"}`
+                  : "width:24px;height:16px;border-style:dashed"}
+              ></span>
+              {r.label}
+            </button>
+          {/each}
+        </div>
+        <p class="note">
+          {#if ratio && framed}
+            The video sits on its background in a {ratio.join(":")} frame.
+          {:else if ratio}
+            The video fills the {ratio.join(":")} frame: drag it to choose what stays visible.
+          {:else}
+            The video keeps its own proportions.
+          {/if}
+        </p>
+        <div class="sec-head"><h3>Crop</h3></div>
+        <div class="pair">
+          <button type="button" class:active={cropping} onclick={() => (cropping ? applyCrop() : startCrop())}
+            ><Icon name="crop" /> {ratio && !framed ? "Reframe" : "Crop"}</button
+          >
+          <button type="button" disabled={!crop || !!(ratio && !framed)} onclick={() => commit(() => (crop = null))}>Reset</button>
+        </div>
+      {:else}
+        <div class="sec-head"><h3>Export</h3></div>
+        <div class="stack">
+      <div class="segmented" role="radiogroup" aria-label="Format">
+        <button type="button" role="radio" aria-checked={exportKind === "mp4"} class:active={exportKind === "mp4"} onclick={() => (exportKind = "mp4")}
+          >MP4</button
+        >
+        <button type="button" role="radio" aria-checked={exportKind === "gif"} class:active={exportKind === "gif"} onclick={() => (exportKind = "gif")}
+          >GIF</button
         >
       </div>
-      <span class="sep"></span>
-      <div class="cluster" role="group" aria-label="Thickness">
-        {#each LEVELS as l (l.level)}
-          <button type="button" class="tool" class:active={level === l.level} title={l.label} aria-label={l.label} onclick={() => setLevel(l.level)}
-            ><span class="dot" style="--d:{3 + l.level * 2}px"></span></button
-          >
-        {/each}
+      {#if exportKind === "mp4"}
+        <div class="settings">
+          <label class="field">Resolution
+            <select bind:value={height}>{#each heightOptions as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
+          </label>
+          <label class="field">Frame rate
+            <select bind:value={fps}>{#each fpsOptions as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
+          </label>
+          <label class="field">Quality
+            <input type="range" min="0" max="100" step="5" bind:value={qualityLevel} />
+            <span class="value wide">{qualityName}</span>
+          </label>
+        </div>
+      {:else}
+        <div class="settings">
+          <label class="field">Width
+            <select bind:value={gifWidth}
+              >{#each GIF_WIDTHS.filter((w) => w === 0 || w < exportBase.w) as w (w)}<option value={w}>{w === 0 ? `${exportBase.w} px` : `${w} px`}</option>{/each}</select
+            >
+          </label>
+          <label class="field">Frame rate
+            <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
+          </label>
+          <label class="field">Colours
+            <input type="range" min="10" max="100" step="5" bind:value={gifQuality} />
+            <span class="value wide">{gifQuality}%</span>
+          </label>
+          <div class="pair checks">
+            <label class="check"><input type="checkbox" bind:checked={gifDither} /> Dithering</label>
+            <label class="check"><input type="checkbox" bind:checked={gifLoop} /> Loop</label>
+          </div>
+        </div>
+      {/if}
+      <button type="button" class="destination" onclick={chooseFolder} title="Change the folder exports are saved in">
+        <Icon name="folder" /><span>{folder || "…"}</span>
+      </button>
+      <div class="meta">
+        <span>{exportSize.w ? `${exportSize.w}×${exportSize.h}` : ""}</span>
+        <span>{estimate ? `≈ ${size(estimate)}` : ""}</span>
       </div>
-    </nav>
+        </div>
+      {/if}
+    </aside>
+
+    <main class="main">
+      <div class="stage-top">
+        <label class="ratio-pick" title="Format">
+          <select
+            value={RATIOS.find((r) => (r.ratio?.join(":") ?? null) === (ratio?.join(":") ?? null))?.label ?? "Original"}
+            onchange={(e) => chooseRatio(RATIOS.find((r) => r.label === e.currentTarget.value)?.ratio ?? null)}
+          >
+            {#each RATIOS as r (r.label)}<option value={r.label}>{r.label}</option>{/each}
+          </select>
+        </label>
+        <span class="vsep"></span>
+        <button type="button" class="flat" class:on={cropping} onclick={() => (cropping ? applyCrop() : startCrop())}
+          ><Icon name="crop" /> {ratio && !framed ? "Reframe" : "Crop video"}{#if crop}<span class="blue-dot"></span>{/if}</button
+        >
+      </div>
 
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
@@ -1768,32 +2076,86 @@
             {/each}
             <span class="ib-sep"></span>
           {/if}
+          {#each COLORS.slice(0, 6) as c (c)}
+            <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}
+            ></button>
+          {/each}
+          <span class="ib-sep"></span>
           <button type="button" class="ib" title="Duplicate" aria-label="Duplicate" onclick={duplicateOverlay}><Icon name="duplicate" /></button>
           <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeOverlay}><Icon name="trash" /></button>
         </div>
       {/if}
     </div>
-
-    <footer class="dock">
-      <div class="controls">
-        <div class="side left">
-          <button type="button" class="act" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)"
-            ><Icon name="scissors" /> <span class="lbl">Split</span> <Kbd keys="S" /></button
-          >
-          <button
-            type="button"
-            class="act"
-            class:danger={current?.kept !== false}
-            onclick={() => removePart()}
-            disabled={!duration}
-            title={current?.kept === false ? "Restore this part (Del)" : "Delete this part (Del)"}
-            ><Icon name={current?.kept === false ? "restore" : "trash"} />
-            <span class="lbl">{current?.kept === false ? "Restore" : "Delete"}</span> <Kbd keys="Del" /></button
-          >
+      <footer class="dock">
+        <div class="controls">
+          <div class="side left">
+            <div class="anchor">
+              <button
+                type="button"
+                class="pill-btn opens-menu"
+                class:on={tool !== "select"}
+                aria-expanded={menu === "layer"}
+                title="Add a text, an arrow, a shape…"
+                onclick={() => (menu = menu === "layer" ? null : "layer")}
+                ><Icon name={tool === "select" ? "plus" : (TOOLS.find((t) => t.tool === tool)?.icon ?? "plus")} />
+                {tool === "select" ? "Add layer" : shortLabel(TOOLS.find((t) => t.tool === tool)?.label ?? "")}
+                <Icon name="chevron" /></button
+              >
+              {#if menu === "layer"}
+                <div class="popover layers" role="menu">
+                  <div class="layer-grid">
+                    {#each TOOLS.filter((t) => t.tool !== "select") as t (t.tool)}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="layer"
+                        class:active={tool === t.tool}
+                        title={t.label}
+                        onclick={() => {
+                          chooseTool(t.tool);
+                          menu = null;
+                        }}><Icon name={t.icon} /><span>{shortLabel(t.label)}</span><kbd>{t.key}</kbd></button
+                      >
+                    {/each}
+                  </div>
+                  <div class="layer-row">
+                    {#each COLORS as c (c)}
+                      <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
+                    {/each}
+                    <label class="custom" title="Any colour"><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label>
+                  </div>
+                  <div class="layer-row">
+                    {#each LEVELS as l (l.level)}
+                      <button type="button" class="thick" class:active={level === l.level} title={l.label} onclick={() => setLevel(l.level)}
+                        ><span class="dot" style="--d:{3 + l.level * 2}px"></span> {l.label}</button
+                      >
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+            {#if tool !== "select"}
+              <button type="button" class="icon-btn" title="Back to selecting (V)" aria-label="Back to selecting" onclick={() => chooseTool("select")}
+                ><Icon name="select" /></button
+              >
+            {/if}
+            <span class="vsep"></span>
+            <button type="button" class="icon-btn" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)" aria-label="Split"
+              ><Icon name="scissors" /></button
+            >
+            <button
+              type="button"
+              class="icon-btn"
+              class:danger={current?.kept !== false}
+              onclick={() => removePart()}
+              disabled={!duration}
+              title={current?.kept === false ? "Restore this part (Del)" : "Delete this part (Del)"}
+              aria-label={current?.kept === false ? "Restore this part" : "Delete this part"}><Icon name={current?.kept === false ? "restore" : "trash"} /></button
+            >
           <div class="anchor">
             <button
               type="button"
-              class="act opens-menu"
+              class="pill-btn opens-menu"
               class:on={(current?.speed ?? 1) !== 1}
               disabled={!duration}
               aria-expanded={menu === "speed"}
@@ -1815,10 +2177,44 @@
               </div>
             {/if}
           </div>
+          </div>
+
+          <div class="center">
+            <span class="time">{format(time)}</span>
+            <button type="button" class="round skip" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
+              ><Icon name="start" /></button
+            >
+            <button type="button" class="round play" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
+              <Icon name={playing ? "pause" : "play"} />
+            </button>
+            <button type="button" class="round skip" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
+              ><Icon name="end" /></button
+            >
+            <span class="time muted">{format(output)}</span>
+          </div>
+
+          <div class="side right">
+            <div class="zoom">
+              <button type="button" class="icon-btn" aria-label="Zoom out" title="Zoom out (Ctrl+-)" disabled={zoom <= 1} onclick={() => zoomBy(1 / 1.5)}
+                ><Icon name="minus" /></button
+              >
+              <input
+                type="range"
+                min="0"
+                max={Math.log(MAX_ZOOM)}
+                step="0.01"
+                value={Math.log(zoom)}
+                aria-label="Timeline zoom"
+                oninput={(e) => (zoom = Math.exp(Number(e.currentTarget.value)))}
+              />
+              <button type="button" class="icon-btn" aria-label="Zoom in" title="Zoom in (Ctrl++)" disabled={zoom >= MAX_ZOOM} onclick={() => zoomBy(1.5)}
+                ><Icon name="plus" /></button
+              >
+            </div>
           <div class="anchor">
             <button
               type="button"
-              class="act opens-menu"
+              class="pill-btn opens-menu"
               class:on={!audio || volume !== 1 || fadeIn > 0 || fadeOut > 0}
               disabled={!duration}
               aria-expanded={menu === "sound"}
@@ -1827,7 +2223,7 @@
               ><Icon name={audio ? "volume" : "mute"} /> {audio ? `${Math.round(volume * 100)}%` : "Muted"} <Icon name="chevron" /></button
             >
             {#if menu === "sound"}
-              <div class="popover sound" role="dialog" aria-label="Sound">
+              <div class="popover sound align-right" role="dialog" aria-label="Sound">
                 <label class="switch-row"><span>Sound</span><input type="checkbox" class="switch" bind:checked={audio} /></label>
                 <label class="field" class:off={!audio}
                   >Volume <input type="range" min="0" max="2" step="0.05" bind:value={volume} disabled={!audio} />
@@ -1856,42 +2252,8 @@
               </div>
             {/if}
           </div>
-        </div>
-
-        <div class="center">
-          <button type="button" class="round skip" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
-            ><Icon name="start" /></button
-          >
-          <button type="button" class="round play" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
-            <Icon name={playing ? "pause" : "play"} />
-          </button>
-          <button type="button" class="round skip" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
-            ><Icon name="end" /></button
-          >
-          <span class="time">{format(time)} <span class="muted">/ {format(output)}</span></span>
-        </div>
-
-        <div class="side right">
-          <span class="hint-keys"><Kbd keys="I" /><Kbd keys="O" /> trim · <Kbd keys="Alt" /> free</span>
-          <div class="zoom">
-            <button type="button" class="round small" aria-label="Zoom out" title="Zoom out (Ctrl+-)" disabled={zoom <= 1} onclick={() => zoomBy(1 / 1.5)}
-              ><Icon name="minus" /></button
-            >
-            <input
-              type="range"
-              min="0"
-              max={Math.log(MAX_ZOOM)}
-              step="0.01"
-              value={Math.log(zoom)}
-              aria-label="Timeline zoom"
-              oninput={(e) => (zoom = Math.exp(Number(e.currentTarget.value)))}
-            />
-            <button type="button" class="round small" aria-label="Zoom in" title="Zoom in (Ctrl++)" disabled={zoom >= MAX_ZOOM} onclick={() => zoomBy(1.5)}
-              ><Icon name="plus" /></button
-            >
           </div>
         </div>
-      </div>
 
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="scroller" bind:this={scroller} onwheel={wheel}>
@@ -1998,263 +2360,23 @@
           <div class="playhead" style="left:{percent(time)}%"><span class="knob"></span></div>
         </div>
       </div>
-    </footer>
+      </footer>
+    </main>
   </div>
-
-  <aside class="side-panel">
-    <header class="panel-head">
-      <div class="file" title={path}>{name(path)}</div>
-      <div class="sub">{format(output)}{outputSize ? ` · ${outputSize}` : ""}{kept.length > 1 ? ` · ${kept.length} parts` : ""}</div>
-    </header>
-
-    <div class="panel-scroll">
-      <section>
-        <h3>Format</h3>
-        <div class="ratios">
-          {#each RATIOS as r (r.label)}
-            {@const active = (ratio?.join(":") ?? null) === (r.ratio?.join(":") ?? null)}
-            <button type="button" class="ratio" class:active onclick={() => chooseRatio(r.ratio)} aria-pressed={active}>
-              <span
-                class="shape"
-                style={r.ratio
-                  ? `aspect-ratio:${r.ratio[0]}/${r.ratio[1]};${r.ratio[0] >= r.ratio[1] ? "width:22px" : "height:22px"}`
-                  : "width:22px;height:15px;border-style:dashed"}
-              ></span>
-              {r.label}
-            </button>
-          {/each}
-        </div>
-        {#if ratio}
-          <div class="segmented" role="radiogroup" aria-label="How the video fills the format">
-            <button type="button" class:active={fit === "fill"} role="radio" aria-checked={fit === "fill"} onclick={() => chooseFit("fill")}
-              >Fill</button
-            >
-            <button type="button" class:active={fit === "fit"} role="radio" aria-checked={fit === "fit"} onclick={() => chooseFit("fit")}
-              >Fit on background</button
-            >
-          </div>
-          {#if fit === "fit"}
-            <div class="chips">
-              {#each BACKGROUNDS as b, i (b.name)}
-                <button
-                  type="button"
-                  class="swatch wide-swatch"
-                  class:active={background === i}
-                  style="--swatch:linear-gradient(135deg,{b.stops.join(',')})"
-                  title={b.name}
-                  aria-label={b.name}
-                  onclick={() => (background = i)}
-                ></button>
-              {/each}
-            </div>
-            <label class="field">Margin <input type="range" min="0" max="0.2" step="0.01" bind:value={margin} /></label>
-          {/if}
-        {/if}
-        <div class="pair">
-          <button type="button" class:active={cropping} onclick={() => (cropping ? applyCrop() : startCrop())}
-            ><Icon name="crop" /> {ratio && fit === "fill" ? "Reframe" : "Crop"}</button
-          >
-          <button type="button" disabled={!crop || !!(ratio && fit === "fill")} onclick={() => commit(() => (crop = null))}>Reset</button>
-        </div>
-      </section>
-
-      <section>
-        <h3>Cursor and clicks</h3>
-        {#if !cursorTrack}
-          <p class="note">Needs a Kadra recording made with “editable cursor” on (Settings › Recording).</p>
-        {:else}
-          {#if cursorEditable}
-            <div class="looks" role="radiogroup" aria-label="Pointer">
-              <button type="button" role="radio" class="look" class:active={!cursorVisible} aria-checked={!cursorVisible} onclick={() => (cursorVisible = false)}>
-                <svg viewBox="0 0 32 32" aria-hidden="true"><path d={ARROW} class="ghost-arrow" /><path d="M5 27L27 5" class="slash" /></svg>
-                Hidden
-              </button>
-              {#each CURSOR_STYLES as cs (cs.value)}
-                {@const active = cursorVisible && cursorStyle === cs.value}
-                <button
-                  type="button"
-                  role="radio"
-                  class="look"
-                  class:active
-                  aria-checked={active}
-                  onclick={() => {
-                    cursorVisible = true;
-                    cursorStyle = cs.value;
-                  }}
-                >
-                  {#if cs.value === "original" && cursorTrack.shapes[0]}
-                    <img src="data:image/png;base64,{cursorTrack.shapes[0].png}" alt="" />
-                  {:else if cs.value === "dot"}
-                    <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="9" fill={cursorColor} stroke="#fff" stroke-width="2" /></svg>
-                  {:else}
-                    <svg viewBox="0 0 32 32" aria-hidden="true"
-                      ><path d={ARROW} fill={cs.value === "dark" ? "#111" : "#fff"} stroke={cs.value === "dark" ? "#fff" : "#111"} stroke-width="1.6" stroke-linejoin="round" /></svg
-                    >
-                  {/if}
-                  {cs.label}
-                </button>
-              {/each}
-            </div>
-            {#if cursorVisible}
-              <label class="field"
-                >Size <input type="range" min="0.5" max="4" step="0.25" bind:value={cursorScale} />
-                <span class="value">{cursorScale}×</span></label
-              >
-              {#if cursorStyle === "dot"}
-                <div class="field">
-                  <span>Colour</span>
-                  <div class="mini-swatches">
-                    {#each VIVID.slice(0, 6) as c (c)}
-                      <button type="button" class="swatch" class:active={cursorColor === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => (cursorColor = c)}></button>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            {/if}
-          {:else}
-            <p class="note">The copy without cursor of this recording is gone: only clicks can be shown.</p>
-          {/if}
-
-          <div class="effects">
-            {#if cursorEditable}
-              <div class="effect" class:active={halo}>
-                <button type="button" aria-pressed={halo} onclick={() => (halo = !halo)}>
-                  <svg viewBox="0 0 40 40" aria-hidden="true"
-                    ><circle cx="16" cy="16" r="13" fill={haloColor} opacity="0.45" /><path d={ARROW} transform="translate(9 9) scale(0.7)" fill="#fff" stroke="#111" stroke-width="2" /></svg
-                  >
-                  <span>Halo</span>
-                </button>
-                <input type="color" bind:value={haloColor} class="dot-color" title="Halo colour" />
-              </div>
-            {/if}
-            <div class="effect" class:active={clickRing}>
-              <button type="button" aria-pressed={clickRing} onclick={() => (clickRing = !clickRing)}>
-                <svg viewBox="0 0 40 40" aria-hidden="true"
-                  ><circle cx="16" cy="16" r="12" fill="none" stroke={clickColor} stroke-width="3" /><circle cx="16" cy="16" r="6" fill="none" stroke={clickColor} stroke-width="2" opacity="0.5" /><path d={ARROW} transform="translate(13 13) scale(0.7)" fill="#fff" stroke="#111" stroke-width="2" /></svg
-                >
-                <span>Click ring</span>
-              </button>
-              <input type="color" bind:value={clickColor} class="dot-color" title="Ring colour" />
-            </div>
-          </div>
-
-          <div class="field stacked">
-            <span>Click sound</span>
-            <div class="segmented wrap" role="radiogroup" aria-label="Click sound">
-              <button type="button" role="radio" aria-checked={!clickSound} class:active={!clickSound} onclick={() => (clickSound = false)}>Off</button>
-              {#each CLICK_SOUNDS as cs (cs.value)}
-                {@const active = clickSound && clickVoice === cs.value}
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  class:active
-                  title="Plays it once"
-                  onclick={() => {
-                    clickSound = true;
-                    listen(cs.value);
-                  }}>{cs.label}</button
-                >
-              {/each}
-            </div>
-          </div>
-        {/if}
-      </section>
-    </div>
-
-    <div class="export-card">
-      <div class="segmented" role="radiogroup" aria-label="Format">
-        <button type="button" role="radio" aria-checked={exportKind === "mp4"} class:active={exportKind === "mp4"} onclick={() => (exportKind = "mp4")}
-          >MP4</button
-        >
-        <button type="button" role="radio" aria-checked={exportKind === "gif"} class:active={exportKind === "gif"} onclick={() => (exportKind = "gif")}
-          >GIF</button
-        >
-      </div>
-      {#if exportKind === "mp4"}
-        <div class="settings">
-          <label class="field">Resolution
-            <select bind:value={height}>{#each heightOptions as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
-          </label>
-          <label class="field">Frame rate
-            <select bind:value={fps}>{#each fpsOptions as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
-          </label>
-          <label class="field">Quality
-            <input type="range" min="0" max="100" step="5" bind:value={qualityLevel} />
-            <span class="value wide">{qualityName}</span>
-          </label>
-        </div>
-      {:else}
-        <div class="settings">
-          <label class="field">Width
-            <select bind:value={gifWidth}
-              >{#each GIF_WIDTHS.filter((w) => w === 0 || w < exportBase.w) as w (w)}<option value={w}>{w === 0 ? `${exportBase.w} px` : `${w} px`}</option>{/each}</select
-            >
-          </label>
-          <label class="field">Frame rate
-            <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
-          </label>
-          <label class="field">Colours
-            <input type="range" min="10" max="100" step="5" bind:value={gifQuality} />
-            <span class="value wide">{gifQuality}%</span>
-          </label>
-          <div class="pair checks">
-            <label class="check"><input type="checkbox" bind:checked={gifDither} /> Dithering</label>
-            <label class="check"><input type="checkbox" bind:checked={gifLoop} /> Loop</label>
-          </div>
-        </div>
-      {/if}
-      <button type="button" class="destination" onclick={chooseFolder} title="Change the folder exports are saved in">
-        <Icon name="folder" /><span>{folder || "…"}</span>
-      </button>
-      <div class="meta">
-        <span>{exportSize.w ? `${exportSize.w}×${exportSize.h}` : ""}</span>
-        <span>{estimate ? `≈ ${size(estimate)}` : ""}</span>
-      </div>
-      <button
-        type="button"
-        class="save"
-        style={running ? `--done:${Math.round(running.done * 100)}%` : ""}
-        class:busy={!!running}
-        onclick={() => exportAs(exportKind)}
-        disabled={!duration || !config}
-      >
-        {#if running}
-          Saving… {Math.round(running.done * 100)}%
-        {:else}
-          <Icon name="save" /> Save {exportKind.toUpperCase()}
-        {/if}
-      </button>
-      <div class="pair secondary">
-        <button type="button" class="light" onclick={saveAs} disabled={!duration || !config} title="Pick a name and a place"
-          ><Icon name="saveCopy" /> Save as…</button
-        >
-        <button type="button" class="light" onclick={copyVideo} disabled={!duration} title="Copy to the clipboard (Ctrl+C)"
-          ><Icon name="copy" /> Copy</button
-        >
-      </div>
-    </div>
-  </aside>
 </div>
 
 <style>
-  /* Calm and airy, in the window's theme (docs/UI_DESIGN.md). */
+  /* Top bar, icon rail, floating panel, stage and timeline (docs/UI_DESIGN.md). */
   .editor {
-    --accent-soft: color-mix(in srgb, var(--accent) 22%, transparent);
+    --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
     --trim: #f5c542;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) clamp(270px, 25vw, 320px);
+    display: flex;
+    flex-direction: column;
     height: 100vh;
-    min-width: 640px;
+    min-width: 760px;
     overflow: hidden;
     background: var(--bg);
     color: var(--text);
-  }
-  .main {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
   }
   button {
     display: inline-flex;
@@ -2265,100 +2387,332 @@
     background: var(--accent) !important;
     color: var(--on-accent) !important;
   }
-  .sep {
-    width: 1px;
-    height: 22px;
-    margin: 0 6px;
-    background: var(--border);
-  }
   .muted {
     color: var(--text-faint);
   }
-
-  /* Toolbox */
-  @container (max-width: 1060px) {
-    .toolbox .tool {
-      width: 32px;
-    }
-    .toolbox .colors {
-      gap: 5px;
-    }
-    .toolbox .colors .swatch,
-    .toolbox .custom {
-      width: 19px;
-      height: 19px;
-    }
+  .vsep {
+    width: 1px;
+    height: 22px;
+    margin: 0 6px;
+    background: var(--border-strong);
+    opacity: 0.6;
   }
-  .toolbox {
-    display: flex;
-    flex-wrap: wrap;
-    container-type: inline-size;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 10px 14px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-  }
-  .cluster {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .colors {
-    gap: 7px;
-    padding: 0 4px;
-  }
-  .tool {
-    position: relative;
+  .icon-btn {
     display: grid;
     place-items: center;
     width: 36px;
     height: 36px;
     padding: 0;
+    border-radius: 10px;
     background: transparent;
   }
-  .tool .key {
-    position: absolute;
-    right: 3px;
-    bottom: 1px;
-    font-size: 8px;
-    font-weight: 700;
-    font-family: var(--font-mono);
-    opacity: 0.45;
+  .icon-btn.danger:hover:not(:disabled) {
+    color: var(--danger);
   }
-  .swatch {
+
+  /* Top bar */
+  .topbar {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 16px;
+    height: 60px;
+    padding: 0 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .tb-side {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tb-side.right {
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .tb-title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    max-width: 40vw;
+  }
+  .tb-title strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 15px;
+    font-weight: 650;
+  }
+  .tb-title span {
+    flex: none;
+    color: var(--text-faint);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+  .soft-btn {
+    height: 38px;
+    padding: 0 14px;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .export {
+    height: 42px;
+    padding: 0 22px;
+    border-radius: 12px;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: 15px;
+    font-weight: 650;
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .export:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+  .export.busy {
+    background: linear-gradient(90deg, var(--accent) var(--done), color-mix(in srgb, var(--accent) 45%, var(--control)) var(--done));
+  }
+
+  /* Body: rail, panel, main */
+  .body {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 72px clamp(280px, 26vw, 340px) minmax(0, 1fr);
+  }
+  .rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 0;
+  }
+  .rail-btn {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    padding: 0;
+    border-radius: 14px;
+    background: transparent;
+    color: var(--text-muted);
+  }
+  .rail-btn :global(svg) {
     width: 22px;
     height: 22px;
-    padding: 0;
-    border-radius: 50%;
-    background: var(--swatch) !important;
-    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
   }
-  .swatch.active {
-    background: var(--swatch) !important;
-    outline: 2px solid var(--focus);
+  .rail-btn.active {
+    background: var(--accent-soft) !important;
+    color: var(--accent-text) !important;
+  }
+  .badge-dot {
+    position: absolute;
+    top: 8px;
+    right: 6px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 0;
+    margin: 14px 0 14px 0;
+    padding: 22px 20px;
+    overflow-y: auto;
+    border-radius: 20px;
+    background: var(--surface);
+    box-shadow: var(--shadow-soft);
+  }
+  .sec-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 6px;
+  }
+  .sec-head:first-child {
+    margin-top: 0;
+  }
+  h3 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .link {
+    padding: 2px 4px;
+    background: none !important;
+    color: var(--accent-text);
+    font-size: 13px;
+    font-weight: 550;
+  }
+  .link:disabled {
+    color: var(--text-faint);
+  }
+  .stack {
+    display: grid;
+    gap: 12px;
+  }
+  .walls {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+    gap: 8px;
+  }
+  .wall {
+    aspect-ratio: 1;
+    padding: 0;
+    justify-content: center;
+    border-radius: 12px;
+    background: var(--wall) !important;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.08);
+  }
+  .wall.none {
+    background: var(--control) !important;
+    color: var(--text-faint) !important;
+  }
+  .wall.active {
+    background: var(--wall) !important;
+    outline: 2.5px solid var(--accent);
     outline-offset: 2px;
   }
-  .custom {
-    position: relative;
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    overflow: hidden;
-    background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+  .wall.none.active {
+    background: var(--control) !important;
+    color: var(--accent-text) !important;
   }
-  .custom input {
+  /* A slider that is a pill: label on the left, value on the right, filled
+     up to the value. */
+  .range-pill {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 52px;
+    padding: 0 18px;
+    border-radius: 14px;
+    background: linear-gradient(90deg, var(--hover) var(--v), var(--control) var(--v));
+    font-size: 15px;
+    overflow: hidden;
+  }
+  .range-pill span,
+  .range-pill b {
+    position: relative;
+    z-index: 1;
+    pointer-events: none;
+  }
+  .range-pill b {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .range-pill::after {
+    content: "";
+    position: absolute;
+    top: 12px;
+    bottom: 12px;
+    left: calc(var(--v) - 1px);
+    width: 3px;
+    border-radius: 2px;
+    background: var(--text);
+    pointer-events: none;
+  }
+  .range-pill input {
     position: absolute;
     inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
     opacity: 0;
+    cursor: ew-resize;
+  }
+  .range-pill.off {
+    opacity: 0.45;
+  }
+  .note {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .ratios {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .ratio {
+    flex-direction: column;
+    justify-content: center;
+    gap: 7px;
+    height: 70px;
+    padding: 6px 4px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  .ratio .shape {
+    display: block;
+    border: 1.5px solid currentColor;
+    border-radius: 3px;
+    opacity: 0.85;
+  }
+  .pair {
+    display: flex;
+    gap: 8px;
+  }
+  .pair button {
+    flex: 1;
+    justify-content: center;
+    height: 40px;
+    border-radius: 10px;
+  }
+
+  /* Main column: format bar, stage, dock */
+  .main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  .stage-top {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 56px;
+  }
+  .ratio-pick select {
+    height: 36px;
+    padding: 0 30px 0 12px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    font-size: 15px;
+    font-weight: 600;
     cursor: pointer;
   }
-  .dot {
-    width: var(--d);
-    height: var(--d);
+  .ratio-pick select:hover {
+    background: var(--hover);
+  }
+  .flat {
+    position: relative;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 10px;
+    background: transparent;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .flat.on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .blue-dot {
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
-    background: currentColor;
+    background: var(--accent);
   }
 
   /* Close confirmation */
@@ -2403,14 +2757,16 @@
     color: #fff !important;
   }
 
-  /* Player: transparent around the picture, shown as a checkerboard. */
+  /* Player */
   .player {
     position: relative;
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    margin: 0 18px;
+    border-radius: 18px;
     background:
-      repeating-conic-gradient(color-mix(in srgb, var(--bg) 94%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
+      repeating-conic-gradient(color-mix(in srgb, var(--bg) 96%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
       20px;
     touch-action: none;
   }
@@ -2461,7 +2817,7 @@
   .error {
     position: absolute;
     left: 50%;
-    top: 16px;
+    top: 14px;
     transform: translateX(-50%);
     max-width: calc(100% - 32px);
     padding: 8px 16px;
@@ -2486,8 +2842,23 @@
   .error {
     color: var(--danger);
   }
+  .pill {
+    justify-content: center;
+    padding: 6px 16px;
+    background: var(--accent) !important;
+    color: var(--on-accent) !important;
+    font-weight: 650;
+  }
+  .pill:hover:not(:disabled) {
+    background: var(--accent-hover) !important;
+  }
+  .ghost {
+    justify-content: center;
+    padding: 6px 14px;
+    background: transparent;
+  }
 
-  /* Toolbar of the selected item, over the picture. */
+  /* Toolbar of the selected item, over the picture */
   .item-bar {
     position: absolute;
     z-index: 6;
@@ -2522,6 +2893,20 @@
     margin: 0 3px;
     background: var(--border);
   }
+  .ib-swatch {
+    width: 20px;
+    height: 20px;
+    margin: 0 2px;
+    padding: 0;
+    border-radius: 50%;
+    background: var(--c) !important;
+    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
+  }
+  .ib-swatch.active {
+    background: var(--c) !important;
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
   .fill-demo {
     display: grid;
     place-items: center;
@@ -2544,55 +2929,40 @@
     color: #fff;
   }
 
-  .pill {
-    justify-content: center;
-    padding: 6px 16px;
-    background: var(--accent) !important;
-    color: var(--on-accent) !important;
-    font-weight: 650;
-  }
-  .pill:hover:not(:disabled) {
-    background: var(--accent-hover) !important;
-  }
-  .ghost {
-    justify-content: center;
-    padding: 6px 14px;
-    background: transparent;
-  }
-
-  /* Dock: transport and timeline */
+  /* Dock: controls and timeline */
   .dock {
     container-type: inline-size;
-    padding: 12px 16px 14px;
-    background: var(--surface);
-    border-top: 1px solid var(--border);
+    padding: 12px 18px 16px;
   }
   .controls {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
     gap: 12px;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
   }
   .side {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     min-width: 0;
   }
   .side.right {
     justify-content: flex-end;
   }
-  .act {
-    height: 34px;
-    padding: 0 12px;
+  .pill-btn {
+    height: 40px;
+    padding: 0 14px;
+    border-radius: 12px;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-strong);
     white-space: nowrap;
+    font-weight: 600;
   }
-  .act.danger:hover:not(:disabled) {
-    color: var(--danger);
-  }
-  .act.on {
-    background: color-mix(in srgb, var(--trim) 22%, var(--control));
+  .pill-btn.on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
   }
   .center {
     display: flex;
@@ -2608,10 +2978,6 @@
     border-radius: 50%;
     background: transparent;
   }
-  .round.small {
-    width: 28px;
-    height: 28px;
-  }
   .round.play {
     width: 46px;
     height: 46px;
@@ -2623,34 +2989,24 @@
     transform: scale(1.04);
   }
   .time {
-    min-width: 140px;
-    font: 500 13px var(--font-mono);
-  }
-  .hint-keys {
-    font-size: 11px;
-    color: var(--text-faint);
-    white-space: nowrap;
-    overflow: hidden;
-  }
-  /* Narrow windows: icons only, no key hints. */
-  @container (max-width: 1180px) {
-    .act .lbl,
-    .act :global(.kbd),
-    .hint-keys {
-      display: none;
-    }
-    .act {
-      padding: 0 9px;
-    }
+    min-width: 64px;
+    font: 500 14px var(--font);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
   }
   .zoom {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 2px;
   }
   .zoom input {
-    width: 100px;
+    width: 90px;
     background: transparent;
+  }
+  @container (max-width: 980px) {
+    .zoom input {
+      display: none;
+    }
   }
   .anchor {
     position: relative;
@@ -2664,6 +3020,85 @@
     border-radius: var(--radius-lg);
     background: var(--raised);
     box-shadow: var(--shadow);
+  }
+  .popover.align-right {
+    left: auto;
+    right: 0;
+  }
+  .layers {
+    display: grid;
+    gap: 12px;
+    width: 340px;
+    padding: 14px;
+  }
+  .layer-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 4px;
+  }
+  .layer {
+    justify-content: flex-start;
+    height: 38px;
+    padding: 0 10px;
+    border-radius: 10px;
+    background: transparent;
+    font-weight: 550;
+  }
+  .layer span {
+    flex: 1;
+    text-align: left;
+  }
+  .layer kbd {
+    font: 600 10px var(--font-mono);
+    opacity: 0.5;
+  }
+  .layer-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .swatch {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 50%;
+    background: var(--swatch) !important;
+    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
+  }
+  .swatch.active {
+    background: var(--swatch) !important;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .custom {
+    position: relative;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+  }
+  .custom input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .thick {
+    flex: 1;
+    justify-content: center;
+    height: 34px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+  .dot {
+    width: var(--d);
+    height: var(--d);
+    border-radius: 50%;
+    background: currentColor;
   }
   .speeds {
     display: grid;
@@ -2693,7 +3128,7 @@
   .sound {
     display: grid;
     gap: 12px;
-    width: 280px;
+    width: 290px;
     padding: 16px;
   }
   .switch-row {
@@ -2710,7 +3145,6 @@
   .scroller {
     overflow-x: auto;
     overflow-y: hidden;
-    padding: 0 14px;
     scrollbar-width: thin;
     scrollbar-color: var(--border-strong) transparent;
   }
@@ -2722,34 +3156,45 @@
   }
   .ruler {
     position: relative;
-    height: 20px;
+    height: 26px;
     cursor: ew-resize;
   }
   .tick {
     position: absolute;
-    top: 0;
-    padding-left: 4px;
-    border-left: 1px solid var(--border-strong);
-    height: 10px;
-    font-size: 10px;
-    line-height: 10px;
-    font-family: var(--font-mono);
+    top: 12px;
+    transform: translateX(-50%);
+    font-size: 11px;
+    line-height: 12px;
     color: var(--text-faint);
     white-space: nowrap;
     pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .tick::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: -9px;
+    width: 4px;
+    height: 4px;
+    margin-left: -2px;
+    border-radius: 50%;
+    background: var(--border-strong);
   }
   .track {
     position: relative;
-    border-radius: var(--radius);
-    background: var(--control);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--accent) 20%, var(--surface));
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
     cursor: pointer;
   }
   .filmstrip {
     position: absolute;
-    inset: 0;
+    inset: 2px;
     overflow: hidden;
-    border-radius: var(--radius);
+    border-radius: 12px;
     pointer-events: none;
+    opacity: 0.9;
   }
   .filmstrip canvas {
     position: absolute;
@@ -2768,7 +3213,7 @@
   .segment.selected {
     box-shadow: inset 0 0 0 2px var(--accent);
     background-color: var(--accent-soft);
-    border-radius: var(--radius);
+    border-radius: 12px;
   }
   .badge {
     position: absolute;
@@ -2812,7 +3257,6 @@
     width: 14px;
     height: 14px;
   }
-  /* A cut: a bright gap between two parts, with a join button on hover. */
   .cut-mark {
     position: absolute;
     top: -6px;
@@ -2877,7 +3321,7 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    background: rgb(8 8 10 / 0.72);
+    background: rgb(8 8 10 / 0.6);
     pointer-events: none;
   }
   .trim-frame {
@@ -2898,11 +3342,11 @@
     z-index: 5;
   }
   .handle.start {
-    border-radius: 6px 0 0 6px;
+    border-radius: 8px 0 0 8px;
     transform: translateX(-12px);
   }
   .handle.end {
-    border-radius: 0 6px 6px 0;
+    border-radius: 0 8px 8px 0;
     transform: translateX(-2px);
   }
   .handle::after {
@@ -2921,7 +3365,7 @@
   }
   .lanes {
     position: relative;
-    margin-top: 8px;
+    margin-top: 10px;
     transition: height 0.15s;
   }
   .bar {
@@ -2929,20 +3373,21 @@
     height: 22px;
     display: flex;
     align-items: center;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--bar) 28%, var(--raised));
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bar) 60%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bar) 24%, var(--surface));
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--bar) 55%, transparent);
     cursor: grab;
     overflow: hidden;
   }
   .bar.selected {
-    outline: 2px solid var(--focus);
+    outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
   .bar .label {
     flex: 1;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 5px;
     padding: 0 6px;
     overflow: hidden;
@@ -2972,95 +3417,34 @@
     bottom: 0;
     width: 2px;
     margin-left: -1px;
-    background: var(--focus);
+    background: var(--accent);
     pointer-events: none;
     z-index: 6;
   }
   .knob {
     position: absolute;
-    top: 0;
-    left: -5px;
-    width: 12px;
-    height: 12px;
+    top: 2px;
+    left: -6px;
+    width: 14px;
+    height: 14px;
     border-radius: 50%;
-    background: var(--focus);
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--surface);
   }
 
-  /* Right panel */
-  .side-panel {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-  }
-  .panel-head {
-    padding: 20px 22px 6px;
-  }
-  .file {
-    font-size: 15px;
-    font-weight: 650;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .sub {
-    margin-top: 2px;
-    font-size: 12px;
-    color: var(--text-faint);
-    font-variant-numeric: tabular-nums;
-  }
-  .panel-scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 4px 22px 16px;
-  }
-  section {
-    display: grid;
-    gap: 12px;
-    padding: 16px 0 20px;
-  }
-  section + section {
-    border-top: 1px solid var(--border);
-  }
-  h3 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 650;
-    color: var(--text-muted);
-  }
-  .ratios {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
-  }
-  .ratio {
-    flex-direction: column;
-    justify-content: center;
-    gap: 6px;
-    height: 62px;
-    padding: 6px 4px;
-    font-size: 12px;
-  }
-  .ratio .shape {
-    display: block;
-    border: 1.5px solid currentColor;
-    border-radius: 3px;
-    opacity: 0.85;
-  }
+  /* Panel contents shared by sections */
   .segmented {
     display: flex;
     gap: 2px;
     padding: 3px;
-    border-radius: 10px;
+    border-radius: 12px;
     background: var(--control);
   }
   .segmented button {
     flex: 1;
     justify-content: center;
-    padding: 6px 8px;
-    border-radius: 7px;
+    padding: 7px 8px;
+    border-radius: 9px;
     background: transparent;
     font-size: 13px;
     white-space: nowrap;
@@ -3074,28 +3458,6 @@
   .segmented.tiny button {
     padding: 3px 6px;
     font-size: 12px;
-  }
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .wide-swatch {
-    width: 34px;
-    border-radius: 6px;
-  }
-  .pair {
-    display: flex;
-    gap: 8px;
-  }
-  .pair button {
-    flex: 1;
-    justify-content: center;
-  }
-  .note {
-    margin: 0;
-    font-size: 12px;
-    color: var(--text-muted);
   }
   .field {
     display: grid;
@@ -3123,14 +3485,48 @@
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
+  .value.wide {
+    min-width: 88px;
+  }
   .check {
     display: flex;
     align-items: center;
     gap: 8px;
     font-size: 13px;
   }
+  .checks .check {
+    flex: 1;
+  }
+  .settings {
+    display: grid;
+    gap: 12px;
+  }
+  .destination {
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--control);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+  .destination span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+  }
+  .meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
 
-  /* Cursor looks and effects, drawn as they will appear. */
+  /* Cursor looks and effects, drawn as they will appear */
   .looks {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
@@ -3140,8 +3536,9 @@
     flex-direction: column;
     justify-content: center;
     gap: 4px;
-    height: 72px;
+    height: 74px;
     padding: 6px 4px;
+    border-radius: 12px;
     font-size: 11px;
     font-weight: 550;
     text-align: center;
@@ -3152,9 +3549,6 @@
     width: 26px;
     height: 26px;
     object-fit: contain;
-  }
-  .look.active svg path {
-    filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.4));
   }
   .ghost-arrow {
     fill: none;
@@ -3188,7 +3582,8 @@
     flex-direction: column;
     justify-content: center;
     gap: 4px;
-    height: 76px;
+    height: 78px;
+    border-radius: 12px;
     font-size: 12px;
   }
   .effect.active > button {
@@ -3217,70 +3612,5 @@
   .dot-color::-webkit-color-swatch {
     border: none;
     border-radius: 50%;
-  }
-
-  /* Export, always at the bottom of the panel. */
-  .export-card {
-    display: grid;
-    gap: 12px;
-    padding: 18px 22px 22px;
-    border-top: 1px solid var(--border);
-  }
-  .settings {
-    display: grid;
-    gap: 10px;
-  }
-  .value.wide {
-    min-width: 88px;
-  }
-  .checks .check {
-    flex: 1;
-  }
-  .destination {
-    justify-content: flex-start;
-    gap: 8px;
-    padding: 8px 10px;
-    background: transparent;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-muted);
-  }
-  .destination span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    direction: rtl;
-    text-align: left;
-  }
-  .meta {
-    display: flex;
-    justify-content: space-between;
-    font-size: 12px;
-    color: var(--text-faint);
-    font-variant-numeric: tabular-nums;
-  }
-  .save {
-    justify-content: center;
-    min-height: 46px;
-    background: var(--accent) !important;
-    color: var(--on-accent) !important;
-    font-size: 15px;
-    font-weight: 650;
-  }
-  .save:hover:not(:disabled) {
-    background: var(--accent-hover) !important;
-  }
-  .save.busy {
-    background: linear-gradient(90deg, var(--accent) var(--done), color-mix(in srgb, var(--accent) 45%, var(--control)) var(--done)) !important;
-  }
-  /* Secondary actions in white, easy to see in both themes. */
-  .light {
-    min-height: 38px;
-    background: #ffffff !important;
-    color: #1c1c1f !important;
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.14);
-  }
-  .light:hover:not(:disabled) {
-    background: #ececf0 !important;
   }
 </style>

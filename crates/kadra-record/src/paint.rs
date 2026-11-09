@@ -6,7 +6,7 @@
 //! output frame (cropped, and scaled onto a canvas), clipped to the video.
 
 use kadra_capture::Gpu;
-use kadra_core::{BgraImage, Rect};
+use kadra_core::{BgraImage, Point, Rect};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
     D2D1_PIXEL_FORMAT,
@@ -114,6 +114,8 @@ pub struct Painter {
     transform: Matrix3x2,
     /// The video, in source pixels.
     clip: D2D_RECT_F,
+    /// Pieces of the canvas drawn over the video's corners (output pixels).
+    corners: Vec<(Sprite, f32, f32)>,
 }
 
 #[allow(
@@ -133,6 +135,7 @@ impl Painter {
         track: Option<CursorTrack>,
         crop: Rect,
         area: Rect,
+        corners: &[(BgraImage, Point)],
     ) -> Result<Self> {
         // SAFETY: COM calls on live interfaces with valid descriptions.
         unsafe {
@@ -266,6 +269,10 @@ impl Painter {
                     _texture: texture,
                 });
             }
+            let corners = corners
+                .iter()
+                .map(|(image, at)| Ok((sprite(image)?, at.x as f32, at.y as f32)))
+                .collect::<Result<_>>()?;
             Ok(Self {
                 pixels,
                 dc,
@@ -278,6 +285,7 @@ impl Painter {
                 track,
                 transform,
                 clip: rect_f(crop),
+                corners,
             })
         }
     }
@@ -397,8 +405,14 @@ impl Painter {
         // SAFETY: closes the drawing opened above.
         unsafe {
             self.dc.PopAxisAlignedClip();
-            self.dc.EndDraw(None, None)
+            // Rounded corners: pieces of the canvas, in output pixels.
+            self.dc.SetTransform(&Matrix3x2::identity());
         }
+        for (sprite, x, y) in &self.corners {
+            self.draw(sprite, *x, *y, 1.0);
+        }
+        // SAFETY: closes the drawing opened above.
+        unsafe { self.dc.EndDraw(None, None) }
     }
 }
 

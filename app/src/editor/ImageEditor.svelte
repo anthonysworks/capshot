@@ -852,7 +852,7 @@
     </div>
   {/if}
   <header class="topbar">
-    <span class="title" title={path}>{path.split(/[\\/]/).pop()}</span>
+    <div class="tb-side">
     <div class="group">
       <button type="button" class="icon" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}
         ><Icon name="undo" /></button
@@ -873,12 +873,15 @@
         ><Icon name="fit" /></button
       >
     </div>
-    <div class="spacer"></div>
+    </div>
+    <span class="title" title={path}>{path.split(/[\\/]/).pop()}<small>{image ? `${image.width}×${image.height}` : ""}</small></span>
+    <div class="tb-side right">
     <button type="button" class="action" onclick={copy}><Icon name="copy" /> Copy <Kbd keys="Ctrl+C" /></button>
     <button type="button" class="action" onclick={saveAs}
       ><Icon name="saveCopy" /> Save as… <Kbd keys="Ctrl+Shift+S" /></button
     >
     <button type="button" class="action primary" onclick={save}><Icon name="save" /> Save <Kbd keys="Ctrl+S" /></button>
+    </div>
   </header>
 
   <div class="body">
@@ -1088,95 +1091,137 @@
 </div>
 
 <style>
+  /* Same layout as the video editor: top bar, tool rail, floating panel,
+     picture (docs/UI_DESIGN.md). */
   .editor {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    background: var(--bg);
   }
   .topbar {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
     align-items: center;
-    gap: 14px;
-    padding: 10px 16px;
+    gap: 16px;
+    height: 60px;
+    padding: 0 16px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
+  .tb-side {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .tb-side.right {
+    justify-content: flex-end;
+    gap: 8px;
+  }
   .title {
-    max-width: 260px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    max-width: 40vw;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: 15px;
     font-weight: 650;
+  }
+  .title small {
+    color: var(--text-faint);
+    font-size: 13px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }
   .group {
     display: flex;
     align-items: center;
     gap: 2px;
   }
-  .spacer {
-    flex: 1;
-  }
   .body {
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: auto 1fr 250px;
+    grid-template-columns: 72px clamp(240px, 22vw, 300px) minmax(0, 1fr);
+    grid-template-areas: "rail panel stage";
   }
   .tools {
+    grid-area: rail;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    padding: 16px 12px;
-    background: var(--surface);
-    border-right: 1px solid var(--border);
+    align-items: center;
+    gap: 4px;
+    padding: 14px 0;
     overflow-y: auto;
   }
-  .heading,
-  h3 {
-    font-size: 12px;
-    font-weight: 650;
-    color: var(--text-muted);
-    margin: 0 0 8px;
+  .tool-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .tool-group + .tool-group {
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+  .heading {
+    display: none;
   }
   .tool-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 40px);
+    display: flex;
+    flex-direction: column;
     gap: 4px;
   }
   .tool {
     position: relative;
     display: grid;
     place-items: center;
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     padding: 0;
+    border-radius: 14px;
     background: transparent;
+    color: var(--text-muted);
   }
   .tool.active {
-    background: var(--accent);
-    color: var(--on-accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent-text);
   }
   .key {
     position: absolute;
-    right: 3px;
-    bottom: 1px;
+    right: 4px;
+    bottom: 2px;
     font-size: 9px;
     font-weight: 700;
-    opacity: 0.5;
+    opacity: 0.45;
   }
   .panel {
-    padding: 20px;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
+    grid-area: panel;
+    margin: 14px 0;
+    padding: 22px 20px;
     overflow-y: auto;
+    border-radius: 20px;
+    background: var(--surface);
+    box-shadow: var(--shadow-soft);
   }
   .panel section {
-    margin-bottom: 24px;
+    margin-bottom: 26px;
   }
   .panel button {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+  .heading,
+  h3 {
+    margin: 0 0 12px;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
   }
   .row,
   .swatches {
@@ -1202,6 +1247,7 @@
   }
   .column button {
     justify-content: space-between;
+    border-radius: 10px;
   }
   .note {
     margin: 8px 0;
@@ -1211,14 +1257,16 @@
   button.icon {
     display: grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     padding: 0;
+    border-radius: 10px;
     background: transparent;
     font-size: 18px;
   }
   button.chip {
-    padding: 5px 11px;
+    padding: 6px 12px;
+    border-radius: 10px;
   }
   button.chip.active {
     background: var(--accent);
@@ -1228,12 +1276,24 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    min-height: 36px;
+    height: 38px;
+    padding: 0 14px;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-strong);
   }
   button.action.primary {
     min-width: 120px;
-    min-height: 40px;
+    height: 42px;
     justify-content: center;
+    border-radius: 12px;
+    background: var(--accent);
+    color: var(--on-accent);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+    font-size: 15px;
+  }
+  button.action.primary:hover {
+    background: var(--accent-hover);
   }
   button.link {
     border: none;
@@ -1241,9 +1301,12 @@
     color: var(--accent-text);
     padding: 0 0 0 8px;
   }
+  button.danger {
+    color: var(--danger);
+  }
   .swatch {
-    width: 24px;
-    height: 24px;
+    width: 26px;
+    height: 26px;
     padding: 0;
     border-radius: 50%;
     background: var(--swatch);
@@ -1253,11 +1316,12 @@
     background: var(--swatch);
   }
   .swatch.wide {
-    width: 38px;
-    border-radius: 6px;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
   }
   .swatch.active {
-    outline: 2px solid var(--focus);
+    outline: 2.5px solid var(--accent);
     outline-offset: 2px;
   }
   .custom input {
@@ -1279,7 +1343,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin: 8px 0;
+    margin: 10px 0;
     font-size: 13px;
   }
   .field input {
@@ -1292,11 +1356,14 @@
     background: transparent;
   }
   .stage {
+    grid-area: stage;
     position: relative;
     min-width: 0;
+    margin: 14px 18px 18px;
     overflow: hidden;
+    border-radius: 18px;
     background:
-      repeating-conic-gradient(color-mix(in srgb, var(--bg) 94%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
+      repeating-conic-gradient(color-mix(in srgb, var(--bg) 96%, var(--text)) 0 25%, var(--bg) 0 50%) 0 0 / 20px
       20px;
   }
   canvas {
@@ -1345,5 +1412,33 @@
     top: 14px;
     font-size: 13px;
     color: var(--text-muted);
+  }
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: grid;
+    place-items: center;
+    background: rgb(0 0 0 / 0.45);
+  }
+  .dialog {
+    width: min(440px, calc(100vw - 32px));
+    padding: 26px 28px;
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .dialog h2 {
+    margin: 0 0 8px;
+    font-size: 20px;
+  }
+  .dialog p {
+    margin: 0 0 22px;
+    color: var(--text-muted);
+  }
+  .dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 </style>

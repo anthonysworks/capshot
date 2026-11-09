@@ -302,6 +302,14 @@ impl Frames {
             let frame = render_texture(gpu, natural, DXGI_FORMAT_B8G8R8A8_UNORM)?;
             let decode = Blitter::new(gpu, layout.coded, natural, fps, (space, Space::Rgb))?;
             let frame_view = decode.output(&frame)?;
+            let corners = options
+                .composition
+                .canvas
+                .as_ref()
+                .zip(canvas.as_ref())
+                .map_or_else(Vec::new, |(style, (image, area))| {
+                    Composer::corners(style, image, *area)
+                });
             let background = canvas
                 .map(|(image, _)| upload_bgra(gpu, &image))
                 .transpose()?;
@@ -314,6 +322,7 @@ impl Frames {
                 // frame.
                 crop.offset(-visible.left, -visible.top),
                 area,
+                &corners,
             )?;
             let encode = Blitter::new(gpu, natural, size, fps, (Space::Rgb, Space::Bt709))?;
             let frame_input = encode.input(&frame, 0)?;

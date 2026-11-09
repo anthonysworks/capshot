@@ -76,6 +76,13 @@ pub struct CanvasStyle {
     pub colors: Vec<[u8; 3]>,
     /// Margin around the video, as a fraction of the canvas (0–0.3).
     pub padding: f32,
+    /// Rounded corners of the video, as a fraction of its shorter side
+    /// (0–0.25).
+    #[serde(default)]
+    pub radius: f32,
+    /// Strength of the shadow under the video (0–1).
+    #[serde(default)]
+    pub shadow: f32,
 }
 
 /// An area of the video (pixels of the source) shown as blocks of
@@ -327,6 +334,9 @@ pub struct Composer {
     crop: Rect,
     /// Canvas background and where the video goes on it.
     canvas: Option<(BgraImage, Rect)>,
+    /// Pieces of the background drawn over the corners of the video, to
+    /// round them.
+    corners: Vec<(BgraImage, Point)>,
     pixelate: Vec<PixelArea>,
 }
 
@@ -388,6 +398,13 @@ impl Composer {
             .canvas
             .as_ref()
             .map(|c| Self::canvas(c, crop.width() as u32, crop.height() as u32));
+        let corners = composition
+            .canvas
+            .as_ref()
+            .zip(canvas.as_ref())
+            .map_or_else(Vec::new, |(style, (background, area))| {
+                Self::corners(style, background, *area)
+            });
         Self {
             overlays,
             cursor: composition.cursor.clone(),
@@ -397,8 +414,85 @@ impl Composer {
             clicks: composition.clicks.clone(),
             crop,
             canvas,
+            corners,
             pixelate: composition.pixelate.clone(),
         }
+    }
+
+    fn corner_radius(style: &CanvasStyle, area: Rect) -> f32 {
+        style.radius.clamp(0.0, 0.25) * area.width().min(area.height()) as f32
+    }
+
+    /// Darkens the background under the video: a soft shadow, slightly
+    /// lower than the video, following its rounded corners.
+    fn shadow(background: &mut BgraImage, area: Rect, style: &CanvasStyle) {
+        let short = area.width().min(area.height()) as f32;
+        let blur = (short * 0.08).max(6.0);
+        let drop = blur * 0.35;
+        let radius = Self::corner_radius(style, area);
+        let strength = style.shadow.clamp(0.0, 1.0) * 0.6;
+        let (w, h) = (background.width() as i32, background.height() as i32);
+        let cx = (area.left + area.right) as f32 / 2.0;
+        let cy = (area.top + area.bottom) as f32 / 2.0 + drop;
+        let (hw, hh) = (area.width() as f32 / 2.0, area.height() as f32 / 2.0);
+        let margin = blur.ceil() as i32 + 2;
+        let pixels = background.as_bytes_mut();
+        for y in (area.top - margin).max(0)..(area.bottom + margin + drop as i32).min(h) {
+            for x in (area.left - margin).max(0)..(area.right + margin).min(w) {
+                // Distance to the rounded rectangle (negative inside).
+                let qx = (x as f32 + 0.5 - cx).abs() - (hw - radius);
+                let qy = (y as f32 + 0.5 - cy).abs() - (hh - radius);
+                let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
+                let k = (1.0 - (outside / blur).clamp(0.0, 1.0)).powi(2) * strength;
+                if k <= 0.0 {
+                    continue;
+                }
+                let i = (y * w + x) as usize * 4;
+                for c in 0..3 {
+                    pixels[i + c] = (f32::from(pixels[i + c]) * (1.0 - k)).round() as u8;
+                }
+            }
+        }
+    }
+
+    /// The background around each corner of `area`, opaque beyond the
+    /// rounded corner and transparent inside it: drawn over the video, these
+    /// round its corners.
+    pub(crate) fn corners(
+        style: &CanvasStyle,
+        background: &BgraImage,
+        area: Rect,
+    ) -> Vec<(BgraImage, Point)> {
+        let radius = Self::corner_radius(style, area);
+        let size = radius.ceil() as i32;
+        if size < 1 {
+            return Vec::new();
+        }
+        let r = size as f32;
+        let origins = [
+            (area.left, area.top, r, r),
+            (area.right - size, area.top, 0.0, r),
+            (area.right - size, area.bottom - size, 0.0, 0.0),
+            (area.left, area.bottom - size, r, 0.0),
+        ];
+        origins
+            .iter()
+            .map(|&(ox, oy, cx, cy)| {
+                // (cx, cy): centre of the corner's circle, in the patch.
+                let mut patch = background.crop(Rect::from_size(ox, oy, size, size));
+                let pw = patch.width() as i32;
+                let ph = patch.height() as i32;
+                let bytes = patch.as_bytes_mut();
+                for y in 0..ph {
+                    for x in 0..pw {
+                        let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                        let alpha = (dx.hypot(dy) - radius + 0.5).clamp(0.0, 1.0);
+                        bytes[(y * pw + x) as usize * 4 + 3] = (alpha * 255.0).round() as u8;
+                    }
+                }
+                (patch, Point::new(ox, oy))
+            })
+            .collect()
     }
 
     /// Canvas of the requested aspect ratio around a `w` × `h` video, and
@@ -446,7 +540,11 @@ impl Composer {
                 ]);
             }
         }
-        (BgraImage::from_raw(cw, ch, pixels), area)
+        let mut background = BgraImage::from_raw(cw, ch, pixels);
+        if style.shadow > 0.0 {
+            Self::shadow(&mut background, area, style);
+        }
+        (background, area)
     }
 
     /// Size of the frames produced.
@@ -541,6 +639,9 @@ impl Composer {
                 let mut out = background.clone();
                 let video = resize(&frame, area.width() as u32, area.height() as u32);
                 blend(&mut out, &video, Point::new(area.left, area.top));
+                for (patch, at) in &self.corners {
+                    blend(&mut out, patch, *at);
+                }
                 out
             }
         }
@@ -652,12 +753,40 @@ mod tests {
     }
 
     #[test]
+    fn rounded_corners_show_the_background() {
+        let composition = Composition {
+            canvas: Some(CanvasStyle {
+                ratio: [16, 9],
+                colors: vec![[255, 0, 0]],
+                padding: 0.1,
+                radius: 0.25,
+                shadow: 0.0,
+            }),
+            ..Composition::default()
+        };
+        let composer = Composer::new(&composition, None, (160, 90), None);
+        let area = composer.canvas.as_ref().map(|(_, a)| *a).unwrap();
+        let out = composer.render(solid(160, 90, [0, 255, 0, 255]), 0.0);
+        // The very corner of the video is background, its middle is video.
+        assert_eq!(
+            out.pixel(Point::new(area.left, area.top)),
+            Some([0, 0, 255, 255])
+        );
+        let middle = Point::new(area.left + area.width() / 2, area.top + area.height() / 2);
+        assert_eq!(out.pixel(middle), Some([0, 255, 0, 255]));
+        let edge = Point::new(area.left + area.width() / 2, area.top);
+        assert_eq!(out.pixel(edge), Some([0, 255, 0, 255]));
+    }
+
+    #[test]
     fn canvas_has_the_ratio_and_holds_the_video() {
         let composition = Composition {
             canvas: Some(CanvasStyle {
                 ratio: [9, 16],
                 colors: vec![[255, 0, 0]],
                 padding: 0.0,
+                radius: 0.1,
+                shadow: 0.5,
             }),
             ..Composition::default()
         };

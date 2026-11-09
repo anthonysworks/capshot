@@ -126,7 +126,7 @@ export interface Composition {
   overlays: OverlayImage[];
   cursor: { visible: boolean; scale: number; image: { png: string; hotspot: [number, number] } | null; halo: [number, number, number, number] | null } | null;
   clicks: { ring: boolean; color: [number, number, number]; sound: boolean; voice: "soft" | "pop" | "click" } | null;
-  canvas: { ratio: [number, number]; colors: [number, number, number][]; padding: number } | null;
+  canvas: { ratio: [number, number]; colors: [number, number, number][]; padding: number; radius: number; shadow: number } | null;
   /** Areas shown as blocks, in video pixels. */
   pixelate: { x: number; y: number; w: number; h: number; block: number; start: number; end: number }[];
 }

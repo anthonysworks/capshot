@@ -478,6 +478,17 @@ export const BACKGROUNDS: { name: string; stops: string[] }[] = [
   { name: "Mint", stops: ["#34d399", "#0ea5e9"] },
   { name: "Night", stops: ["#1f2937", "#0b1120"] },
   { name: "Paper", stops: ["#f5f5f4", "#e2e0dd"] },
+  { name: "Sky", stops: ["#7dd3fc", "#2563eb"] },
+  { name: "Peach", stops: ["#fdba74", "#f472b6"] },
+  { name: "Lagoon", stops: ["#22d3ee", "#6366f1"] },
+  { name: "Grape", stops: ["#c084fc", "#4c1d95"] },
+  { name: "Forest", stops: ["#4ade80", "#14532d"] },
+  { name: "Ember", stops: ["#f59e0b", "#b91c1c"] },
+  { name: "Slate", stops: ["#94a3b8", "#334155"] },
+  { name: "Aurora", stops: ["#a7f3d0", "#3b82f6", "#a855f7"] },
+  { name: "Candy", stops: ["#f9a8d4", "#a5b4fc"] },
+  { name: "Ink", stops: ["#111827", "#000000"] },
+  { name: "White", stops: ["#ffffff", "#f1f5f9"] },
 ];
 
 export function paintBackground(ctx: CanvasRenderingContext2D, r: Rect, index: number) {
