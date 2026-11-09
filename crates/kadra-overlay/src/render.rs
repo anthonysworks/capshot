@@ -17,11 +17,11 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ,
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-    D2D1_MAP_OPTIONS_READ, D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap1, ID2D1BitmapBrush1,
-    ID2D1Brush, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1PathGeometry1,
-    ID2D1SolidColorBrush,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_MAP_OPTIONS_READ, D2D1_ROUNDED_RECT,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1BitmapBrush1, ID2D1Brush, ID2D1Device,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1PathGeometry1, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -35,7 +35,9 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::Vector2;
 
-use crate::layout::{Button, MAGNIFIER_CELLS, Magnifier, Toolbar, size_label};
+use crate::layout::{
+    Action, ActionBar, Button, MAGNIFIER_CELLS, Magnifier, Toolbar, size_label, size_label_above,
+};
 use crate::selection::{Mode, Purpose, Selection, Targets};
 use kadra_core::RecordingFormat;
 
@@ -48,8 +50,11 @@ const fn rgba(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     }
 }
 
-/// Xbox green: screenshots, the active tool.
-const ACCENT: D2D1_COLOR_F = rgba(0x10, 0x7c, 0x10, 1.0);
+/// Blue accent: screenshots, the active tool.
+const ACCENT: D2D1_COLOR_F = rgba(0x25, 0x63, 0xeb, 1.0);
+const ACCENT_HOVER: D2D1_COLOR_F = rgba(0x3b, 0x76, 0xf6, 1.0);
+/// The close button of the action bar.
+const CLOSE: D2D1_COLOR_F = rgba(0xef, 0x44, 0x44, 1.0);
 const RECORD: D2D1_COLOR_F = rgba(0xe8, 0x11, 0x23, 1.0);
 const DIM: D2D1_COLOR_F = rgba(0, 0, 0, 0.5);
 const WHITE: D2D1_COLOR_F = rgba(255, 255, 255, 1.0);
@@ -154,6 +159,32 @@ pub struct Scene<'a> {
     pub microphone: bool,
     /// Light theme for the toolbar and labels.
     pub light: bool,
+    /// A screenshot selection waiting for an action.
+    pub pending: Option<Pending<'a>>,
+}
+
+/// A selection kept on screen with the bar of actions under it.
+#[derive(Debug, Clone, Copy)]
+pub struct Pending<'a> {
+    pub rect: Rect,
+    /// Freeform selections are drawn along their path (no handles).
+    pub path: Option<&'a [Point]>,
+    pub bar: &'a ActionBar,
+    pub hover: Option<Action>,
+}
+
+/// Glyphs of the action bar (Segoe Fluent Icons); Text is drawn as a "T".
+pub const fn action_icon(action: Action) -> char {
+    match action {
+        Action::Copy => '\u{E8C8}',
+        Action::Save => '\u{E896}',
+        Action::SaveAs => '\u{E838}',
+        Action::Edit => '\u{E70F}',
+        Action::Pin => '\u{E718}',
+        Action::Text => 'T',
+        Action::Scan => '\u{ED14}',
+        Action::Close => '\u{E711}',
+    }
 }
 
 /// The frozen desktop, uploaded to the GPU once per capture.
@@ -418,7 +449,9 @@ impl Renderer {
                 ACCENT
             };
             let selection = scene.selection;
-            if let Some(path) = selection.drawn_path() {
+            if let Some(pending) = &scene.pending {
+                self.draw_pending(pending, scene, shot, border)?;
+            } else if let Some(path) = selection.drawn_path() {
                 if path.len() >= 3 {
                     dc.FillGeometry(&self.path(path, true)?, &shot.brush, None);
                 }
@@ -441,6 +474,141 @@ impl Renderer {
 
             dc.EndDraw(None, None)
         }
+    }
+
+    /// A selection waiting for an action: the picture inside, a thin
+    /// outline with handles, its size above it and the bar of actions.
+    fn draw_pending(
+        &self,
+        pending: &Pending<'_>,
+        scene: &Scene<'_>,
+        shot: &Screenshot,
+        border: f32,
+    ) -> Result<()> {
+        let dc = &self.dc;
+        let s = scene.scale;
+        let line = (1.5 * s).max(1.0);
+        // SAFETY: drawing inside BeginDraw/EndDraw.
+        unsafe {
+            if let Some(path) = pending.path {
+                if path.len() >= 3 {
+                    dc.FillGeometry(&self.path(path, true)?, &shot.brush, None);
+                }
+                dc.DrawGeometry(&self.path(path, true)?, &self.color(ACCENT), border, None);
+            } else {
+                let area = pending.rect;
+                dc.FillRectangle(&rect_f(area), &shot.brush);
+                dc.DrawRectangle(&outline(area, line), &self.color(ACCENT), line, None);
+                let edges = rect_f(area);
+                let (left, top, right, bottom) = (edges.left, edges.top, edges.right, edges.bottom);
+                let (middle, centre) = (f32::midpoint(left, right), f32::midpoint(top, bottom));
+                let radius = 5.0 * s;
+                for (x, y) in [
+                    (left, top),
+                    (right, top),
+                    (right, bottom),
+                    (left, bottom),
+                    (middle, top),
+                    (right, centre),
+                    (middle, bottom),
+                    (left, centre),
+                ] {
+                    let dot = D2D1_ELLIPSE {
+                        point: Vector2 { X: x, Y: y },
+                        radiusX: radius,
+                        radiusY: radius,
+                    };
+                    dc.FillEllipse(&dot, &self.color(WHITE));
+                    dc.DrawEllipse(&dot, &self.color(ACCENT), line, None);
+                }
+            }
+        }
+        self.draw_size_above(pending.rect, scene)?;
+        self.draw_action_bar(pending.bar, pending.hover, scene)
+    }
+
+    fn draw_size_above(&self, rect: Rect, scene: &Scene<'_>) -> Result<()> {
+        let text = format!("{} × {}", rect.width(), rect.height());
+        let format = self.format(Font::Label, 12.0 * scene.scale)?;
+        let pad = 8.0 * scene.scale;
+        #[allow(clippy::cast_possible_truncation)]
+        let size = (
+            (self.text_width(&text, &format)? + 2.0 * pad).ceil() as i32,
+            (22.0 * scene.scale).round() as i32,
+        );
+        let label = size_label_above(rect, scene.bounds, size, scene.scale);
+        let p = palette(scene.light);
+        self.pill(label, p.panel, 6.0 * scene.scale);
+        self.text(&text, &format, rect_f(label), p.text);
+        Ok(())
+    }
+
+    fn draw_action_bar(
+        &self,
+        bar: &ActionBar,
+        hover: Option<Action>,
+        scene: &Scene<'_>,
+    ) -> Result<()> {
+        let s = bar.scale;
+        let p = palette(scene.light);
+        self.pill(bar.frame, p.panel, 12.0 * s);
+        self.rounded_outline(bar.frame, p.border, 12.0 * s);
+        // SAFETY: drawing inside BeginDraw/EndDraw.
+        #[allow(clippy::cast_precision_loss)]
+        unsafe {
+            let x = bar.separator as f32 + 0.5;
+            let inset = 12.0 * s;
+            self.dc.DrawLine(
+                Vector2 {
+                    X: x,
+                    Y: bar.frame.top as f32 + inset,
+                },
+                Vector2 {
+                    X: x,
+                    Y: bar.frame.bottom as f32 - inset,
+                },
+                &self.color(p.separator),
+                1.0,
+                None,
+            );
+        }
+        let glyphs = self.format(Font::Icon, 17.0 * s)?;
+        let label = self.format(Font::Label, 14.0 * s)?;
+        for &(action, rect) in &bar.buttons {
+            let hovered = hover == Some(action);
+            if action == Action::Copy {
+                let fill = if hovered { ACCENT_HOVER } else { ACCENT };
+                self.pill(rect, fill, 8.0 * s);
+                let mut icon = rect_f(rect);
+                icon.right = icon.left + 32.0 * s;
+                icon.left += 6.0 * s;
+                self.text(&action_icon(action).to_string(), &glyphs, icon, WHITE);
+                let mut text = rect_f(rect);
+                text.left += 30.0 * s;
+                self.text("Copy", &label, text, WHITE);
+                continue;
+            }
+            if hovered {
+                self.pill(rect, p.hover, 8.0 * s);
+            }
+            let colour = if action == Action::Close {
+                CLOSE
+            } else {
+                p.text
+            };
+            if action == Action::Text {
+                let big = self.format(Font::Label, 18.0 * s)?;
+                self.text("T", &big, rect_f(rect), colour);
+            } else {
+                self.text(
+                    &action_icon(action).to_string(),
+                    &glyphs,
+                    rect_f(rect),
+                    colour,
+                );
+            }
+        }
+        Ok(())
     }
 
     fn draw_size_label(&self, rect: Rect, scene: &Scene<'_>) -> Result<()> {
@@ -720,6 +888,7 @@ impl Renderer {
                 system_audio: true,
                 microphone: selection.mode() == Mode::Freeform,
                 light: selection.mode() == Mode::Freeform,
+                pending: None,
             };
             self.render_to_image(&scene, &shot)?;
         }

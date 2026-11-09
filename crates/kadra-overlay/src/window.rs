@@ -40,8 +40,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -57,9 +57,9 @@ use windows::core::{BOOL, Interface, w};
 
 use crate::clipboard;
 use crate::indicator::{self, Indicator};
-use crate::layout::{self, Button, Magnifier, Toolbar};
+use crate::layout::{self, Action, ActionBar, Button, Magnifier, Toolbar};
 use crate::preview::{self, Preview};
-use crate::render::{Renderer, Scene, Screenshot};
+use crate::render::{Pending, Renderer, Scene, Screenshot};
 use crate::selection::{Outcome, Selection, Targets};
 use crate::{CaptureRequest, CaptureResult, Command, Purpose, ResultHandler};
 
@@ -225,21 +225,45 @@ struct Session {
     system_audio: bool,
     microphone: bool,
     request: CaptureRequest,
+    /// A screenshot selection waiting for an action (with `request.actions`).
+    pending: Option<PendingSelection>,
+}
+
+/// A selection kept on screen with the bar of actions under it.
+struct PendingSelection {
+    outcome: Outcome,
+    /// The selected area (bounds of a freeform path).
+    rect: Rect,
+    bar: ActionBar,
+    hover: Option<Action>,
+    /// Handle being dragged (see `layout::grab`), where the drag started
+    /// and the area then.
+    grip: Option<(u8, Point, Rect)>,
 }
 
 impl Session {
     fn scene(&self) -> Scene<'_> {
         let cursor = self.selection.cursor();
         let monitor = self.snapshot.monitor_at(cursor);
+        let waiting = self.pending.is_some();
         let over_toolbar = !self.selection.is_active() && self.toolbar.contains(cursor);
+        let pending = self.pending.as_ref().map(|p| Pending {
+            rect: p.rect,
+            path: match &p.outcome {
+                Outcome::Freeform(points) => Some(points.as_slice()),
+                _ => None,
+            },
+            bar: &p.bar,
+            hover: p.hover,
+        });
         Scene {
             selection: &self.selection,
-            hover: (!over_toolbar)
+            hover: (!over_toolbar && !waiting)
                 .then(|| self.selection.hover_rect(&self.snapshot))
                 .flatten(),
-            toolbar: (!self.selection.is_active()).then_some(&self.toolbar),
+            toolbar: (!self.selection.is_active() && !waiting).then_some(&self.toolbar),
             toolbar_hover: self.toolbar_hover,
-            magnifier: (!over_toolbar)
+            magnifier: (!over_toolbar && !waiting)
                 .then(|| Magnifier::new(cursor, monitor.rect, monitor.scale())),
             pixel: self.snapshot.image.pixel(cursor),
             scale: monitor.scale(),
@@ -251,7 +275,34 @@ impl Session {
             system_audio: self.system_audio,
             microphone: self.microphone,
             light: self.request.light,
+            pending,
         }
+    }
+
+    /// Screenshots of an area wait for an action when the request asks so.
+    fn wants_actions(&self, outcome: &Outcome) -> bool {
+        self.request.actions
+            && self.purpose == Purpose::Screenshot
+            && matches!(outcome, Outcome::Region(_) | Outcome::Freeform(_))
+    }
+
+    fn wait_for_action(&mut self, outcome: Outcome) {
+        let rect = match &outcome {
+            Outcome::Region(r) => *r,
+            Outcome::Freeform(points) => Rect::bounding(points).unwrap_or_default(),
+            Outcome::Pick(p) => Rect::from_size(p.x, p.y, 1, 1),
+        };
+        if rect.is_empty() {
+            return;
+        }
+        let (monitor, scale) = monitor_around(&self.snapshot, rect);
+        self.pending = Some(PendingSelection {
+            outcome,
+            rect,
+            bar: ActionBar::new(rect, monitor, scale),
+            hover: None,
+            grip: None,
+        });
     }
 
     fn set_purpose(&mut self, purpose: Purpose) {
@@ -346,6 +397,13 @@ thread_local! {
     static MISSED_PAINTS: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
 }
 
+/// The monitor holding the middle of `rect`, and its UI scale.
+fn monitor_around(snapshot: &Snapshot, rect: Rect) -> (Rect, f32) {
+    let centre = Point::new(rect.left + rect.width() / 2, rect.top + rect.height() / 2);
+    let monitor = snapshot.monitor_at(centre);
+    (monitor.rect, monitor.scale())
+}
+
 fn lparam_point(lparam: LPARAM) -> Point {
     #[allow(clippy::cast_possible_truncation)]
     let (x, y) = (
@@ -425,12 +483,19 @@ fn monitor_of(region: Rect) -> (Rect, Rect, f32) {
     }
 }
 
+fn ctrl_down() -> bool {
+    // SAFETY: plain query.
+    unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 }
+}
+
 fn shift_down() -> bool {
     // SAFETY: plain query.
     unsafe { GetKeyState(i32::from(VK_SHIFT.0)) < 0 }
 }
 
 impl State {
+    // One match over the window messages.
+    #[allow(clippy::too_many_lines)]
     fn handle(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_KADRA_REQUEST => {
@@ -516,8 +581,13 @@ impl State {
                 if (lparam.0 & 0xFFFF) as u32 != HTCLIENT {
                     return None;
                 }
+                // Arrow over the toolbars and over a waiting area (it moves).
                 let over_toolbar = self.session.as_ref().is_some_and(|s| {
-                    !s.selection.is_active() && s.toolbar.contains(s.selection.cursor())
+                    let at = s.selection.cursor();
+                    match &s.pending {
+                        Some(p) => p.bar.contains(at) || p.grip.is_some() || p.rect.contains(at),
+                        None => !s.selection.is_active() && s.toolbar.contains(at),
+                    }
                 });
                 // SAFETY: shared system cursors.
                 unsafe { SetCursor(Some(if over_toolbar { self.arrow } else { self.cross })) };
@@ -635,6 +705,7 @@ impl State {
             system_audio: request.system_audio,
             microphone: request.microphone,
             request,
+            pending: None,
         });
 
         // SAFETY: our own window, on its thread.
@@ -689,6 +760,21 @@ impl State {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        if let Some(pending) = session.pending.as_mut() {
+            session.selection.moved(p, &session.snapshot);
+            if let Some((grip, from, original)) = pending.grip {
+                let bounds = session.snapshot.bounds();
+                pending.rect = layout::adjust(original, grip, p.x - from.x, p.y - from.y, bounds);
+                pending.outcome = Outcome::Region(pending.rect);
+                let (monitor, scale) = monitor_around(&session.snapshot, pending.rect);
+                pending.bar = ActionBar::new(pending.rect, monitor, scale);
+                pending.hover = None;
+            } else {
+                pending.hover = pending.bar.hit(p);
+            }
+            self.invalidate();
+            return;
+        }
         session.selection.moved(p, &session.snapshot);
         session.toolbar_hover = if session.selection.is_active() {
             None
@@ -717,6 +803,26 @@ impl State {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        if let Some(pending) = session.pending.as_mut() {
+            if pending.bar.contains(p) {
+                if let Some(action) = pending.bar.hit(p) {
+                    self.act(action);
+                }
+                return;
+            }
+            let grip = match pending.outcome {
+                Outcome::Region(_) => layout::grab(pending.rect, p, pending.bar.scale),
+                _ => None,
+            };
+            if let Some(grip) = grip {
+                pending.grip = Some((grip, p, pending.rect));
+                // SAFETY: our own window.
+                unsafe { SetCapture(self.hwnd) };
+                return;
+            }
+            // Outside: start over with a new selection.
+            session.pending = None;
+        }
         if !session.selection.is_active() && session.toolbar.contains(p) {
             match session.toolbar.hit(p) {
                 Some(Button::Purpose(purpose)) => session.set_purpose(purpose),
@@ -742,6 +848,14 @@ impl State {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        if let Some(pending) = session.pending.as_mut() {
+            if pending.grip.take().is_some() {
+                // SAFETY: releasing our own capture.
+                let _ = unsafe { ReleaseCapture() };
+                self.invalidate();
+            }
+            return;
+        }
         if !session.selection.is_active() {
             return;
         }
@@ -749,8 +863,24 @@ impl State {
         let _ = unsafe { ReleaseCapture() };
         let outcome = session.selection.release(p, &session.snapshot);
         match outcome {
+            Some(outcome) if session.wants_actions(&outcome) => {
+                session.wait_for_action(outcome);
+                self.invalidate();
+            }
             Some(outcome) => self.finish(Some(outcome)),
             None => self.invalidate(),
+        }
+    }
+
+    /// Runs an action of the bar on the selection waiting for one.
+    fn act(&mut self, action: Action) {
+        let Some(pending) = self.session.as_mut().and_then(|s| s.pending.take()) else {
+            return;
+        };
+        if action == Action::Close {
+            self.finish(None);
+        } else {
+            self.finish_with(Some(pending.outcome), Some(action));
         }
     }
 
@@ -760,6 +890,23 @@ impl State {
         };
         #[allow(clippy::cast_possible_truncation)]
         let key = wparam.0 as u16;
+        if session.pending.is_some() {
+            // Enter or Ctrl+C copies, Ctrl+S saves, Esc gives up.
+            let action = match key {
+                k if k == VK_ESCAPE.0 => Some(Action::Close),
+                k if k == VK_RETURN.0 => Some(Action::Copy),
+                0x43 /* C */ if ctrl_down() => Some(Action::Copy),
+                0x53 /* S */ if ctrl_down() && shift_down() => Some(Action::SaveAs),
+                0x53 /* S */ if ctrl_down() => Some(Action::Save),
+                0x45 /* E */ => Some(Action::Edit),
+                0x50 /* P */ => Some(Action::Pin),
+                _ => None,
+            };
+            if let Some(action) = action {
+                self.act(action);
+            }
+            return;
+        }
         match key {
             k if k == VK_ESCAPE.0 => {
                 if session.selection.abort() {
@@ -772,7 +919,12 @@ impl State {
             }
             k if k == VK_RETURN.0 => {
                 if let Some(outcome) = session.selection.confirm_hover(&session.snapshot) {
-                    self.finish(Some(outcome));
+                    if session.wants_actions(&outcome) {
+                        session.wait_for_action(outcome);
+                        self.invalidate();
+                    } else {
+                        self.finish(Some(outcome));
+                    }
                 }
             }
             0x52 /* R */ => self.set_mode(crate::Mode::Region),
@@ -881,6 +1033,11 @@ impl State {
     }
 
     fn finish(&mut self, outcome: Option<Outcome>) {
+        self.finish_with(outcome, None);
+    }
+
+    /// Ends the capture; `action` was chosen on the bar under the selection.
+    fn finish_with(&mut self, outcome: Option<Outcome>, action: Option<Action>) {
         let Some(session) = self.close() else {
             return;
         };
@@ -908,11 +1065,21 @@ impl State {
                     })
             }
             Some(outcome) => {
+                let origin = session.snapshot.origin;
+                let area = match &outcome {
+                    Outcome::Region(r) => *r,
+                    Outcome::Freeform(points) => Rect::bounding(points).unwrap_or_default(),
+                    Outcome::Pick(p) => Rect::from_size(p.x, p.y, 1, 1),
+                }
+                .offset(origin.x, origin.y);
                 let image = session.crop(outcome);
                 if image.width() == 0 || image.height() == 0 {
                     CaptureResult::Cancelled
                 } else {
-                    let copied = session.request.copy_to_clipboard
+                    // With the action bar, only Copy puts it on the clipboard.
+                    let copy =
+                        action.map_or(session.request.copy_to_clipboard, |a| a == Action::Copy);
+                    let copied = copy
                         && match clipboard::set_image(self.hwnd, &image) {
                             Ok(()) => true,
                             Err(err) => {
@@ -922,14 +1089,20 @@ impl State {
                         };
                     self.next_capture_id += 1;
                     let id = self.next_capture_id;
-                    if session.request.show_preview {
+                    if session.request.show_preview && action.is_none() {
                         let monitor = session.snapshot.monitor_at(session.selection.cursor());
                         let origin = session.snapshot.origin;
                         let work = monitor.work.offset(origin.x, origin.y);
                         let label = copied.then_some("Copied to the clipboard");
                         self.preview.show(id, &image, work, monitor.scale(), label);
                     }
-                    CaptureResult::Captured { id, image, copied }
+                    CaptureResult::Captured {
+                        id,
+                        image,
+                        copied,
+                        action,
+                        area,
+                    }
                 }
             }
         };

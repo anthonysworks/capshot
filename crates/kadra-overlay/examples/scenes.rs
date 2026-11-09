@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 
 use kadra_capture::{Capturer, Gpu, Snapshot};
-use kadra_core::{ImageFormat, Point, RecordingFormat};
-use kadra_overlay::layout::{Button, Magnifier, Toolbar};
-use kadra_overlay::render::{Renderer, Scene};
+use kadra_core::{ImageFormat, Point, RecordingFormat, Rect};
+use kadra_overlay::layout::{Action, ActionBar, Button, Magnifier, Toolbar};
+use kadra_overlay::render::{Pending, Renderer, Scene};
 use kadra_overlay::selection::{Mode, Purpose, Selection};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::Win32::UI::HiDpi::{
@@ -44,6 +44,7 @@ fn scene<'a>(
         microphone: false,
         // `LIGHT=1` renders the light theme.
         light: std::env::var_os("LIGHT").is_some(),
+        pending: None,
     }
 }
 
@@ -173,6 +174,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RecordingFormat::Gif,
         ),
     )?;
+
+    // 9. A screenshot area waiting for an action, Copy hovered.
+    let a = at(0.25, 0.3);
+    let b = at(0.6, 0.65);
+    let area = Rect::new(a.x, a.y, b.x, b.y);
+    let bar = ActionBar::new(area, m, monitor.scale());
+    let idle = Selection::new(Mode::Region, at(0.4, 0.4));
+    let mut waiting = scene(&snap, &idle, &toolbar, None, still, MP4);
+    waiting.toolbar = None;
+    waiting.hover = None;
+    waiting.magnifier = None;
+    waiting.pending = Some(Pending {
+        rect: area,
+        path: None,
+        bar: &bar,
+        hover: Some(Action::Pin),
+    });
+    save("9-actions", &waiting)?;
 
     Ok(())
 }

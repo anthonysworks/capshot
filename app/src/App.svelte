@@ -632,7 +632,7 @@
     font-weight: 600;
   }
 
-  /* Choice tiles, green when chosen. */
+  /* Choice tiles, blue when chosen. */
   .tiles {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

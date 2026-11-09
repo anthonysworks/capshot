@@ -117,6 +117,8 @@
   let past = $state<string[]>([]);
   let future = $state<string[]>([]);
   let dirty = $state(false);
+  /** Asking whether to close with unsaved changes. */
+  let closing = $state(false);
   let toast = $state("");
   let editing = $state<{ x: number; y: number; text: string; id: number | null } | null>(null);
   /** Physical pixels per image pixel, and where the image starts. */
@@ -162,7 +164,11 @@
     const observer = new ResizeObserver(() => layout());
     observer.observe(stage);
     const unlisten = getCurrentWindow().onCloseRequested((event) => {
-      if (dirty && !confirm("Close without saving your changes?")) event.preventDefault();
+      // Browser dialogs can be blocked in the webview: ask in the page.
+      if (dirty) {
+        event.preventDefault();
+        closing = true;
+      }
     });
     return () => {
       observer.disconnect();
@@ -824,6 +830,27 @@
 <svelte:window onkeydown={keyDown} onkeyup={keyUp} />
 
 <div class="editor">
+  {#if closing}
+    <div class="backdrop">
+      <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="close-title">
+        <h2 id="close-title">Close without saving?</h2>
+        <p>Your changes to this image will be lost.</p>
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="action primary"
+            onclick={async () => {
+              closing = false;
+              await save();
+              if (!dirty) getCurrentWindow().destroy();
+            }}><Icon name="save" /> Save and close</button
+          >
+          <button type="button" class="action danger" onclick={() => getCurrentWindow().destroy()}>Close without saving</button>
+          <button type="button" class="action" onclick={() => (closing = false)}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  {/if}
   <header class="topbar">
     <span class="title" title={path}>{path.split(/[\\/]/).pop()}</span>
     <div class="group">

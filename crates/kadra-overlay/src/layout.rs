@@ -117,6 +117,169 @@ impl Toolbar {
     }
 }
 
+/// What can be done with a screenshot from the bar under the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    Copy,
+    /// Save to the screenshots folder.
+    Save,
+    /// Save under a name and in a folder picked in a dialog.
+    SaveAs,
+    Edit,
+    /// Keep it on screen in a small window above the others.
+    Pin,
+    /// Copy the text in it (Windows OCR).
+    Text,
+    /// Read the QR codes in it.
+    Scan,
+    Close,
+}
+
+/// The actions, in their order on the bar; a thin line comes before Close.
+pub const ACTIONS: [Action; 8] = [
+    Action::Copy,
+    Action::Save,
+    Action::SaveAs,
+    Action::Edit,
+    Action::Pin,
+    Action::Text,
+    Action::Scan,
+    Action::Close,
+];
+
+/// The bar of actions under a selection waiting for one.
+#[derive(Debug, Clone)]
+pub struct ActionBar {
+    pub frame: Rect,
+    pub buttons: Vec<(Action, Rect)>,
+    /// Horizontal position of the line before Close.
+    pub separator: i32,
+    pub scale: f32,
+}
+
+impl ActionBar {
+    /// Centred under `selection` (above it, or inside its bottom, when the
+    /// monitor ends first), inside `monitor`.
+    pub fn new(selection: Rect, monitor: Rect, scale: f32) -> Self {
+        let button = px(36.0, scale);
+        let copy = px(86.0, scale);
+        let pad = px(6.0, scale);
+        let gap = px(4.0, scale);
+        let separator = px(14.0, scale);
+        let width_of = |a: Action| if a == Action::Copy { copy } else { button };
+        let content: i32 = ACTIONS.iter().map(|&a| width_of(a)).sum::<i32>()
+            + gap * (i32::try_from(ACTIONS.len()).unwrap_or(1) - 2)
+            + separator;
+        let width = content + 2 * pad;
+        let height = button + 2 * pad;
+        let margin = px(10.0, scale);
+        let left = (selection.left + (selection.width() - width) / 2).clamp(
+            monitor.left + margin,
+            (monitor.right - width - margin).max(monitor.left),
+        );
+        let top = if selection.bottom + margin + height <= monitor.bottom - margin {
+            selection.bottom + margin
+        } else if selection.top - margin - height >= monitor.top + margin {
+            selection.top - margin - height
+        } else {
+            selection.bottom - margin - height
+        };
+        let frame = Rect::from_size(left, top, width, height);
+        let mut x = left + pad;
+        let mut buttons = Vec::new();
+        let mut line = x;
+        for a in ACTIONS {
+            if a == Action::Close {
+                line = x - gap + separator / 2;
+                x += separator - gap;
+            }
+            let w = width_of(a);
+            buttons.push((a, Rect::from_size(x, top + pad, w, button)));
+            x += w + gap;
+        }
+        Self {
+            frame,
+            buttons,
+            separator: line,
+            scale,
+        }
+    }
+
+    pub fn hit(&self, p: Point) -> Option<Action> {
+        self.buttons
+            .iter()
+            .find(|(_, r)| r.contains(p))
+            .map(|&(a, _)| a)
+    }
+
+    pub fn contains(&self, p: Point) -> bool {
+        self.frame.contains(p)
+    }
+}
+
+/// Where a pointer at `p` grabs a selection waiting for an action: one of
+/// the eight handles (corners 0–3 clockwise from the top left, then the
+/// middles of the top, right, bottom and left edges), the inside (8, to
+/// move it), or nothing.
+pub fn grab(selection: Rect, p: Point, scale: f32) -> Option<u8> {
+    let reach = px(8.0, scale);
+    let (cx, cy) = (
+        selection.left + selection.width() / 2,
+        selection.top + selection.height() / 2,
+    );
+    let handles = [
+        (selection.left, selection.top),
+        (selection.right, selection.top),
+        (selection.right, selection.bottom),
+        (selection.left, selection.bottom),
+        (cx, selection.top),
+        (selection.right, cy),
+        (cx, selection.bottom),
+        (selection.left, cy),
+    ];
+    for (i, (x, y)) in handles.iter().enumerate() {
+        if (p.x - x).abs() <= reach && (p.y - y).abs() <= reach {
+            return u8::try_from(i).ok();
+        }
+    }
+    selection.contains(p).then_some(8)
+}
+
+/// `original` after dragging handle `grip` (see [`grab`]) by `(dx, dy)`,
+/// kept inside `bounds` and at least 4 pixels wide and high.
+pub fn adjust(original: Rect, grip: u8, dx: i32, dy: i32, bounds: Rect) -> Rect {
+    let (mut l, mut t, mut r, mut b) =
+        (original.left, original.top, original.right, original.bottom);
+    match grip {
+        8 => {
+            let dx = dx.clamp(bounds.left - l, bounds.right - r);
+            let dy = dy.clamp(bounds.top - t, bounds.bottom - b);
+            return original.offset(dx, dy);
+        }
+        0 => (l, t) = (l + dx, t + dy),
+        1 => (r, t) = (r + dx, t + dy),
+        2 => (r, b) = (r + dx, b + dy),
+        3 => (l, b) = (l + dx, b + dy),
+        4 => t += dy,
+        5 => r += dx,
+        6 => b += dy,
+        _ => l += dx,
+    }
+    let (l, r) = (l.min(r), l.max(r));
+    let (t, b) = (t.min(b), t.max(b));
+    let rect = Rect::new(
+        l.max(bounds.left),
+        t.max(bounds.top),
+        r.min(bounds.right),
+        b.min(bounds.bottom),
+    );
+    if rect.width() < 4 || rect.height() < 4 {
+        original
+    } else {
+        rect
+    }
+}
+
 /// Frame rates offered on the toolbar for videos and GIFs.
 pub const FPS_STEPS: [u32; 7] = [15, 24, 30, 60, 120, 144, 240];
 pub const GIF_FPS_STEPS: [u32; 6] = [10, 15, 20, 25, 30, 50];
@@ -204,6 +367,22 @@ impl Magnifier {
 }
 
 /// Position of the "width × height" label: just below the selection, or
+/// The size label of a selection waiting for an action: above its top left
+/// corner (inside it when the monitor ends first), clear of the action bar.
+pub fn size_label_above(selection: Rect, bounds: Rect, label_size: (i32, i32), scale: f32) -> Rect {
+    let (w, h) = label_size;
+    let gap = px(6.0, scale);
+    let y = if selection.top - gap - h >= bounds.top {
+        selection.top - gap - h
+    } else {
+        selection.top + gap
+    };
+    let x = selection
+        .left
+        .clamp(bounds.left, (bounds.right - w).max(bounds.left));
+    Rect::from_size(x, y, w, h)
+}
+
 /// inside it when there is no room below.
 pub fn size_label(selection: Rect, bounds: Rect, label_size: (i32, i32), scale: f32) -> Rect {
     let (w, h) = label_size;
@@ -298,6 +477,37 @@ mod tests {
         assert!(m.frame.right <= 1910);
         assert!(m.info.bottom <= 1070);
         assert!(MONITOR.contains(Point::new(m.frame.left, m.frame.top)));
+    }
+
+    #[test]
+    fn action_bar_sits_under_the_selection_or_above_it() {
+        let bar = ActionBar::new(Rect::new(400, 300, 900, 600), MONITOR, 1.0);
+        assert_eq!(bar.frame.top, 610);
+        assert!((bar.frame.left + bar.frame.width() / 2 - 650).abs() <= 1);
+        assert_eq!(
+            bar.hit(Point::new(
+                bar.buttons[0].1.left + 2,
+                bar.buttons[0].1.top + 2
+            )),
+            Some(Action::Copy)
+        );
+        let low = ActionBar::new(Rect::new(400, 700, 900, 1060), MONITOR, 1.0);
+        assert!(low.frame.bottom <= 700);
+        let full = ActionBar::new(MONITOR, MONITOR, 1.0);
+        assert!(full.frame.bottom <= 1080 && full.frame.top >= 0);
+    }
+
+    #[test]
+    fn handles_resize_and_move_within_bounds() {
+        let r = Rect::new(100, 100, 300, 200);
+        assert_eq!(grab(r, Point::new(101, 99), 1.0), Some(0));
+        assert_eq!(grab(r, Point::new(300, 150), 1.0), Some(5));
+        assert_eq!(grab(r, Point::new(200, 150), 1.0), Some(8));
+        assert_eq!(grab(r, Point::new(10, 10), 1.0), None);
+        assert_eq!(adjust(r, 2, 50, 20, MONITOR), Rect::new(100, 100, 350, 220));
+        assert_eq!(adjust(r, 8, -500, 0, MONITOR), Rect::new(0, 100, 200, 200));
+        // Dragging past the opposite edge flips instead of vanishing.
+        assert_eq!(adjust(r, 5, -250, 0, MONITOR), Rect::new(50, 100, 100, 200));
     }
 
     #[test]

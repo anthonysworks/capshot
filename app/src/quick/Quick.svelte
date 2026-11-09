@@ -467,7 +467,7 @@
     grid-template-columns: repeat(var(--n), minmax(0, 1fr));
     gap: 8px;
   }
-  /* White in both themes: easy to see next to the green button. */
+  /* White in both themes: easy to see next to the blue button. */
   .tool {
     display: flex;
     flex-direction: column;

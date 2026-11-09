@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use kadra_core::{AfterCapture, BgraImage, Rect};
-use kadra_overlay::{CaptureRequest, CaptureResult, Mode, Overlay, Purpose};
+use kadra_overlay::{Action, CaptureRequest, CaptureResult, Mode, Overlay, Purpose};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::recording;
@@ -37,6 +37,7 @@ impl CaptureService {
             mode: Mode::Region,
             copy_to_clipboard: options.copy_to_clipboard,
             show_preview: options.after == AfterCapture::Preview,
+            actions: options.after == AfterCapture::Actions,
             format: options.format,
             fps: options.fps,
             gif_fps: options.gif_fps,
@@ -147,15 +148,25 @@ pub fn start(app: &AppHandle, purpose: Purpose) {
 /// Runs on the overlay thread: keep it short.
 fn on_result(app: &AppHandle, result: CaptureResult) {
     match result {
-        CaptureResult::Captured { id, image, copied } => {
+        CaptureResult::Captured {
+            id,
+            image,
+            copied,
+            action,
+            area,
+        } => {
             tracing::info!(
                 width = image.width(),
                 height = image.height(),
                 copied,
+                ?action,
                 "screenshot taken"
             );
             let app = app.clone();
-            std::thread::spawn(move || save(&app, id, &image));
+            match action {
+                Some(action) => std::thread::spawn(move || run_action(&app, action, &image, area)),
+                None => std::thread::spawn(move || save(&app, id, &image)),
+            };
         }
         CaptureResult::RegionSelected {
             region,
@@ -182,6 +193,117 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),
         CaptureResult::Cancelled => tracing::debug!("capture cancelled"),
         CaptureResult::Failed(err) => tracing::error!("capture failed: {err}"),
+    }
+}
+
+/// Runs what was picked on the bar under the selection. A thumbnail in the
+/// corner of the screen confirms it (clicking it opens the editor).
+// One arm per action of the bar.
+#[allow(clippy::too_many_lines)]
+fn run_action(app: &AppHandle, action: Action, image: &BgraImage, area: Rect) {
+    let (format, dir, keep) = {
+        let state = app.state::<AppState>();
+        let config = state.config();
+        (
+            config.capture.format,
+            config.capture.output_dir.clone(),
+            config.capture.save_to_disk,
+        )
+    };
+    let service = app.try_state::<CaptureService>();
+    let confirm = |path: &std::path::Path, label: &str| {
+        if let Some(service) = &service {
+            service.show_file_preview(
+                image.clone(),
+                path.to_path_buf(),
+                area,
+                Some(label.to_owned()),
+            );
+        }
+    };
+    let temporary = || {
+        kadra_encode::save_now(image, format, &crate::quick::pending_dir())
+            .map_err(|e| e.to_string())
+    };
+    let result: Result<(), String> = (|| {
+        match action {
+            Action::Copy => confirm(&temporary()?, "Copied to the clipboard"),
+            Action::Save => {
+                let path =
+                    kadra_encode::save_now(image, format, &dir).map_err(|e| e.to_string())?;
+                remember(app, &path, image.width(), image.height());
+                let _ = app.emit(SAVED_EVENT, path.display().to_string());
+                confirm(&path, "Saved");
+            }
+            Action::SaveAs => {
+                let temp = temporary()?;
+                let chosen = crate::quick::choose(app, &temp);
+                let _ = std::fs::remove_file(&temp);
+                if let Some(to) = chosen {
+                    let format = kadra_encode::format_of(&to).unwrap_or(format);
+                    let bytes = kadra_encode::encode(image, format).map_err(|e| e.to_string())?;
+                    std::fs::write(&to, bytes).map_err(|e| e.to_string())?;
+                    remember(app, &to, image.width(), image.height());
+                    confirm(&to, "Saved");
+                }
+            }
+            Action::Edit => {
+                // The editor saves over the file it opens.
+                let dir = if keep {
+                    dir
+                } else {
+                    std::env::temp_dir().join("Kadra")
+                };
+                let path =
+                    kadra_encode::save_now(image, format, &dir).map_err(|e| e.to_string())?;
+                if keep {
+                    remember(app, &path, image.width(), image.height());
+                    let _ = app.emit(SAVED_EVENT, path.display().to_string());
+                }
+                crate::editor::open(app, &path);
+            }
+            Action::Pin => {
+                let temp = temporary()?;
+                #[allow(clippy::cast_lossless)]
+                let scale = app
+                    .monitor_from_point(f64::from(area.left), f64::from(area.top))
+                    .ok()
+                    .flatten()
+                    .map_or(1.0, |m| m.scale_factor());
+                let pinned = crate::quick::pin(app, &temp, scale);
+                let _ = std::fs::remove_file(&temp);
+                pinned?;
+            }
+            Action::Text => {
+                let text = crate::quick::text_in(image.clone())?;
+                let path = temporary()?;
+                if text.trim().is_empty() {
+                    confirm(&path, "No text found");
+                } else {
+                    if let Some(service) = &service {
+                        service.copy_text(text);
+                    }
+                    confirm(&path, "Text copied");
+                }
+            }
+            Action::Scan => {
+                let codes = crate::quick::codes_in(image);
+                let path = temporary()?;
+                if codes.is_empty() {
+                    confirm(&path, "No QR code found");
+                } else {
+                    if let Some(service) = &service {
+                        service.copy_text(codes.join("\n"));
+                    }
+                    confirm(&path, "QR code copied");
+                }
+            }
+            Action::Close => {}
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        tracing::error!("screenshot action {action:?} failed: {err}");
     }
 }
 

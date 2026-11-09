@@ -310,7 +310,11 @@ pub fn pin(app: &AppHandle, path: &Path, scale: f64) -> Result<(), String> {
 /// languages of the user's profile.
 pub fn read_text(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let image = kadra_encode::decode(&bytes).map_err(|e| e.to_string())?;
+    text_in(kadra_encode::decode(&bytes).map_err(|e| e.to_string())?)
+}
+
+/// Text in a picture (Windows OCR).
+pub fn text_in(image: kadra_core::BgraImage) -> Result<String, String> {
     // WinRT needs an initialised thread; this one is ours alone.
     std::thread::spawn(move || ocr::recognize(&image))
         .join()
@@ -321,6 +325,11 @@ pub fn read_text(path: &Path) -> Result<String, String> {
 pub fn read_codes(path: &Path) -> Result<Vec<String>, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let image = kadra_encode::decode(&bytes).map_err(|e| e.to_string())?;
+    Ok(codes_in(&image))
+}
+
+/// Contents of the QR codes in a picture.
+pub fn codes_in(image: &kadra_core::BgraImage) -> Vec<String> {
     let (width, height) = (image.width() as usize, image.height() as usize);
     let data = image.as_bytes();
     let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
@@ -334,11 +343,11 @@ pub fn read_codes(path: &Path) -> Result<Vec<String>, String> {
         let luma = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
         luma
     });
-    Ok(prepared
+    prepared
         .detect_grids()
         .into_iter()
         .filter_map(|grid| grid.decode().ok().map(|(_, content)| content))
-        .collect())
+        .collect()
 }
 
 mod ocr {
@@ -424,4 +433,20 @@ pub fn choose(app: &AppHandle, path: &Path) -> Option<PathBuf> {
         chosen.set_extension(&extension);
     }
     Some(chosen)
+}
+
+/// Screenshots left waiting by an earlier session (quick actions, pins,
+/// confirmation thumbnails) are deleted at start-up.
+pub fn clean_pending() {
+    let dir = pending_dir();
+    for path in [dir.clone(), dir.join("pinned")] {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            if entry.path().is_file() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }

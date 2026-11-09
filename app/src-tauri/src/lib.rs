@@ -96,6 +96,7 @@ pub fn run() {
         .setup(move |app| {
             tray::create(app.handle())?;
             saving::recover(app.handle());
+            std::thread::spawn(quick::clean_pending);
             let state = app.state::<AppState>();
             let hotkeys = state.config().hotkeys.clone();
             if let Err(err) = hotkeys::apply(app.handle(), &hotkeys) {

@@ -21,6 +21,7 @@ use kadra_core::{BgraImage, RecordingFormat, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+pub use layout::Action;
 pub use selection::{Mode, Purpose};
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,9 @@ pub struct CaptureRequest {
     pub copy_to_clipboard: bool,
     /// Show a thumbnail in the corner of the screen afterwards.
     pub show_preview: bool,
+    /// Keep a screenshot selection on screen with a bar of actions under
+    /// it (copy, save, edit…) instead of taking it at once.
+    pub actions: bool,
     /// Initial state of the recording toggles.
     pub format: RecordingFormat,
     /// Frame rates for videos and GIFs, and the countdown in seconds.
@@ -53,6 +57,10 @@ pub enum CaptureResult {
         id: u64,
         image: BgraImage,
         copied: bool,
+        /// Chosen on the bar under the selection (with `actions`).
+        action: Option<Action>,
+        /// Where it was taken, in desktop coordinates.
+        area: Rect,
     },
     /// An area to record was selected (desktop coordinates), with the
     /// audio sources chosen on the toolbar.
