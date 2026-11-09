@@ -412,6 +412,19 @@ pub async fn quick_pin(app: AppHandle, window: tauri::Window, path: String) -> R
     crate::quick::pin(&app, &quick_path(&app, &path)?, scale)
 }
 
+/// Closes the quick-actions window after an action, with a thumbnail
+/// confirming it (`label`) for a screenshot.
+#[tauri::command]
+pub async fn quick_done(
+    app: AppHandle,
+    window: tauri::Window,
+    path: String,
+    label: Option<String>,
+) -> Result<(), String> {
+    crate::quick::done(&app, &window, &quick_path(&app, &path)?, label);
+    Ok(())
+}
+
 /// Text in the screenshot (Windows OCR).
 #[tauri::command]
 pub async fn quick_text(app: AppHandle, path: String) -> Result<String, String> {

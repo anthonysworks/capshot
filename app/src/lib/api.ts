@@ -234,5 +234,7 @@ export const quickText = (path: string) => invoke<string>("quick_text", { path }
 export const quickCodes = (path: string) => invoke<string[]>("quick_codes", { path });
 /** Deletes an unsaved recording and closes the window. */
 export const quickDiscard = (path: string) => invoke<void>("quick_discard", { path });
+/** Closes the window after an action; a thumbnail confirms it with `label` (screenshots). */
+export const quickDone = (path: string, label: string | null = null) => invoke<void>("quick_done", { path, label });
 /** Puts text on the clipboard. */
 export const copyText = (text: string) => invoke<void>("copy_text", { text });

@@ -141,6 +141,7 @@ pub fn run() {
             commands::quick_text,
             commands::quick_codes,
             commands::quick_discard,
+            commands::quick_done,
             commands::copy_text,
         ])
         .build(tauri::generate_context!());

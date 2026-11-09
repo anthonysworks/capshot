@@ -10,6 +10,7 @@
     quickCodes,
     quickCopy,
     quickDiscard,
+    quickDone,
     quickEdit,
     quickInfo,
     quickPin,
@@ -22,8 +23,8 @@
   import type { IconName } from "../editor/icons";
 
   /** The toolbar shown after a capture: a preview and what can be done
-   * with it. It grows for the text or QR result and for the colour picker,
-   * and goes back to its size afterwards. */
+   * with it. Each action closes it (a thumbnail in the corner confirms
+   * what was done); it grows for the colour picker only. */
   let { path: initial }: { path: string } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -33,7 +34,6 @@
   let size = $state({ w: 0, h: 0 });
   let toast = $state("");
   let busy = $state<"" | "text" | "codes" | "save">("");
-  let result = $state<{ kind: "text"; text: string } | { kind: "codes"; codes: string[] } | null>(null);
   let picking = $state(false);
   let picked = $state<{ x: number; y: number; hex: string } | null>(null);
   let colours = $state<string[]>([]);
@@ -47,9 +47,8 @@
 
   /** Window sizes (logical pixels). */
   const COMPACT = $derived({ w: 540, h: isVideo ? 196 : 252 });
-  const WITH_RESULT = { w: 540, h: 460 };
   const PICKING = { w: 780, h: 600 };
-  const target = $derived(picking ? PICKING : result ? WITH_RESULT : COMPACT);
+  const target = $derived(picking ? PICKING : COMPACT);
   let applied = { w: 0, h: 0 };
 
   onMount(() => {
@@ -115,7 +114,7 @@
   async function copy() {
     try {
       await quickCopy(path);
-      notify(isVideo ? "Copied: paste it as a file" : "Copied");
+      await finish("Copied to the clipboard");
     } catch (e) {
       notify(String(e));
     }
@@ -137,13 +136,23 @@
       const saved = as ? await quickSaveAs(path) : await quickSave(path);
       if (saved) {
         path = saved;
-        notify("Saved");
+        await finish("Saved");
+        return;
       }
     } catch (e) {
       notify(String(e));
     }
     busy = "";
     await load();
+  }
+
+  /** The action is done: the window closes; a thumbnail confirms it. */
+  async function finish(label: string | null) {
+    try {
+      await quickDone(path, isVideo ? null : label);
+    } catch {
+      getCurrentWindow().destroy();
+    }
   }
 
   async function edit() {
@@ -160,13 +169,12 @@
     busy = "text";
     try {
       const text = await quickText(path);
-      result = { kind: "text", text };
       if (text.trim()) {
         await copyToClipboard(text);
-        notify("Text copied");
-      } else {
-        notify("No text found");
+        await finish("Text copied");
+        return;
       }
+      notify("No text found");
     } catch (e) {
       notify(String(e));
     }
@@ -177,8 +185,12 @@
     busy = "codes";
     try {
       const codes = await quickCodes(path);
-      result = { kind: "codes", codes };
-      if (!codes.length) notify("No QR code found");
+      if (codes.length) {
+        await copyToClipboard(codes.join("\n"));
+        await finish(codes.length > 1 ? `${codes.length} QR codes copied` : "QR code copied");
+        return;
+      }
+      notify("No QR code found");
     } catch (e) {
       notify(String(e));
     }
@@ -197,6 +209,7 @@
   async function pin() {
     try {
       await quickPin(path);
+      await finish(null);
     } catch (e) {
       notify(String(e));
     }
@@ -231,12 +244,11 @@
   /** Dragging anywhere that is not a control moves the toolbar. */
   function drag(e: PointerEvent) {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest("button, textarea, input, .result, img.pickable")) return;
+    if ((e.target as HTMLElement).closest("button, input, img.pickable")) return;
     getCurrentWindow().startDragging();
   }
 
   function keyDown(e: KeyboardEvent) {
-    if ((e.target as HTMLElement)?.tagName === "TEXTAREA") return;
     const ctrl = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     if (ctrl && key === "c") copy();
@@ -245,13 +257,10 @@
     else if (key === "escape") {
       if (asking) asking = false;
       else if (picking) picking = false;
-      else if (result) result = null;
       else close();
     } else return;
     e.preventDefault();
   }
-
-  const isLink = (s: string) => /^https?:\/\//i.test(s);
 
   const tools: { icon: IconName; label: string; run: () => void; images?: boolean; on?: () => boolean }[] = [
     { icon: "save", label: "Save", run: () => save() },
@@ -333,32 +342,6 @@
         </div>
       </div>
     </div>
-    {#if result}
-      <div class="result">
-        <div class="result-head">
-          <strong>{result.kind === "text" ? "Text in the picture" : "QR codes"}</strong>
-          <button type="button" class="x" aria-label="Close" onclick={() => (result = null)}><Icon name="close" /></button>
-        </div>
-        {#if result.kind === "text"}
-          <textarea bind:value={result.text} spellcheck="false" placeholder="No text found"></textarea>
-          {#if result.text.trim()}
-            {@const text = result.text}
-            <button type="button" class="light" onclick={() => copyText(text, "Text copied")}><Icon name="copy" /> Copy text</button>
-          {/if}
-        {:else if !result.codes.length}
-          <p class="faint">No QR code found in the picture.</p>
-        {:else}
-          {#each result.codes as code, i (i)}
-            <div class="code">
-              <span class="value" class:link={isLink(code)}>{code}</span>
-              <button type="button" class="light" onclick={() => copyText(code, isLink(code) ? "Link copied" : "Copied")}
-                ><Icon name="copy" /> Copy</button
-              >
-            </div>
-          {/each}
-        {/if}
-      </div>
-    {/if}
   {/if}
   {#if toast}<div class="toast" role="status">{toast}</div>{/if}
 
@@ -490,69 +473,10 @@
     color: var(--on-accent);
     box-shadow: none;
   }
-  .light {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    min-height: 40px;
-    background: #ffffff;
-    color: #1c1c1f;
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.14);
-  }
   .link {
     padding: 0 0 0 8px;
     background: none;
     color: var(--accent-text);
-    font-size: 12px;
-  }
-  .result {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    gap: 10px;
-    min-height: 0;
-    margin: 0 16px 16px;
-    padding: 14px;
-    border-radius: var(--radius);
-    background: var(--bg);
-  }
-  .result-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .result textarea {
-    flex: 1;
-    min-height: 0;
-    padding: 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--surface);
-    color: var(--text);
-    font: 13px/1.5 var(--font);
-    resize: none;
-    user-select: text;
-  }
-  .code {
-    display: grid;
-    gap: 8px;
-    padding: 10px;
-    border-radius: var(--radius);
-    background: var(--surface);
-  }
-  .code .value {
-    overflow-wrap: anywhere;
-    user-select: text;
-    font-size: 13px;
-  }
-  .code .link {
-    padding: 0;
-    color: var(--accent-text);
-    font-size: 13px;
-  }
-  .faint {
-    color: var(--text-faint);
     font-size: 12px;
   }
   .big {

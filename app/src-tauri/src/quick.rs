@@ -28,6 +28,9 @@ struct Entry {
     saved: bool,
     /// Now open in the editor, which owns it.
     edited: bool,
+    /// Left in the temporary folder after an action (cleaned at start-up),
+    /// so the confirmation thumbnail can still open it.
+    kept: bool,
 }
 
 impl QuickFiles {
@@ -128,7 +131,7 @@ fn closed(app: &AppHandle, path: &Path) {
     let Some(entry) = app.state::<QuickFiles>().lock().remove(path) else {
         return;
     };
-    if entry.saved || entry.edited {
+    if entry.saved || entry.edited || entry.kept {
         return;
     }
     match crate::editor::kind(path) {
@@ -218,7 +221,7 @@ pub fn save(app: &AppHandle, path: &Path, to: Option<PathBuf>) -> Result<PathBuf
         target.clone(),
         Entry {
             saved: true,
-            edited: false,
+            ..Entry::default()
         },
     );
     Ok(target)
@@ -263,6 +266,32 @@ pub fn copy(app: &AppHandle, path: &Path) -> Result<(), String> {
         service.copy_image(kadra_encode::decode(&bytes).map_err(|e| e.to_string())?);
     }
     Ok(())
+}
+
+/// An action of the window was done: the window goes away and, for a
+/// screenshot, the thumbnail in the corner of the screen confirms it with
+/// `label` (clicking it opens the editor).
+pub fn done(app: &AppHandle, window: &tauri::Window, path: &Path, label: Option<String>) {
+    if crate::editor::kind(path) != Some(Kind::Video)
+        && let Some(label) = label
+        && let Some(service) = app.try_state::<crate::capture::CaptureService>()
+        && let Ok(bytes) = std::fs::read(path)
+        && let Ok(image) = kadra_encode::decode(&bytes)
+    {
+        mark(app, path, |entry| entry.kept = true);
+        // The screen the window is on.
+        let region = match (window.outer_position(), window.outer_size()) {
+            (Ok(p), Ok(s)) => kadra_core::Rect::from_size(
+                p.x,
+                p.y,
+                i32::try_from(s.width).unwrap_or(1),
+                i32::try_from(s.height).unwrap_or(1),
+            ),
+            _ => kadra_core::Rect::from_size(0, 0, 1, 1),
+        };
+        service.show_file_preview(image, path.to_path_buf(), region, Some(label));
+    }
+    let _ = window.destroy();
 }
 
 /// Shows the screenshot in a small window that stays on top.
@@ -385,27 +414,115 @@ mod ocr {
                 }
             }
         };
-        // The engine takes images up to a size: larger ones are scaled down.
         let max = OcrEngine::MaxImageDimension()?;
-        let image = if image.width() > max || image.height() > max {
-            image.thumbnail(max, max)
-        } else {
-            image.clone()
-        };
+        // Screen text is small and often light on dark: the engine reads
+        // dark text on a light background, a few times larger, best. The
+        // other polarity is tried when the first finds nothing.
+        let prepared = prepare(image, max);
+        let text = read(&engine, &prepared)?;
+        if !text.trim().is_empty() {
+            return Ok(Some(text));
+        }
+        let mut inverted = prepared;
+        invert(&mut inverted);
+        let other = read(&engine, &inverted)?;
+        Ok(Some(other))
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    fn read(engine: &OcrEngine, image: &BgraImage) -> windows::core::Result<String> {
         let buffer = CryptographicBuffer::CreateFromByteArray(image.as_bytes())?;
         let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
             &buffer,
             BitmapPixelFormat::Bgra8,
             image.width() as i32,
             image.height() as i32,
-            BitmapAlphaMode::Premultiplied,
+            BitmapAlphaMode::Ignore,
         )?;
         let result = engine.RecognizeAsync(&bitmap)?.join()?;
         let mut lines = Vec::new();
         for line in result.Lines()? {
             lines.push(line.Text()?.to_string());
         }
-        Ok(Some(lines.join("\n")))
+        Ok(lines.join("\n"))
+    }
+
+    /// Grey levels on an opaque background (screen grabs can carry a zero
+    /// alpha, and freeform selections are transparent outside), dark text
+    /// on light, with a margin, scaled up so small text is a readable size.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    fn prepare(image: &BgraImage, max: u32) -> BgraImage {
+        let (w, h) = (image.width() as usize, image.height() as usize);
+        let src = image.as_bytes();
+        let mut grey = vec![255u8; w * h];
+        // A grab whose alpha is zero everywhere carries no transparency.
+        let masked = src.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
+        let mut sum = 0u64;
+        for (i, g) in grey.iter_mut().enumerate() {
+            let p = &src[i * 4..i * 4 + 4];
+            let luma =
+                (u32::from(p[2]) * 299 + u32::from(p[1]) * 587 + u32::from(p[0]) * 114) / 1000;
+            // Transparent pixels (outside a freeform shape) count as background.
+            *g = if masked && p[3] == 0 { 255 } else { luma as u8 };
+            sum += u64::from(*g);
+        }
+        let dark = !grey.is_empty() && sum / (grey.len() as u64) < 128;
+        if dark {
+            for g in &mut grey {
+                *g = 255 - *g;
+            }
+        }
+        // About 3× for a few lines of UI text, less for large pictures,
+        // never past what the engine accepts.
+        let pad = 12usize;
+        let longest = (w.max(h) + 2 * pad) as f64;
+        let scale = (2400.0 / longest)
+            .clamp(1.0, 3.0)
+            .min(f64::from(max) / longest);
+        let (pw, ph) = (w + 2 * pad, h + 2 * pad);
+        let (ow, oh) = (
+            ((pw as f64 * scale) as usize).max(1),
+            ((ph as f64 * scale) as usize).max(1),
+        );
+        let at = |x: f64, y: f64| -> f64 {
+            // Bilinear sample of the padded picture (margin is white).
+            let get = |xi: isize, yi: isize| -> f64 {
+                let (sx, sy) = (xi - pad.cast_signed(), yi - pad.cast_signed());
+                if sx < 0 || sy < 0 || sx >= w.cast_signed() || sy >= h.cast_signed() {
+                    255.0
+                } else {
+                    f64::from(grey[sy as usize * w + sx as usize])
+                }
+            };
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let (xi, yi) = (x0 as isize, y0 as isize);
+            let top = get(xi, yi) * (1.0 - fx) + get(xi + 1, yi) * fx;
+            let bottom = get(xi, yi + 1) * (1.0 - fx) + get(xi + 1, yi + 1) * fx;
+            top * (1.0 - fy) + bottom * fy
+        };
+        let mut out = Vec::with_capacity(ow * oh * 4);
+        for y in 0..oh {
+            let sy = ((y as f64 + 0.5) / scale - 0.5).max(0.0);
+            for x in 0..ow {
+                let sx = ((x as f64 + 0.5) / scale - 0.5).max(0.0);
+                let v = at(sx, sy).round().clamp(0.0, 255.0) as u8;
+                out.extend([v, v, v, 255]);
+            }
+        }
+        BgraImage::from_raw(ow as u32, oh as u32, out)
+    }
+
+    fn invert(image: &mut BgraImage) {
+        for p in image.as_bytes_mut().as_chunks_mut::<4>().0 {
+            p[0] = 255 - p[0];
+            p[1] = 255 - p[1];
+            p[2] = 255 - p[2];
+        }
     }
 }
 
