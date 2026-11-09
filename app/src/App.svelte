@@ -22,6 +22,7 @@
     saveConfig,
   } from "./lib/api";
   import HotkeyInput from "./lib/HotkeyInput.svelte";
+  import Notches from "./lib/Notches.svelte";
   import { type Theme, setTheme } from "./lib/theme";
 
   let config = $state<Config | null>(null);
@@ -315,20 +316,14 @@
                 <option value="av1">AV1 (smallest; RTX 40, RX 7000, Arc, otherwise HEVC)</option>
               </select>
             </label>
-            <label class="row">
+            <div class="row">
               <span>Quality</span>
-              <!-- Better to the right: the setting is an encoder value, lower is better. -->
-              <input
-                type="range"
-                min="15"
-                max="35"
-                value={50 - config.recording.quality}
-                oninput={(e) => config && (config.recording.quality = 50 - Number(e.currentTarget.value))}
+              <!-- In percent; the setting is an encoder value (15 best – 35), lower is better. -->
+              <Notches
+                value={Math.round(((35 - config.recording.quality) / 20) * 80 + 20)}
+                onchange={(pct) => config && (config.recording.quality = Math.round(35 - ((pct - 20) / 80) * 20))}
               />
-              <span class="value"
-                >{config.recording.quality <= 20 ? "High" : config.recording.quality <= 26 ? "Balanced" : "Small"}</span
-              >
-            </label>
+            </div>
           </section>
           <section>
             <h2>Sound and cursor</h2>
@@ -387,11 +382,10 @@
                 {/each}
               </select>
             </label>
-            <label class="row">
+            <div class="row">
               <span>Quality</span>
-              <input type="range" min="40" max="100" bind:value={config.gif.quality} />
-              <span class="value">{config.gif.quality >= 85 ? "High" : config.gif.quality >= 65 ? "Balanced" : "Small"}</span>
-            </label>
+              <Notches min={40} bind:value={config.gif.quality} />
+            </div>
             <label class="row check">
               <input type="checkbox" bind:checked={config.gif.dither} />
               <span>Dithering (smoother gradients, larger files)</span>

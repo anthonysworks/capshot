@@ -22,6 +22,7 @@
   import Icon from "./Icon.svelte";
   import type { IconName } from "./icons";
   import Kbd from "./Kbd.svelte";
+  import Notches from "../lib/Notches.svelte";
   import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, cursorAt, drawCursor, loadShapes } from "./cursors";
   import { VIVID } from "./colors";
   import {
@@ -114,7 +115,7 @@
   const PANELS: { id: "background" | "cursor" | "format" | "export"; icon: IconName; label: string }[] = [
     { id: "background", icon: "frame", label: "Background and frame" },
     { id: "cursor", icon: "cursor", label: "Cursor and clicks" },
-    { id: "format", icon: "aspect", label: "Format and crop" },
+    { id: "format", icon: "crop", label: "Format and crop" },
     { id: "export", icon: "export", label: "Export settings" },
   ];
   /** "Curved arrow (drag its middle…)" → "Curved arrow". */
@@ -141,6 +142,8 @@
   const ROW_H = 26;
   /** Space around the picture in the player, in pixels. */
   const STAGE_MARGIN = 28;
+  /** Room left and right of the timeline for the trim handles, in pixels. */
+  const TIMELINE_INSET = 16;
 
   interface Overlay {
     id: number;
@@ -231,7 +234,7 @@
   let draft = $state<Shape | null>(null);
   let zoom = $state(1);
   let viewWidth = $state(800);
-  let menu = $state<"speed" | "sound" | "layer" | null>(null);
+  let menu = $state<"speed" | "sound" | "style" | null>(null);
   /** Section shown in the side panel. */
   let panel = $state<"background" | "cursor" | "format" | "export">("background");
   /** A new format is being framed: Cancel goes back to the one before. */
@@ -320,6 +323,8 @@
   const selected = $derived(selectedSegment === null ? null : (segments[selectedSegment] ?? null));
   const current = $derived(selected ?? segments[indexAt(segments, time)] ?? null);
   const selectedItem = $derived(overlays.find((o) => o.id === selectedOverlay) ?? null);
+  /** Paused on a removed part (or outside the trim): left out of the export. */
+  const inCut = $derived(!playing && duration > 0 && !partAt(kept, time));
 
   onMount(() => {
     getConfig().then((c) => {
@@ -352,7 +357,7 @@
     });
     const observer = new ResizeObserver(() => {
       playerSize = { w: player.clientWidth, h: player.clientHeight };
-      viewWidth = scroller?.clientWidth || viewWidth;
+      viewWidth = scroller ? Math.max(1, scroller.clientWidth - 2 * TIMELINE_INSET) : viewWidth;
     });
     observer.observe(player);
     observer.observe(scroller);
@@ -712,6 +717,9 @@
     return g;
   }
 
+  /** The last moment kept in the export (where playback stops). */
+  const lastFrame = () => Math.max(0, (kept.at(-1)?.end ?? trim.end) - 0.001);
+
   function follow() {
     if (!video) return;
     time = video.currentTime;
@@ -722,14 +730,30 @@
     const next = nextKept(kept, time);
     if (next === null) {
       video.pause();
-      video.currentTime = trim.end;
+      video.currentTime = lastFrame();
       return;
     }
-    if (next > time + 0.01) video.currentTime = next;
+    if (next > time + 0.01) {
+      video.currentTime = next;
+    } else {
+      // About to reach a cut: jump a frame early so nothing of the removed
+      // part is seen or heard.
+      const part = partAt(kept, next);
+      if (part && part.end - next < 0.035 * video.playbackRate) {
+        const after = nextKept(kept, part.end);
+        if (after === null) {
+          video.pause();
+          video.currentTime = lastFrame();
+          return;
+        }
+        if (after > part.end + 0.01) video.currentTime = after;
+      }
+    }
     const rate = partAt(kept, next)?.speed ?? 1;
     if (video.playbackRate !== rate) video.playbackRate = rate;
-    // Volume and fades, as in the export (the preview cannot go above 100%).
-    video.muted = !audio;
+    // Volume and fades, as in the export (the preview cannot go above 100%);
+    // silent while jumping over a cut.
+    video.muted = !audio || video.seeking;
     const level = soundLevel(outputTime(next));
     if (Math.abs(video.volume - Math.min(1, level)) > 0.01) video.volume = Math.min(1, level);
     // Clicks passed since the last frame (not across a jump).
@@ -752,7 +776,7 @@
 
   function togglePlay() {
     if (video.paused) {
-      if (nextKept(kept, video.currentTime) === null || video.currentTime >= trim.end - 0.02) {
+      if (nextKept(kept, video.currentTime) === null || video.currentTime >= lastFrame() - 0.02) {
         video.currentTime = kept[0]?.start ?? 0;
       }
       video.play();
@@ -1443,7 +1467,10 @@
   }
 
   async function copyVideo() {
-    if (untouched) {
+    if (exportKind === "gif") {
+      notify("Preparing the GIF… it will be copied when ready");
+      await exportAs("gif", true);
+    } else if (untouched) {
       await editorCopyFile(path);
       savedOnce = true;
       notify("Copied to the clipboard");
@@ -1502,9 +1529,6 @@
     const bits = Math.min(2e8, Math.max(1e6, exportSize.w * exportSize.h * rate * bpp));
     return (bits / 8 + (audio ? 24_000 : 0)) * output;
   });
-  const qualityName = $derived(
-    qualityLevel >= 90 ? "Near lossless" : qualityLevel >= 70 ? "High" : qualityLevel >= 45 ? "Medium" : "Small file",
-  );
 
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   function notify(text: string) {
@@ -1587,10 +1611,10 @@
         seek(time + step);
         break;
       case "home":
-        seek(trim.start);
+        seek(kept[0]?.start ?? trim.start);
         break;
       case "end":
-        seek(trim.end - 0.001);
+        seek(lastFrame());
         break;
       case "s":
         splitHere();
@@ -1687,11 +1711,23 @@
       <span>{format(output)}{outputSize ? ` · ${outputSize}` : ""}</span>
     </div>
     <div class="tb-side right">
-      <button type="button" class="soft-btn" onclick={copyVideo} disabled={!duration} title="Copy to the clipboard (Ctrl+C)"
-        ><Icon name="copy" /> Copy</button
+      <div class="kind-switch" role="radiogroup" aria-label="Format">
+        {#each ["mp4", "gif"] as const as kind (kind)}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={exportKind === kind}
+            class:on={exportKind === kind}
+            title={kind === "mp4" ? "Video with sound" : "Animated picture, no sound"}
+            onclick={() => (exportKind = kind)}>{kind.toUpperCase()}</button
+          >
+        {/each}
+      </div>
+      <button type="button" class="soft-btn" onclick={copyVideo} disabled={!duration} title="Copy the {exportKind.toUpperCase()} to the clipboard (Ctrl+C)"
+        ><Icon name="copy" /> <span class="label">Copy</span></button
       >
       <button type="button" class="soft-btn" onclick={saveAs} disabled={!duration || !config} title="Pick a name and a place"
-        ><Icon name="saveCopy" /> Save as…</button
+        ><Icon name="saveCopy" /> <span class="label">Save as…</span></button
       >
       <button
         type="button"
@@ -1940,10 +1976,10 @@
           <label class="field">Frame rate
             <select bind:value={fps}>{#each fpsOptions as o (o.label)}<option value={o.value}>{o.label}</option>{/each}</select>
           </label>
-          <label class="field">Quality
-            <input type="range" min="0" max="100" step="5" bind:value={qualityLevel} />
-            <span class="value wide">{qualityName}</span>
-          </label>
+          <div class="field stacked">
+            <span>Quality</span>
+            <Notches bind:value={qualityLevel} />
+          </div>
         </div>
       {:else}
         <div class="settings">
@@ -1955,10 +1991,10 @@
           <label class="field">Frame rate
             <select bind:value={gifFps}>{#each GIF_FPS_PRESETS as fv (fv)}<option value={fv}>{fv} fps</option>{/each}</select>
           </label>
-          <label class="field">Colours
-            <input type="range" min="10" max="100" step="5" bind:value={gifQuality} />
-            <span class="value wide">{gifQuality}%</span>
-          </label>
+          <div class="field stacked">
+            <span>Colours</span>
+            <Notches bind:value={gifQuality} label="Colours" />
+          </div>
           <div class="pair checks">
             <label class="check"><input type="checkbox" bind:checked={gifDither} /> Dithering</label>
             <label class="check"><input type="checkbox" bind:checked={gifLoop} /> Loop</label>
@@ -1977,19 +2013,48 @@
     </aside>
 
     <main class="main">
-      <div class="stage-top">
-        <label class="ratio-pick" title="Format">
-          <select
-            value={RATIOS.find((r) => (r.ratio?.join(":") ?? null) === (ratio?.join(":") ?? null))?.label ?? "Original"}
-            onchange={(e) => chooseRatio(RATIOS.find((r) => r.label === e.currentTarget.value)?.ratio ?? null)}
+      <div class="stage-top" role="toolbar" aria-label="Layers">
+        {#each TOOLS as t (t.tool)}
+          <button
+            type="button"
+            class="tool-btn"
+            class:on={tool === t.tool}
+            aria-pressed={tool === t.tool}
+            title="{t.label} ({t.key})"
+            aria-label={shortLabel(t.label)}
+            onclick={() => chooseTool(t.tool)}><Icon name={t.icon} /></button
           >
-            {#each RATIOS as r (r.label)}<option value={r.label}>{r.label}</option>{/each}
-          </select>
-        </label>
+          {#if t.tool === "select"}<span class="vsep"></span>{/if}
+        {/each}
         <span class="vsep"></span>
-        <button type="button" class="flat" class:on={cropping} onclick={() => (cropping ? applyCrop() : startCrop())}
-          ><Icon name="crop" /> {ratio && !framed ? "Reframe" : "Crop video"}{#if crop}<span class="blue-dot"></span>{/if}</button
-        >
+        <div class="anchor">
+          <button
+            type="button"
+            class="tool-btn style-btn opens-menu"
+            aria-expanded={menu === "style"}
+            title="Colour and thickness"
+            aria-label="Colour and thickness"
+            onclick={() => (menu = menu === "style" ? null : "style")}
+            ><span class="color-dot" style="--c:{selectedItem?.shape.color ?? color}"></span><Icon name="chevron" /></button
+          >
+          {#if menu === "style"}
+            <div class="popover style align-right" role="dialog" aria-label="Colour and thickness">
+              <div class="layer-row">
+                {#each COLORS as c (c)}
+                  <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
+                {/each}
+                <label class="custom" title="Any colour"><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label>
+              </div>
+              <div class="layer-row">
+                {#each LEVELS as l (l.level)}
+                  <button type="button" class="thick" class:active={level === l.level} title={l.label} onclick={() => setLevel(l.level)}
+                    ><span class="dot" style="--d:{3 + l.level * 2}px"></span> {l.label}</button
+                  >
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
       </div>
 
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2043,6 +2108,11 @@
           <button type="button" class="pill" onclick={applyCrop}><Icon name="check" /> Done <Kbd keys="Enter" /></button>
         </div>
       {/if}
+      {#if inCut && !cropping}
+        <div class="cut-veil" style="left:{stageBox.left}px;top:{stageBox.top}px;width:{stageBox.width}px;height:{stageBox.height}px">
+          <span><Icon name="scissors" /> Cut: not in the video</span>
+        </div>
+      {/if}
       {#if error}<p class="error">{error}</p>{/if}
       {#if toast}<div class="toast" role="status">{toast}</div>{/if}
       {#if hint}<div class="hint">{hint}</div>{/if}
@@ -2089,57 +2159,6 @@
       <footer class="dock">
         <div class="controls">
           <div class="side left">
-            <div class="anchor">
-              <button
-                type="button"
-                class="pill-btn opens-menu"
-                class:on={tool !== "select"}
-                aria-expanded={menu === "layer"}
-                title="Add a text, an arrow, a shape…"
-                onclick={() => (menu = menu === "layer" ? null : "layer")}
-                ><Icon name={tool === "select" ? "plus" : (TOOLS.find((t) => t.tool === tool)?.icon ?? "plus")} />
-                {tool === "select" ? "Add layer" : shortLabel(TOOLS.find((t) => t.tool === tool)?.label ?? "")}
-                <Icon name="chevron" /></button
-              >
-              {#if menu === "layer"}
-                <div class="popover layers" role="menu">
-                  <div class="layer-grid">
-                    {#each TOOLS.filter((t) => t.tool !== "select") as t (t.tool)}
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="layer"
-                        class:active={tool === t.tool}
-                        title={t.label}
-                        onclick={() => {
-                          chooseTool(t.tool);
-                          menu = null;
-                        }}><Icon name={t.icon} /><span>{shortLabel(t.label)}</span><kbd>{t.key}</kbd></button
-                      >
-                    {/each}
-                  </div>
-                  <div class="layer-row">
-                    {#each COLORS as c (c)}
-                      <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
-                    {/each}
-                    <label class="custom" title="Any colour"><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label>
-                  </div>
-                  <div class="layer-row">
-                    {#each LEVELS as l (l.level)}
-                      <button type="button" class="thick" class:active={level === l.level} title={l.label} onclick={() => setLevel(l.level)}
-                        ><span class="dot" style="--d:{3 + l.level * 2}px"></span> {l.label}</button
-                      >
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            </div>
-            {#if tool !== "select"}
-              <button type="button" class="icon-btn" title="Back to selecting (V)" aria-label="Back to selecting" onclick={() => chooseTool("select")}
-                ><Icon name="select" /></button
-              >
-            {/if}
-            <span class="vsep"></span>
             <button type="button" class="icon-btn" onclick={splitHere} disabled={!duration} title="Split at the playhead (S)" aria-label="Split"
               ><Icon name="scissors" /></button
             >
@@ -2180,14 +2199,14 @@
           </div>
 
           <div class="center">
-            <span class="time">{format(time)}</span>
-            <button type="button" class="round skip" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(trim.start)}
+            <span class="time" title="Position in the edited video">{format(outputTime(time))}</span>
+            <button type="button" class="round skip" title="Go to the start (Home)" aria-label="Go to the start" onclick={() => seek(kept[0]?.start ?? trim.start)}
               ><Icon name="start" /></button
             >
             <button type="button" class="round play" aria-label={playing ? "Pause" : "Play"} title="Play / pause (Space)" onclick={togglePlay}>
               <Icon name={playing ? "pause" : "play"} />
             </button>
-            <button type="button" class="round skip" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(trim.end - 0.001)}
+            <button type="button" class="round skip" title="Go to the end (End)" aria-label="Go to the end" onclick={() => seek(lastFrame())}
               ><Icon name="end" /></button
             >
             <span class="time muted">{format(output)}</span>
@@ -2256,7 +2275,7 @@
         </div>
 
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="scroller" bind:this={scroller} onwheel={wheel}>
+      <div class="scroller" class:fit={zoom <= 1.001} style="--inset:{TIMELINE_INSET}px" bind:this={scroller} onwheel={wheel}>
         <div
           class="content"
           bind:this={content}
@@ -2430,6 +2449,26 @@
     justify-content: flex-end;
     gap: 8px;
   }
+  /* Narrow windows: the title gives way, then the button labels. */
+  @media (max-width: 1100px) {
+    .topbar {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+    .tb-title span {
+      display: none;
+    }
+  }
+  @media (max-width: 960px) {
+    .soft-btn .label {
+      display: none;
+    }
+    .soft-btn {
+      padding: 0 11px;
+    }
+    .export {
+      padding: 0 16px;
+    }
+  }
   .tb-title {
     display: flex;
     align-items: baseline;
@@ -2450,7 +2489,28 @@
     font-size: 13px;
     font-variant-numeric: tabular-nums;
   }
+  .kind-switch {
+    display: inline-flex;
+    padding: 3px;
+    border-radius: 11px;
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .kind-switch button {
+    height: 32px;
+    padding: 0 11px;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 650;
+  }
+  .kind-switch button.on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
   .soft-btn {
+    flex: none;
+    white-space: nowrap;
     height: 38px;
     padding: 0 14px;
     border-radius: 10px;
@@ -2458,6 +2518,8 @@
     box-shadow: inset 0 0 0 1px var(--border-strong);
   }
   .export {
+    flex: none;
+    white-space: nowrap;
     height: 42px;
     padding: 0 22px;
     border-radius: 12px;
@@ -2479,7 +2541,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 72px clamp(280px, 26vw, 340px) minmax(0, 1fr);
+    grid-template-columns: 72px clamp(248px, 24vw, 340px) minmax(0, 1fr);
   }
   .rail {
     display: flex;
@@ -2679,40 +2741,57 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    height: 56px;
+    gap: 2px;
+    min-height: 56px;
+    padding: 0 18px;
+    flex-wrap: wrap;
   }
-  .ratio-pick select {
-    height: 36px;
-    padding: 0 30px 0 12px;
-    border: none;
-    border-radius: 10px;
+  .tool-btn {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 11px;
     background: transparent;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
+    color: var(--text-muted);
   }
-  .ratio-pick select:hover {
-    background: var(--hover);
+  .tool-btn :global(svg) {
+    width: 20px;
+    height: 20px;
   }
-  .flat {
-    position: relative;
-    height: 36px;
-    padding: 0 12px;
-    border-radius: 10px;
-    background: transparent;
-    font-size: 15px;
-    font-weight: 600;
+  @media (max-width: 900px) {
+    .stage-top {
+      padding: 0 8px;
+    }
+    .tool-btn {
+      width: 32px;
+      height: 34px;
+    }
+    .stage-top .vsep {
+      margin: 0 2px;
+    }
   }
-  .flat.on {
+  .tool-btn.on {
     background: var(--accent-soft);
     color: var(--accent-text);
   }
-  .blue-dot {
-    width: 7px;
-    height: 7px;
+  .style-btn {
+    display: inline-flex;
+    gap: 2px;
+    width: auto;
+    padding: 0 6px 0 9px;
+  }
+  .style-btn :global(svg) {
+    width: 14px;
+    height: 14px;
+  }
+  .color-dot {
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--c);
+    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
   }
 
   /* Close confirmation */
@@ -2835,6 +2914,24 @@
     top: auto;
     bottom: 16px;
   }
+  .cut-veil {
+    position: absolute;
+    display: grid;
+    place-items: center;
+    background: repeating-linear-gradient(-45deg, rgb(8 8 10 / 0.72) 0 14px, rgb(8 8 10 / 0.6) 14px 28px);
+    pointer-events: none;
+  }
+  .cut-veil span {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.55);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+  }
   .hint {
     color: var(--text-muted);
     font-size: 12px;
@@ -2936,7 +3033,7 @@
   }
   .controls {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr);
     align-items: center;
     gap: 12px;
     margin-bottom: 10px;
@@ -3008,6 +3105,26 @@
       display: none;
     }
   }
+  /* Narrow: shorter labels, then the controls on two rows. */
+  @container (max-width: 760px) {
+    .time.muted,
+    .round.skip {
+      display: none;
+    }
+    .pill-btn {
+      padding: 0 10px;
+    }
+  }
+  @container (max-width: 560px) {
+    .controls {
+      grid-template-columns: 1fr 1fr;
+    }
+    .center {
+      grid-column: 1 / -1;
+      grid-row: 1;
+      justify-content: center;
+    }
+  }
   .anchor {
     position: relative;
   }
@@ -3025,32 +3142,17 @@
     left: auto;
     right: 0;
   }
-  .layers {
+  .popover.style {
+    top: calc(100% + 8px);
+    bottom: auto;
     display: grid;
-    gap: 12px;
-    width: 340px;
+    gap: 10px;
+    width: 300px;
     padding: 14px;
   }
-  .layer-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 4px;
-  }
-  .layer {
-    justify-content: flex-start;
-    height: 38px;
-    padding: 0 10px;
-    border-radius: 10px;
-    background: transparent;
-    font-weight: 550;
-  }
-  .layer span {
-    flex: 1;
-    text-align: left;
-  }
-  .layer kbd {
-    font: 600 10px var(--font-mono);
-    opacity: 0.5;
+  .popover.style .layer-row:first-child {
+    padding-top: 0;
+    border-top: none;
   }
   .layer-row {
     display: flex;
@@ -3145,8 +3247,13 @@
   .scroller {
     overflow-x: auto;
     overflow-y: hidden;
+    padding: 0 var(--inset);
     scrollbar-width: thin;
     scrollbar-color: var(--border-strong) transparent;
+  }
+  /* Zoomed out: the whole video fits, both ends in view, no scroll bar. */
+  .scroller.fit {
+    overflow-x: hidden;
   }
   .content {
     position: relative;
