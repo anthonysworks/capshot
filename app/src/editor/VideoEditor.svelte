@@ -2391,7 +2391,7 @@
   /* Top bar, icon rail, floating panel, stage and timeline (docs/UI_DESIGN.md). */
   .editor {
     --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-    --trim: #f5c542;
+    --trim: #3d7dff;
     display: flex;
     flex-direction: column;
     height: 100vh;
@@ -3338,7 +3338,7 @@
     padding: 0 7px;
     border-radius: 999px;
     background: var(--trim);
-    color: #1a1400;
+    color: #fff;
     font: 700 11px/18px var(--font-mono);
     pointer-events: none;
   }
@@ -3473,8 +3473,8 @@
     width: 4px;
     height: 18px;
     margin-top: -9px;
-    border-left: 1.5px solid #5c4300;
-    border-right: 1.5px solid #5c4300;
+    border-left: 1.5px solid rgb(255 255 255 / 0.85);
+    border-right: 1.5px solid rgb(255 255 255 / 0.85);
   }
   .handle:hover {
     filter: brightness(1.08);
