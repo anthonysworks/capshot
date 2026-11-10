@@ -10,6 +10,7 @@ use capshot_core::{BgraImage, Point, Rect};
 use serde::{Deserialize, Serialize};
 
 use crate::cursor::CursorTrack;
+use crate::zoom::{Zoom, ZoomRegion};
 
 /// An image drawn over the video between two times (seconds of the
 /// source), at a position in pixels of the source.
@@ -41,6 +42,10 @@ pub struct CursorStyle {
     /// Translucent disc under the cursor, RGBA.
     #[serde(default)]
     pub halo: Option<[u8; 4]>,
+    /// Glide instead of following every jolt: stiffness of the spring the
+    /// cursor follows (see [`CursorTrack::smoothed`]); 0 keeps the path.
+    #[serde(default)]
+    pub smooth: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +88,26 @@ pub struct CanvasStyle {
     /// Strength of the shadow under the video (0–1).
     #[serde(default)]
     pub shadow: f32,
+    /// A background drawn by the editor (device frames): it replaces the
+    /// colours, ratio, padding, corners and shadow above.
+    #[serde(default)]
+    pub backdrop: Option<Backdrop>,
+}
+
+/// A ready-made canvas: the picture under the video, where the video goes
+/// and, optionally, a picture over it (the same size, mostly transparent).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Backdrop {
+    /// PNG, base64; its size is the size of the frames produced.
+    pub png: String,
+    /// `[x, y, w, h]` of the video, in pixels of the picture.
+    pub area: [i32; 4],
+    /// Rounded corners of the video, in pixels.
+    #[serde(default)]
+    pub radius: f32,
+    /// PNG, base64, drawn over the video (a camera notch, say).
+    #[serde(default)]
+    pub front: Option<String>,
 }
 
 /// An area of the video (pixels of the source) shown as blocks of
@@ -123,6 +148,9 @@ pub struct Composition {
     /// Areas shown as big blocks (to hide what is there).
     #[serde(default)]
     pub pixelate: Vec<PixelArea>,
+    /// Camera zooms.
+    #[serde(default)]
+    pub zoom: Vec<ZoomRegion>,
 }
 
 impl Composition {
@@ -133,11 +161,29 @@ impl Composition {
             && self.clicks.as_ref().is_none_or(|c| !c.ring)
             && self.canvas.is_none()
             && self.pixelate.is_empty()
+            && self.zoom.is_empty()
     }
 
     /// Whether the cursor track (and the video without cursor) is needed.
     pub fn uses_track(&self) -> bool {
-        self.cursor.is_some() || self.clicks.is_some()
+        self.cursor.is_some()
+            || self.clicks.is_some()
+            || self.zoom.iter().any(|z| z.focus.is_none())
+    }
+
+    /// The track as the cursor is drawn: smoothed if asked.
+    pub fn drawn_track(&self, track: Option<CursorTrack>) -> Option<CursorTrack> {
+        match (&self.cursor, track) {
+            (Some(style), Some(track)) if style.smooth > 0.0 => {
+                Some(track.smoothed(f64::from(style.smooth)))
+            }
+            (_, track) => track,
+        }
+    }
+
+    /// The zooms, following `track` (the recorded cursor) where asked.
+    pub fn zooms(&self, track: Option<&CursorTrack>) -> Zoom {
+        Zoom::new(&self.zoom, track)
     }
 
     pub fn wants_click_sound(&self) -> bool {
@@ -338,6 +384,7 @@ pub struct Composer {
     /// round them.
     corners: Vec<(BgraImage, Point)>,
     pixelate: Vec<PixelArea>,
+    zoom: Zoom,
 }
 
 #[allow(
@@ -354,6 +401,8 @@ impl Composer {
         frame: (u32, u32),
         crop: Option<Rect>,
     ) -> Self {
+        let zoom = composition.zooms(track.as_ref());
+        let track = composition.drawn_track(track);
         let crop = crop.unwrap_or(Rect::new(0, 0, frame.0 as i32, frame.1 as i32));
         let scale = composition
             .cursor
@@ -416,11 +465,16 @@ impl Composer {
             canvas,
             corners,
             pixelate: composition.pixelate.clone(),
+            zoom,
         }
     }
 
     fn corner_radius(style: &CanvasStyle, area: Rect) -> f32 {
-        style.radius.clamp(0.0, 0.25) * area.width().min(area.height()) as f32
+        let short = area.width().min(area.height()) as f32;
+        match &style.backdrop {
+            Some(b) => b.radius.clamp(0.0, short / 2.0),
+            None => style.radius.clamp(0.0, 0.25) * short,
+        }
     }
 
     /// Darkens the background under the video: a soft shadow, slightly
@@ -455,10 +509,28 @@ impl Composer {
         }
     }
 
-    /// The background around each corner of `area`, opaque beyond the
-    /// rounded corner and transparent inside it: drawn over the video, these
-    /// round its corners.
+    /// What is drawn over the video, in output pixels: the background around
+    /// each corner of `area` (opaque beyond the rounded corner, transparent
+    /// inside it, so the corners look round), then the backdrop's front
+    /// picture, if any.
     pub(crate) fn corners(
+        style: &CanvasStyle,
+        background: &BgraImage,
+        area: Rect,
+    ) -> Vec<(BgraImage, Point)> {
+        let mut out = Self::round_corners(style, background, area);
+        if let Some(front) = style
+            .backdrop
+            .as_ref()
+            .and_then(|b| b.front.as_deref())
+            .and_then(decode_png)
+        {
+            out.push((front, Point::new(0, 0)));
+        }
+        out
+    }
+
+    fn round_corners(
         style: &CanvasStyle,
         background: &BgraImage,
         area: Rect,
@@ -498,6 +570,19 @@ impl Composer {
     /// Canvas of the requested aspect ratio around a `w` × `h` video, and
     /// the area the video occupies (scaled to fit inside the margin).
     pub(crate) fn canvas(style: &CanvasStyle, w: u32, h: u32) -> (BgraImage, Rect) {
+        if let Some(backdrop) = &style.backdrop
+            && let Some(image) = decode_png(&backdrop.png)
+        {
+            // Even sizes, for the encoder; the video stays inside.
+            let (bw, bh) = (image.width() & !1, image.height() & !1);
+            let image = image.crop(Rect::new(0, 0, bw as i32, bh as i32));
+            let [x, y, aw, ah] = backdrop.area;
+            let area = Rect::from_size(x, y, aw.max(2), ah.max(2))
+                .intersect(Rect::new(0, 0, bw as i32, bh as i32));
+            if area.width() >= 2 && area.height() >= 2 {
+                return (image, area);
+            }
+        }
         let [rw, rh] = [style.ratio[0].max(1), style.ratio[1].max(1)];
         let ratio = rw as f32 / rh as f32;
         let pad = style.padding.clamp(0.0, 0.3);
@@ -633,6 +718,22 @@ impl Composer {
         } else {
             frame.crop(self.crop)
         };
+        // Zoomed in: the part in view, enlarged back to the crop's size.
+        let (cw, ch) = (frame.width(), frame.height());
+        let (ox, oy) = (self.crop.left as f32, self.crop.top as f32);
+        let [vx, vy, vw, vh] = self.zoom.view([ox, oy, cw as f32, ch as f32], t);
+        let (vx, vy) = (vx - ox, vy - oy);
+        let frame = if vw < cw as f32 - 0.5 {
+            let view = Rect::new(
+                vx.floor() as i32,
+                vy.floor() as i32,
+                (vx + vw).ceil() as i32,
+                (vy + vh).ceil() as i32,
+            );
+            resize(&frame.crop(view), cw, ch)
+        } else {
+            frame
+        };
         match &self.canvas {
             None => frame,
             Some((background, area)) => {
@@ -729,6 +830,7 @@ mod tests {
                 scale: 2.0,
                 image: None,
                 halo: None,
+                smooth: 0.0,
             }),
             ..Composition::default()
         };
@@ -744,6 +846,7 @@ mod tests {
                 scale: 1.0,
                 image: None,
                 halo: None,
+                smooth: 0.0,
             }),
             ..Composition::default()
         };
@@ -761,6 +864,7 @@ mod tests {
                 padding: 0.1,
                 radius: 0.25,
                 shadow: 0.0,
+                backdrop: None,
             }),
             ..Composition::default()
         };
@@ -787,6 +891,7 @@ mod tests {
                 padding: 0.0,
                 radius: 0.1,
                 shadow: 0.5,
+                backdrop: None,
             }),
             ..Composition::default()
         };

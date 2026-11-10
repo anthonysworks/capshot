@@ -45,11 +45,12 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::core::{GUID, HSTRING, Interface};
 
 use crate::compose::{Composer, Composition};
-use crate::convert::{Blitter, Space, render_texture};
+use crate::convert::{Blitter, Space, drawable_texture, render_texture};
 use crate::cursor::CursorTrack;
 use crate::encoder::{VideoSettings, set_input, video_type};
-use crate::paint::Painter;
+use crate::paint::{Painter, Zoomer};
 use crate::stretch::{apply_gain, click_sound, click_volume, mix_at, stretch};
+use crate::zoom::Zoom;
 use crate::{Part, RecordError, Result};
 
 #[allow(clippy::cast_sign_loss)]
@@ -240,19 +241,30 @@ fn audio_type(subtype: &GUID, rate: u32, channels: u32) -> windows::core::Result
 /// Composited frames: the decoded video is drawn into a BGRA frame (over
 /// the canvas background), painted over, then converted for the encoder.
 struct Composed {
-    /// Decoded NV12 → BGRA frame.
+    /// Decoded NV12 → BGRA frame (or, zoomed, → the zoom's source).
     decode: Blitter,
+    decode_view: ID3D11VideoProcessorOutputView,
+    /// Where the decoded video goes in `decode_view`.
+    decode_to: Rect,
     frame: ID3D11Texture2D,
-    frame_view: ID3D11VideoProcessorOutputView,
     background: Option<ID3D11Texture2D>,
     painter: Painter,
+    zoom: Option<ZoomStage>,
     /// BGRA frame → NV12 for the encoder.
     encode: Blitter,
     frame_input: ID3D11VideoProcessorInputView,
-    /// Where the video goes in the frame.
-    area: Rect,
     /// The whole frame.
     full: Rect,
+}
+
+/// Camera zoom: the video is composited at the crop's size first, then
+/// the part in view is drawn into the frame.
+struct ZoomStage {
+    zoom: Zoom,
+    zoomer: Zoomer,
+    /// The crop in source pixels, `[x, y, w, h]`.
+    crop: [f32; 4],
+    _source: ID3D11Texture2D,
 }
 
 /// Turns decoded frames into encoder input, on the GPU.
@@ -299,9 +311,7 @@ impl Frames {
             (Some(blit), None)
         } else {
             let area = canvas.as_ref().map_or(full, |(_, area)| *area);
-            let frame = render_texture(gpu, natural, DXGI_FORMAT_B8G8R8A8_UNORM)?;
-            let decode = Blitter::new(gpu, layout.coded, natural, fps, (space, Space::Rgb))?;
-            let frame_view = decode.output(&frame)?;
+            let frame = drawable_texture(gpu, natural)?;
             let corners = options
                 .composition
                 .canvas
@@ -313,28 +323,62 @@ impl Frames {
             let background = canvas
                 .map(|(image, _)| upload_bgra(gpu, &image))
                 .transpose()?;
-            let painter = Painter::new(
-                gpu,
-                &frame,
-                &options.composition,
-                options.track.clone(),
-                // Cursor and overlays are placed relative to the visible
-                // frame.
-                crop.offset(-visible.left, -visible.top),
-                area,
-                &corners,
-            )?;
+            // Cursor and overlays are placed relative to the visible frame.
+            let source_crop = crop.offset(-visible.left, -visible.top);
+            let zooms = options.composition.zooms(options.track.as_ref());
+            let (decode, decode_view, decode_to, painter, zoom) = if zooms.is_empty() {
+                let decode = Blitter::new(gpu, layout.coded, natural, fps, (space, Space::Rgb))?;
+                let view = decode.output(&frame)?;
+                let painter = Painter::new(
+                    gpu,
+                    &frame,
+                    &options.composition,
+                    options.track.clone(),
+                    source_crop,
+                    area,
+                    &corners,
+                )?;
+                (decode, view, area, painter, None)
+            } else {
+                let source = drawable_texture(gpu, crop_size)?;
+                let whole = Rect::new(0, 0, crop_size.0 as i32, crop_size.1 as i32);
+                let decode = Blitter::new(gpu, layout.coded, crop_size, fps, (space, Space::Rgb))?;
+                let view = decode.output(&source)?;
+                let painter = Painter::new(
+                    gpu,
+                    &source,
+                    &options.composition,
+                    options.track.clone(),
+                    source_crop,
+                    whole,
+                    &[],
+                )?;
+                #[allow(clippy::cast_precision_loss)]
+                let stage = ZoomStage {
+                    zoom: zooms,
+                    zoomer: Zoomer::new(gpu, &source, &frame, area, &corners)?,
+                    crop: [
+                        source_crop.left as f32,
+                        source_crop.top as f32,
+                        source_crop.width() as f32,
+                        source_crop.height() as f32,
+                    ],
+                    _source: source,
+                };
+                (decode, view, whole, painter, Some(stage))
+            };
             let encode = Blitter::new(gpu, natural, size, fps, (Space::Rgb, Space::Bt709))?;
             let frame_input = encode.input(&frame, 0)?;
             let composed = Composed {
                 decode,
+                decode_view,
+                decode_to,
                 frame,
-                frame_view,
                 background,
                 painter,
+                zoom,
                 encode,
                 frame_input,
-                area,
                 full,
             };
             (None, Some(composed))
@@ -401,8 +445,13 @@ impl Frames {
                 unsafe { self.gpu.context().CopyResource(&c.frame, background) };
             }
             let input = c.decode.input(&texture, slice)?;
-            c.decode.blit(&input, self.crop, &c.frame_view, c.area)?;
+            c.decode
+                .blit(&input, self.crop, &c.decode_view, c.decode_to)?;
             c.painter.paint(t)?;
+            if let Some(z) = &c.zoom {
+                let [vx, vy, vw, vh] = z.zoom.view(z.crop, t);
+                z.zoomer.draw([vx - z.crop[0], vy - z.crop[1], vw, vh])?;
+            }
             c.encode
                 .blit(&c.frame_input, c.full, &c.encode.output(&output)?, full)?;
         }

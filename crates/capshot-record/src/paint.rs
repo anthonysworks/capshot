@@ -137,6 +137,7 @@ impl Painter {
         area: Rect,
         corners: &[(BgraImage, Point)],
     ) -> Result<Self> {
+        let track = composition.drawn_track(track);
         // SAFETY: COM calls on live interfaces with valid descriptions.
         unsafe {
             let factory: ID2D1Factory1 = D2D1CreateFactory(
@@ -413,6 +414,120 @@ impl Painter {
         }
         // SAFETY: closes the drawing opened above.
         unsafe { self.dc.EndDraw(None, None) }
+    }
+}
+
+/// Camera zoom on the GPU: the composited video (a texture of the crop's
+/// size) is drawn into the output frame, from the part in view, at
+/// sub-pixel precision so slow zooms do not step; then the pieces of the
+/// canvas that go over the video (rounded corners, a device's front).
+pub struct Zoomer {
+    dc: ID2D1DeviceContext,
+    source: ID2D1Bitmap1,
+    /// Where the video goes in the frame.
+    area: D2D_RECT_F,
+    covers: Vec<(Sprite, f32, f32)>,
+}
+
+impl Zoomer {
+    /// Draws from `source` (a drawable BGRA texture) into `target`.
+    pub fn new(
+        gpu: &Gpu,
+        source: &ID3D11Texture2D,
+        target: &ID3D11Texture2D,
+        area: Rect,
+        covers: &[(BgraImage, Point)],
+    ) -> Result<Self> {
+        // SAFETY: COM calls on live interfaces with valid descriptions.
+        unsafe {
+            let factory: ID2D1Factory1 = D2D1CreateFactory(
+                D2D1_FACTORY_TYPE_MULTI_THREADED,
+                Some(&D2D1_FACTORY_OPTIONS::default()),
+            )?;
+            let device = factory.CreateDevice(&gpu.device().cast::<IDXGIDevice>()?)?;
+            let dc = device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            let output = dc.CreateBitmapFromDxgiSurface(
+                &target.cast::<IDXGISurface>()?,
+                Some(&props(
+                    D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                    true,
+                )),
+            )?;
+            dc.SetTarget(&output);
+            let source = dc.CreateBitmapFromDxgiSurface(
+                &source.cast::<IDXGISurface>()?,
+                Some(&props(D2D1_BITMAP_OPTIONS_NONE, true)),
+            )?;
+            let mut sprites = Vec::new();
+            for (image, at) in covers {
+                let premultiplied = premultiply(image);
+                let bitmap = dc.CreateBitmap(
+                    D2D_SIZE_U {
+                        width: image.width(),
+                        height: image.height(),
+                    },
+                    Some(premultiplied.as_ptr().cast()),
+                    image.width() * 4,
+                    &props(D2D1_BITMAP_OPTIONS_NONE, false),
+                )?;
+                #[allow(clippy::cast_precision_loss)]
+                sprites.push((
+                    Sprite {
+                        bitmap,
+                        width: image.width() as f32,
+                        height: image.height() as f32,
+                    },
+                    at.x as f32,
+                    at.y as f32,
+                ));
+            }
+            Ok(Self {
+                dc,
+                source,
+                area: rect_f(area),
+                covers: sprites,
+            })
+        }
+    }
+
+    /// Draws `[x, y, w, h]` of the source texture over the video area.
+    pub fn draw(&self, view: [f32; 4]) -> Result<()> {
+        let [x, y, w, h] = view;
+        let from = D2D_RECT_F {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        };
+        // SAFETY: Direct2D drawing on the target set in `new`.
+        unsafe {
+            self.dc.BeginDraw();
+            self.dc.SetTransform(&Matrix3x2::identity());
+            self.dc.DrawBitmap(
+                &self.source,
+                Some(&self.area),
+                1.0,
+                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                Some(&from),
+                None,
+            );
+            for (sprite, sx, sy) in &self.covers {
+                self.dc.DrawBitmap(
+                    &sprite.bitmap,
+                    Some(&D2D_RECT_F {
+                        left: *sx,
+                        top: *sy,
+                        right: sx + sprite.width,
+                        bottom: sy + sprite.height,
+                    }),
+                    1.0,
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                    None,
+                    None,
+                );
+            }
+            self.dc.EndDraw(None, None)
+        }
     }
 }
 

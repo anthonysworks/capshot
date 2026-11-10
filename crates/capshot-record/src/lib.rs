@@ -24,6 +24,7 @@ mod paint;
 mod source;
 pub mod stretch;
 mod trim;
+pub mod zoom;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,9 +40,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 
+pub use capshot_gif::{GifOptions, GifSummary};
 pub use decode::{Conversion, VideoDecoder, VideoEdit, video_to_gif};
 pub use encoder::VideoSettings;
-pub use capshot_gif::{GifOptions, GifSummary};
 pub use trim::{SoundEdit, TrimOptions, TrimStats, trim_video};
 
 /// A part of a video kept by an edit, played at its own speed.

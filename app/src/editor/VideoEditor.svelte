@@ -8,6 +8,7 @@
     type CursorTrack,
     type JobProgress,
     type VideoEdit,
+    type ZoomRegion,
     GIF_FPS_PRESETS,
     GIF_WIDTHS,
     editorChooseFolder,
@@ -24,7 +25,8 @@
   import type { IconName } from "./icons";
   import Kbd from "./Kbd.svelte";
   import Notches from "../lib/Notches.svelte";
-  import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, cursorAt, drawCursor, loadShapes } from "./cursors";
+  import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, SMOOTHING, cursorAt, drawCursor, loadShapes, smoothTrack } from "./cursors";
+  import { CAMERA_STIFFNESS, ZOOM_LENGTH, ZOOM_SCALES, autoZooms, zoomView } from "./zoom";
   import { VIVID } from "./colors";
   import {
     BACKGROUNDS,
@@ -113,9 +115,10 @@
     { value: "solid", label: "On a solid box" },
   ];
   /** Sections of the side panel, from the rail on the left. */
-  const PANELS: { id: "background" | "cursor" | "format" | "export"; icon: IconName; label: string }[] = [
+  const PANELS: { id: "background" | "cursor" | "zoom" | "format" | "export"; icon: IconName; label: string }[] = [
     { id: "background", icon: "frame", label: "Background and frame" },
     { id: "cursor", icon: "cursor", label: "Cursor and clicks" },
+    { id: "zoom", icon: "zoom", label: "Camera zoom" },
     { id: "format", icon: "crop", label: "Format and crop" },
     { id: "export", icon: "export", label: "Export settings" },
   ];
@@ -145,6 +148,10 @@
   const STAGE_MARGIN = 28;
   /** Room left and right of the timeline for the trim handles, in pixels. */
   const TIMELINE_INSET = 16;
+
+  interface Zoom extends ZoomRegion {
+    id: number;
+  }
 
   interface Overlay {
     id: number;
@@ -212,6 +219,14 @@
   let clickColor = $state("#ffd60a");
   let clickSound = $state(false);
   let clickVoice = $state<ClickSound>("soft");
+  /** Cursor smoothing: spring stiffness, 0 = as recorded. */
+  let smoothing = $state(0);
+  let zooms = $state<Zoom[]>([]);
+  let selectedZoom = $state<number | null>(null);
+  /** The next click on the video sets the selected zoom's point. */
+  let pickingFocus = $state(false);
+  /** Part of the video in view in the last frame painted (zoom), in video pixels. */
+  let view: Rect | null = null;
   let overlays = $state<Overlay[]>([]);
   let selectedOverlay = $state<number | null>(null);
   let tool = $state<Tool>("select");
@@ -237,7 +252,7 @@
   let viewWidth = $state(800);
   let menu = $state<"speed" | "sound" | "style" | null>(null);
   /** Section shown in the side panel. */
-  let panel = $state<"background" | "cursor" | "format" | "export">("background");
+  let panel = $state<"background" | "cursor" | "zoom" | "format" | "export">("background");
   /** A new format is being framed: Cancel goes back to the one before. */
   let formatPending = false;
   /** Playback errors in a row (the player reloads on the first ones). */
@@ -258,6 +273,7 @@
     | { kind: "move"; last: Point; moved: boolean }
     | { kind: "resize"; handle: number; original: Shape; moved: boolean }
     | { kind: "bar"; id: number; edge: "start" | "end" | "both"; from: number; start: number; end: number }
+    | { kind: "zoom"; id: number; edge: "start" | "end" | "both"; from: number; start: number; end: number }
     | null = null;
 
   const source = $derived(convertFileSrc(cleanSource ?? path));
@@ -324,6 +340,12 @@
   const selected = $derived(selectedSegment === null ? null : (segments[selectedSegment] ?? null));
   const current = $derived(selected ?? segments[indexAt(segments, time)] ?? null);
   const selectedItem = $derived(overlays.find((o) => o.id === selectedOverlay) ?? null);
+  /** The cursor as drawn: smoothed if asked (only with the copy without cursor). */
+  const drawnTrack = $derived(cursorTrack && smoothing > 0 && cursorEditable ? smoothTrack(cursorTrack, smoothing) : cursorTrack);
+  /** The cursor slowed down, for zooms that follow it. */
+  const follows = $derived(zooms.some((z) => z.focus === null));
+  const camera = $derived(follows && cursorTrack ? smoothTrack(cursorTrack, CAMERA_STIFFNESS) : null);
+  const selectedZoomItem = $derived(zooms.find((z) => z.id === selectedZoom) ?? null);
   /** Paused on a removed part (or outside the trim): left out of the export. */
   const inCut = $derived(!playing && duration > 0 && !partAt(kept, time));
 
@@ -492,21 +514,26 @@
     const r = stage.getBoundingClientRect();
     const ox = (e.clientX - r.left) / k;
     const oy = (e.clientY - r.top) / k;
-    const s = layout.area.w / layout.crop.w;
+    const v = shownView();
+    const s = layout.area.w / v.w;
     return {
-      x: Math.max(0, Math.min(vw, (ox - layout.area.x) / s + layout.crop.x)),
-      y: Math.max(0, Math.min(vh, (oy - layout.area.y) / s + layout.crop.y)),
+      x: Math.max(0, Math.min(vw, (ox - layout.area.x) / s + v.x)),
+      y: Math.max(0, Math.min(vh, (oy - layout.area.y) / s + v.y)),
     };
   }
 
   /** Source pixels → CSS pixels in the player. */
   function toPlayer(p: Point) {
-    const s = layout.area.w / layout.crop.w;
+    const v = shownView();
+    const s = layout.area.w / v.w;
     return {
-      x: stageBox.left + (layout.area.x + (p.x - layout.crop.x) * s) * k,
-      y: stageBox.top + (layout.area.y + (p.y - layout.crop.y) * s) * k,
+      x: stageBox.left + (layout.area.x + (p.x - v.x) * s) * k,
+      y: stageBox.top + (layout.area.y + (p.y - v.y) * s) * k,
     };
   }
+
+  /** The part of the video on screen: the crop, or less when zoomed in. */
+  const shownView = (): Rect => (cropping || !view ? layout.crop : view);
 
   /** The picture as it will be exported: crop, ratio, background, then
    * overlays, cursor and click marks drawn in source pixels. */
@@ -552,13 +579,16 @@
     else ctx.rect(area.x, area.y, area.w, area.h);
     ctx.clip();
     ctx.imageSmoothingQuality = "high";
-    if (video.readyState >= 2) ctx.drawImage(video, c.x, c.y, c.w, c.h, area.x, area.y, area.w, area.h);
-    const s = area.w / c.w;
-    ctx.translate(area.x - c.x * s, area.y - c.y * s);
+    const t = video.currentTime;
+    // Zoomed in: only part of the crop, enlarged.
+    const v = cropping ? c : zoomView(zooms, camera, c, t);
+    view = v;
+    if (video.readyState >= 2) ctx.drawImage(video, v.x, v.y, v.w, v.h, area.x, area.y, area.w, area.h);
+    const s = area.w / v.w;
+    ctx.translate(area.x - v.x * s, area.y - v.y * s);
     ctx.scale(s, s);
     /** One CSS pixel, in source pixels. */
     const px = 1 / (k * s);
-    const t = video.currentTime;
 
     const shown = overlays.filter((o) => t >= o.start && t < o.end && o.id !== editing?.id).map((o) => o.shape);
     const all = draft ? [...shown, draft] : shown;
@@ -586,7 +616,7 @@
         }
       }
       // With the copy without cursor playing, the cursor is drawn here.
-      const at = cursorEditable && cursorVisible ? cursorAt(cursorTrack, t) : null;
+      const at = cursorEditable && cursorVisible && drawnTrack ? cursorAt(drawnTrack, t) : null;
       if (at) {
         if (halo) {
           const [r, g, b] = hexRgb(haloColor);
@@ -604,6 +634,20 @@
           ctx.drawImage(img, at.x - hot[0] * scale, at.y - hot[1] * scale, iw * scale, ih * scale);
         }
       }
+    }
+
+    // The fixed point of the selected zoom.
+    if (selectedZoomItem?.focus && !cropping) {
+      const [fx, fy] = selectedZoomItem.focus;
+      ctx.save();
+      ctx.lineWidth = 2 * px;
+      ctx.strokeStyle = "#fff";
+      ctx.fillStyle = "rgba(61,125,255,0.85)";
+      ctx.beginPath();
+      ctx.arc(fx, fy, 9 * px, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     }
 
     // Selection: outline and resize handles.
@@ -810,6 +854,7 @@
       ratio: $state.snapshot(ratio),
       fit,
       overlays: $state.snapshot(overlays),
+      zooms: $state.snapshot(zooms),
     });
 
   function commit(change: () => void) {
@@ -835,6 +880,8 @@
     ratio = parsed.ratio;
     fit = parsed.fit;
     overlays = parsed.overlays;
+    zooms = parsed.zooms ?? [];
+    selectedZoom = null;
     selectedOverlay = null;
     selectedSegment = null;
     cropping = false;
@@ -883,6 +930,7 @@
     const out = [0, duration, trim.start, trim.end, ...segments.map((s) => s.start)];
     if (!drag || drag.kind !== "time") out.push(time);
     for (const o of overlays) if (o.id !== exclude) out.push(o.start, o.end);
+    for (const z of zooms) if (z.id !== exclude) out.push(z.start, z.end);
     return out;
   }
 
@@ -901,6 +949,7 @@
     const t = timeAt(e);
     seek(t);
     selectedOverlay = null;
+    selectedZoom = null;
     selectedSegment = (e.target as HTMLElement).closest(".track") ? indexAt(segments, t) : null;
   }
 
@@ -927,6 +976,20 @@
     drag = { kind: "bar", id: o.id, edge, from: timeAt(e), start: o.start, end: o.end };
   }
 
+  /** Dragging a zoom bar changes when it happens. */
+  function zoomDown(e: PointerEvent, z: Zoom, edge: "start" | "end" | "both") {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    content.setPointerCapture(e.pointerId);
+    selectedZoom = z.id;
+    selectedOverlay = null;
+    selectedSegment = null;
+    panel = "zoom";
+    past.push(snapshot());
+    future = [];
+    drag = { kind: "zoom", id: z.id, edge, from: timeAt(e), start: z.start, end: z.end };
+  }
+
   function timelineMove(e: PointerEvent) {
     if (!drag) return;
     const at = (t: number, exclude?: number) => (e.altKey ? t : snap(t, snapTargets(exclude), reach));
@@ -950,11 +1013,61 @@
         o.end = o.start + length;
       }
       seek(d.edge === "end" ? o.end - 0.01 : o.start);
+    } else if (drag.kind === "zoom") {
+      const d = drag;
+      const z = zooms.find((x) => x.id === d.id);
+      if (!z) return;
+      const delta = timeAt(e) - d.from;
+      if (d.edge === "start") z.start = Math.max(0, Math.min(d.end - 0.3, at(d.start + delta, z.id)));
+      else if (d.edge === "end") z.end = Math.min(duration, Math.max(d.start + 0.3, at(d.end + delta, z.id)));
+      else {
+        const length = d.end - d.start;
+        const start = at(d.start + delta, z.id);
+        const end = at(start + length, z.id);
+        z.start = Math.max(0, Math.min(duration - length, end !== start + length ? end - length : start));
+        z.end = z.start + length;
+      }
+      if (d.edge !== "both") seek(d.edge === "end" ? z.end - 0.01 : z.start);
     }
   }
 
   function timelineUp() {
-    if (drag?.kind === "time" || drag?.kind === "trim" || drag?.kind === "bar") drag = null;
+    if (drag?.kind === "time" || drag?.kind === "trim" || drag?.kind === "bar" || drag?.kind === "zoom") drag = null;
+  }
+
+  // ── Zoom ───────────────────────────────────────────────────────────────
+
+  /** A zoom at the playhead, following the cursor when it was recorded. */
+  function addZoom() {
+    if (!duration) return;
+    const start = Math.min(time, Math.max(0, duration - 0.5));
+    const id = nextId++;
+    const focus: [number, number] | null = cursorTrack ? null : [vw / 2, vh / 2];
+    commit(() => zooms.push({ id, start, end: Math.min(duration, start + ZOOM_LENGTH), scale: 2, focus }));
+    selectedZoom = id;
+    selectedOverlay = null;
+  }
+
+  /** Zooms on every group of clicks (replacing the zooms there were). */
+  function zoomOnClicks() {
+    if (!cursorTrack) return;
+    const made = autoZooms(cursorTrack, duration);
+    commit(() => (zooms = made.map((z) => ({ ...z, id: nextId++ }))));
+    selectedZoom = null;
+    notify(made.length ? `${made.length} zoom${made.length > 1 ? "s" : ""} added on the clicks` : "No clicks in this recording");
+  }
+
+  function removeZoom() {
+    const id = selectedZoom;
+    if (id === null) return;
+    selectedZoom = null;
+    pickingFocus = false;
+    commit(() => (zooms = zooms.filter((z) => z.id !== id)));
+  }
+
+  function changeZoom(patch: Partial<ZoomRegion>) {
+    const z = selectedZoomItem;
+    if (z) commit(() => Object.assign(z, patch));
   }
 
   /** Ctrl+wheel zooms around the pointer; the wheel alone scrolls. */
@@ -1130,6 +1243,11 @@
     if (editing) return commitText();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const p = toSource(e);
+    if (pickingFocus && selectedZoomItem) {
+      pickingFocus = false;
+      changeZoom({ focus: [Math.round(p.x), Math.round(p.y)] });
+      return;
+    }
     if (cropping && cropDraft) {
       const r = cropDraft;
       const cs = corners(r);
@@ -1369,7 +1487,8 @@
   }
 
   function composition(): Composition {
-    const customCursor = cursorEditable && (cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible || halo);
+    const customCursor =
+      cursorEditable && (cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible || halo || smoothing > 0);
     let image: { png: string; hotspot: [number, number] } | null = null;
     if (customCursor && cursorStyle !== "original") {
       const drawn = drawCursor(cursorStyle, cursorColor);
@@ -1379,14 +1498,21 @@
     return {
       overlays: overlayImages(),
       cursor: customCursor
-        ? { visible: cursorVisible, scale: cursorScale, image, halo: halo ? [...hexRgb(haloColor), 90] : null }
+        ? { visible: cursorVisible, scale: cursorScale, image, halo: halo ? [...hexRgb(haloColor), 90] : null, smooth: smoothing }
         : null,
       clicks:
         clickRing || clickSound
           ? { ring: clickRing, color: hexRgb(clickColor), sound: clickSound, voice: clickVoice }
           : null,
       canvas: framed
-        ? { ratio: [Math.round(canvasRatio[0]), Math.round(canvasRatio[1])], colors: bg.map(hexRgb), padding: margin, radius, shadow }
+        ? {
+            ratio: [Math.round(canvasRatio[0]), Math.round(canvasRatio[1])],
+            colors: bg.map(hexRgb),
+            padding: margin,
+            radius,
+            shadow,
+            backdrop: null,
+          }
         : null,
       pixelate: overlays
         .filter((o) => o.shape.kind === "pixelate")
@@ -1402,6 +1528,7 @@
             end: o.end,
           };
         }),
+      zoom: zooms.map((z) => ({ start: z.start, end: z.end, scale: z.scale, focus: z.focus })),
     };
   }
 
@@ -1429,6 +1556,8 @@
       cursorScale === 1 &&
       cursorStyle === "original" &&
       !halo &&
+      !smoothing &&
+      !zooms.length &&
       audio &&
       volume === 1 &&
       !fadeIn &&
@@ -1623,6 +1752,7 @@
       case "delete":
       case "backspace":
         if (selectedOverlay !== null) removeOverlay();
+        else if (selectedZoom !== null) removeZoom();
         else removePart();
         break;
       case "i":
@@ -1640,6 +1770,8 @@
         break;
       case "escape":
         if (cropping) cancelCrop();
+        pickingFocus = false;
+        selectedZoom = null;
         selectedOverlay = null;
         selectedSegment = null;
         draft = null;
@@ -1653,7 +1785,7 @@
     bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
   const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
   const stageCursor = $derived(
-    cropping
+    cropping || pickingFocus
       ? "crosshair"
       : tool === "select"
         ? hover === 0 || hover === 2
@@ -1678,6 +1810,8 @@
   const hint = $derived(
     cropping
       ? `Drag the frame or its corners${lockedRatio ? ` · ${ratio?.join(":")} kept` : ""} · Enter to apply`
+      : pickingFocus
+        ? "Click the point to zoom on"
       : selectedItem
         ? "Drag to move · corners to resize · double-click a text to edit"
         : tool !== "select"
@@ -1763,7 +1897,7 @@
           onclick={() => (panel = p.id)}
         >
           <Icon name={p.icon} />
-          {#if (p.id === "background" && framed) || (p.id === "format" && (ratio || crop)) || (p.id === "cursor" && (clickRing || clickSound || halo || cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible))}
+          {#if (p.id === "background" && framed) || (p.id === "format" && (ratio || crop)) || (p.id === "cursor" && (clickRing || clickSound || halo || smoothing > 0 || cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible)) || (p.id === "zoom" && zooms.length > 0)}
             <span class="badge-dot"></span>
           {/if}
         </button>
@@ -1876,6 +2010,21 @@
                 </div>
               {/if}
             {/if}
+            <div class="field stacked">
+              <span>Smooth movement</span>
+              <div class="segmented wrap" role="radiogroup" aria-label="Smooth movement">
+                {#each SMOOTHING as sm (sm.value)}
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={smoothing === sm.value}
+                    class:active={smoothing === sm.value}
+                    title={sm.value ? "The cursor glides instead of jumping" : "As recorded"}
+                    onclick={() => (smoothing = sm.value)}>{sm.label}</button
+                  >
+                {/each}
+              </div>
+            </div>
           {:else}
             <p class="note">The copy without cursor of this recording is gone: only clicks can be shown.</p>
           {/if}
@@ -1924,6 +2073,64 @@
             </div>
           </div>
         {/if}
+        </div>
+      {:else if panel === "zoom"}
+        <div class="sec-head">
+          <h3>Camera zoom</h3>
+          <button type="button" class="link" disabled={!zooms.length} onclick={() => commit(() => ((zooms = []), (selectedZoom = null)))}>Clear</button>
+        </div>
+        <div class="stack">
+          <div class="pair">
+            <button type="button" onclick={addZoom} disabled={!duration} title="Zoom in at the playhead for {ZOOM_LENGTH} s"><Icon name="plus" /> Add zoom</button>
+            <button type="button" onclick={zoomOnClicks} disabled={!cursorTrack || !duration} title="One zoom per group of clicks"><Icon name="cursor" /> On clicks</button>
+          </div>
+          {#if selectedZoomItem}
+            {@const z = selectedZoomItem}
+            <div class="field stacked">
+              <span>Zoom</span>
+              <div class="segmented" role="radiogroup" aria-label="Zoom level">
+                {#each ZOOM_SCALES as sc (sc)}
+                  <button type="button" role="radio" aria-checked={z.scale === sc} class:active={z.scale === sc} onclick={() => changeZoom({ scale: sc })}>{sc}×</button>
+                {/each}
+              </div>
+            </div>
+            <div class="field stacked">
+              <span>Keeps in view</span>
+              <div class="segmented" role="radiogroup" aria-label="Keeps in view">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={z.focus === null}
+                  class:active={z.focus === null}
+                  disabled={!cursorTrack}
+                  title={cursorTrack ? "The camera drifts after the cursor" : "Needs a recording with its cursor track"}
+                  onclick={() => changeZoom({ focus: null })}>The cursor</button
+                >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={z.focus !== null}
+                  class:active={z.focus !== null}
+                  onclick={() => {
+                    if (!z.focus) changeZoom({ focus: [Math.round(vw / 2), Math.round(vh / 2)] });
+                    pickingFocus = true;
+                    video.pause();
+                    seek(Math.min(z.end - 0.01, Math.max(z.start, (z.start + z.end) / 2)));
+                  }}>A point</button
+                >
+              </div>
+            </div>
+            {#if z.focus}
+              <p class="note">{pickingFocus ? "Click the video where to zoom." : "Choose “A point” again to move it."}</p>
+            {/if}
+            <button type="button" class="ghost danger-fill" onclick={removeZoom}><Icon name="trash" /> Delete this zoom</button>
+          {:else}
+            <p class="note">
+              {zooms.length
+                ? "Select a zoom on the timeline to change it; drag it or its ends to move it."
+                : "Zoom in on what matters: the camera eases in, follows the cursor (or stays on a point), then eases out."}
+            </p>
+          {/if}
         </div>
       {:else if panel === "format"}
         <div class="sec-head">
@@ -2354,6 +2561,24 @@
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="handle end" style="left:{percent(trim.end)}%" title="Drag to trim the end (O)" onpointerdown={(e) => trimDown(e, "end")}></div>
           </div>
+
+          {#if zooms.length}
+            <div class="lanes zoom-lane" style="height:{ROW_H + 6}px">
+              {#each zooms as z (z.id)}
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div
+                  class="bar zoom-bar"
+                  class:selected={selectedZoom === z.id}
+                  style="left:{percent(z.start)}%;width:{percent(z.end) - percent(z.start)}%;top:3px"
+                  onpointerdown={(e) => zoomDown(e, z, "both")}
+                >
+                  <span class="edge left" onpointerdown={(e) => zoomDown(e, z, "start")}></span>
+                  <span class="label"><Icon name="zoom" />{z.scale}× · {z.focus ? "point" : "cursor"}</span>
+                  <span class="edge right" onpointerdown={(e) => zoomDown(e, z, "end")}></span>
+                </div>
+              {/each}
+            </div>
+          {/if}
 
           <div class="lanes" style="height:{rows.count * ROW_H + 6}px">
             {#each overlays as o (o.id)}
@@ -3494,6 +3719,12 @@
     box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--bar) 55%, transparent);
     cursor: grab;
     overflow: hidden;
+  }
+  .zoom-bar {
+    --bar: #8b5cf6;
+  }
+  .zoom-lane + .lanes {
+    margin-top: 2px;
   }
   .bar.selected {
     outline: 2px solid var(--accent);

@@ -124,11 +124,46 @@ export interface OverlayImage {
 /** What is drawn on the frames of an edited video. */
 export interface Composition {
   overlays: OverlayImage[];
-  cursor: { visible: boolean; scale: number; image: { png: string; hotspot: [number, number] } | null; halo: [number, number, number, number] | null } | null;
+  cursor: {
+    visible: boolean;
+    scale: number;
+    image: { png: string; hotspot: [number, number] } | null;
+    halo: [number, number, number, number] | null;
+    /** Stiffness of the spring the cursor follows; 0 keeps its path. */
+    smooth: number;
+  } | null;
   clicks: { ring: boolean; color: [number, number, number]; sound: boolean; voice: "soft" | "pop" | "click" } | null;
-  canvas: { ratio: [number, number]; colors: [number, number, number][]; padding: number; radius: number; shadow: number } | null;
+  canvas: {
+    ratio: [number, number];
+    colors: [number, number, number][];
+    padding: number;
+    radius: number;
+    shadow: number;
+    /** Drawn by the editor (device frames): replaces everything above. */
+    backdrop: Backdrop | null;
+  } | null;
   /** Areas shown as blocks, in video pixels. */
   pixelate: { x: number; y: number; w: number; h: number; block: number; start: number; end: number }[];
+  /** Camera zooms. */
+  zoom: ZoomRegion[];
+}
+
+/** A zoom between two times (source seconds) around `focus` (video
+ * pixels), or around the cursor when `focus` is null. */
+export interface ZoomRegion {
+  start: number;
+  end: number;
+  scale: number;
+  focus: [number, number] | null;
+}
+
+/** A canvas drawn by the editor: PNGs (data URLs) under and over
+ * the video, and where the video goes. */
+export interface Backdrop {
+  png: string;
+  area: [number, number, number, number];
+  radius: number;
+  front: string | null;
 }
 
 /** Edits made in the video editor (times in seconds, crop in video pixels). */

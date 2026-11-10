@@ -98,3 +98,50 @@ export function cursorAt(track: CursorTrack, t: number): { x: number; y: number;
 
 /** How long a click mark lasts, as in the export. */
 export const CLICK_MARK = 0.45;
+
+/** Simulation step of `smoothTrack`, in seconds, and how many steps go by
+ * between two samples kept: the same as the exporter's. */
+const SMOOTH_STEP = 1 / 240;
+const SMOOTH_KEEP = 2;
+
+/** The track with the cursor gliding instead of jumping: it follows the
+ * recorded position through a critically damped spring of stiffness
+ * `omega` (lower is smoother; 0 changes nothing). Same path as
+ * `CursorTrack::smoothed` in crates/capshot-record/src/cursor.rs. */
+export function smoothTrack(track: CursorTrack, omega: number): CursorTrack {
+  const first = track.samples[0];
+  const last = track.samples.at(-1);
+  if (!first || !last || omega <= 0 || track.samples.length < 2) return track;
+  const samples: CursorTrack["samples"] = [];
+  let x = first.x;
+  let y = first.y;
+  let vx = 0;
+  let vy = 0;
+  let shown = false;
+  for (let i = 0; ; i++) {
+    const t = first.t + i * SMOOTH_STEP;
+    if (t > last.t + 1e-9) break;
+    const raw = cursorAt(track, t);
+    if (raw) {
+      if (shown) {
+        vx += (omega * omega * (raw.x - x) - 2 * omega * vx) * SMOOTH_STEP;
+        vy += (omega * omega * (raw.y - y) - 2 * omega * vy) * SMOOTH_STEP;
+        x += vx * SMOOTH_STEP;
+        y += vy * SMOOTH_STEP;
+      } else {
+        [x, y, vx, vy] = [raw.x, raw.y, 0, 0];
+      }
+    }
+    shown = !!raw;
+    if (i % SMOOTH_KEEP === 0) samples.push({ t, x, y, shape: raw?.shape ?? 0, visible: shown });
+  }
+  return { samples, clicks: track.clicks, shapes: track.shapes };
+}
+
+/** Smoothing choices, as spring stiffness. */
+export const SMOOTHING: { value: number; label: string }[] = [
+  { value: 0, label: "Off" },
+  { value: 22, label: "Light" },
+  { value: 13, label: "Medium" },
+  { value: 8, label: "Strong" },
+];

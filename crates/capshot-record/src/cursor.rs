@@ -84,7 +84,68 @@ impl CursorTrack {
             _ => Some((before.x, before.y, before.shape)),
         }
     }
+
+    /// The same track with the cursor gliding instead of jumping: its
+    /// position follows the recorded one through a critically damped
+    /// spring of stiffness `omega` (lower is smoother; 0 changes nothing).
+    /// The editor's preview computes the same path (`smoothTrack` in
+    /// `app/src/editor/cursors.ts`).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    #[must_use]
+    pub fn smoothed(&self, omega: f64) -> Self {
+        let (Some(first), Some(last)) = (self.samples.first(), self.samples.last()) else {
+            return self.clone();
+        };
+        if omega <= 0.0 || self.samples.len() < 2 {
+            return self.clone();
+        }
+        let mut samples = Vec::new();
+        let (mut x, mut y) = (f64::from(first.x), f64::from(first.y));
+        let (mut vx, mut vy) = (0.0, 0.0);
+        let mut shown = false;
+        let mut i = 0u64;
+        loop {
+            let t = first.t + i as f64 * SMOOTH_STEP;
+            if t > last.t + 1e-9 {
+                break;
+            }
+            let raw = self.at(t);
+            if let Some((tx, ty, _)) = raw {
+                let (tx, ty) = (f64::from(tx), f64::from(ty));
+                if shown {
+                    vx += (omega * omega * (tx - x) - 2.0 * omega * vx) * SMOOTH_STEP;
+                    vy += (omega * omega * (ty - y) - 2.0 * omega * vy) * SMOOTH_STEP;
+                    x += vx * SMOOTH_STEP;
+                    y += vy * SMOOTH_STEP;
+                } else {
+                    // Appearing: start where it is, at rest.
+                    (x, y, vx, vy) = (tx, ty, 0.0, 0.0);
+                }
+            }
+            shown = raw.is_some();
+            if i.is_multiple_of(SMOOTH_KEEP) {
+                samples.push(CursorSample {
+                    t,
+                    x: x as f32,
+                    y: y as f32,
+                    shape: raw.map_or(0, |r| r.2),
+                    visible: shown,
+                });
+            }
+            i += 1;
+        }
+        Self {
+            samples,
+            clicks: self.clicks.clone(),
+            shapes: self.shapes.clone(),
+        }
+    }
 }
+
+/// Simulation step of [`CursorTrack::smoothed`], in seconds, and how many
+/// steps go by between two samples kept (120 per second).
+const SMOOTH_STEP: f64 = 1.0 / 240.0;
+const SMOOTH_KEEP: u64 = 2;
 
 /// Samples the cursor while recording.
 #[derive(Debug)]
