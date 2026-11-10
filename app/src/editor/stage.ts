@@ -14,7 +14,7 @@ export interface Layout {
   background: boolean;
 }
 
-/** Same rule as the exporter's canvas (crates/kadra-record/src/compose.rs):
+/** Same rule as the exporter's canvas (crates/capshot-record/src/compose.rs):
  * a frame of the requested ratio around a `w` × `h` video, with a margin,
  * no larger than the source on its long side. */
 export function fitLayout(crop: Rect, ratio: [number, number], padding: number): Layout {
@@ -179,7 +179,7 @@ export function packRows(items: { id: number; start: number; end: number }[]): {
   return { row, count: Math.max(1, ends.length) };
 }
 
-/** Click sounds, the same as the ones mixed into exports (kadra-record's
+/** Click sounds, the same as the ones mixed into exports (capshot-record's
  * `stretch::click_sound` makes identical samples). */
 export type ClickSound = "soft" | "pop" | "click";
 

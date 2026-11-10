@@ -7,16 +7,16 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
-authors = ["Kadra contributors"]
+authors = ["Capshot contributors"]
 publish = false
 
 [workspace.dependencies]
-kadra-capture = { path = "crates/kadra-capture" }
-kadra-core = { path = "crates/kadra-core" }
-kadra-encode = { path = "crates/kadra-encode" }
-kadra-gif = { path = "crates/kadra-gif" }
-kadra-overlay = { path = "crates/kadra-overlay" }
-kadra-record = { path = "crates/kadra-record" }
+capshot-capture = { path = "crates/capshot-capture" }
+capshot-core = { path = "crates/capshot-core" }
+capshot-encode = { path = "crates/capshot-encode" }
+capshot-gif = { path = "crates/capshot-gif" }
+capshot-overlay = { path = "crates/capshot-overlay" }
+capshot-record = { path = "crates/capshot-record" }
 
 anyhow = "1.0.104"
 directories = "6.0.0"

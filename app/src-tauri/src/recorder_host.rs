@@ -1,6 +1,6 @@
 //! Out-of-process recorder.
 //!
-//! Recording runs in a child process (`kadra.exe --recorder-host`) driven
+//! Recording runs in a child process (`capshot.exe --recorder-host`) driven
 //! through JSON lines on stdin/stdout:
 //!
 //! - when the recording ends, Windows reclaims everything the GPU driver
@@ -16,8 +16,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use kadra_core::{BgraImage, GifSettings, Rect, VideoCodec};
-use kadra_record::{GifOptions, RecordOptions, Recording};
+use capshot_core::{BgraImage, GifSettings, Rect, VideoCodec};
+use capshot_record::{GifOptions, RecordOptions, Recording};
 use serde::{Deserialize, Serialize};
 
 /// Command-line flag selecting host mode.
@@ -84,7 +84,7 @@ fn array(r: Rect) -> [i32; 4] {
 /// Thumbnail exchange format: width and height (u32 little endian), then
 /// BGRA pixels.
 pub fn write_thumbnail(image: &BgraImage) -> Option<PathBuf> {
-    let path = std::env::temp_dir().join(format!("kadra-thumb-{}.bgra", std::process::id()));
+    let path = std::env::temp_dir().join(format!("capshot-thumb-{}.bgra", std::process::id()));
     let mut bytes = Vec::with_capacity(8 + image.as_bytes().len());
     bytes.extend(image.width().to_le_bytes());
     bytes.extend(image.height().to_le_bytes());
@@ -222,7 +222,7 @@ impl Host {
 
         let (tx, events) = mpsc::channel();
         std::thread::Builder::new()
-            .name("kadra-recorder-events".into())
+            .name("capshot-recorder-events".into())
             .spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     match serde_json::from_str::<Event>(&line) {

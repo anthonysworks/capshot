@@ -405,6 +405,102 @@ dependencies = [
 ]
 
 [[package]]
+name = "capshot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "capshot-core",
+ "capshot-encode",
+ "capshot-overlay",
+ "capshot-record",
+ "rqrr",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-single-instance",
+ "tracing",
+ "windows",
+]
+
+[[package]]
+name = "capshot-capture"
+version = "0.1.0"
+dependencies = [
+ "capshot-core",
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
+]
+
+[[package]]
+name = "capshot-core"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "capshot-encode"
+version = "0.1.0"
+dependencies = [
+ "capshot-core",
+ "chrono",
+ "image",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "capshot-gif"
+version = "0.1.0"
+dependencies = [
+ "capshot-core",
+ "gif",
+ "image",
+ "imagequant",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "capshot-overlay"
+version = "0.1.0"
+dependencies = [
+ "capshot-capture",
+ "capshot-core",
+ "capshot-encode",
+ "tracing",
+ "windows",
+ "windows-numerics",
+]
+
+[[package]]
+name = "capshot-record"
+version = "0.1.0"
+dependencies = [
+ "capshot-capture",
+ "capshot-core",
+ "capshot-encode",
+ "capshot-gif",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
+ "windows-numerics",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2010,102 +2106,6 @@ checksum = "a5a3cc660ba5d72bce0b3bb295bf20847ccbb40fd423f3f05b61273672e561fe"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "kadra"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "kadra-core",
- "kadra-encode",
- "kadra-overlay",
- "kadra-record",
- "rqrr",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-single-instance",
- "tracing",
- "windows",
-]
-
-[[package]]
-name = "kadra-capture"
-version = "0.1.0"
-dependencies = [
- "kadra-core",
- "thiserror 2.0.21",
- "tracing",
- "windows",
-]
-
-[[package]]
-name = "kadra-core"
-version = "0.1.0"
-dependencies = [
- "directories",
- "serde",
- "tempfile",
- "thiserror 2.0.21",
- "toml 1.2.1+spec-1.1.0",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "kadra-encode"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "image",
- "kadra-core",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "kadra-gif"
-version = "0.1.0"
-dependencies = [
- "gif",
- "image",
- "imagequant",
- "kadra-core",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "kadra-overlay"
-version = "0.1.0"
-dependencies = [
- "kadra-capture",
- "kadra-core",
- "kadra-encode",
- "tracing",
- "windows",
- "windows-numerics",
-]
-
-[[package]]
-name = "kadra-record"
-version = "0.1.0"
-dependencies = [
- "kadra-capture",
- "kadra-core",
- "kadra-encode",
- "kadra-gif",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
- "windows",
- "windows-numerics",
 ]
 
 [[package]]

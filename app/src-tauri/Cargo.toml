@@ -1,5 +1,5 @@
 [package]
-name = "kadra"
+name = "capshot"
 description = "Fast, minimal screen capture and recording for Windows 11."
 version.workspace = true
 edition.workspace = true
@@ -9,17 +9,17 @@ authors.workspace = true
 publish.workspace = true
 
 [lib]
-name = "kadra_app"
+name = "capshot_app"
 crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build.workspace = true
 
 [dependencies]
-kadra-core.workspace = true
-kadra-encode.workspace = true
-kadra-overlay.workspace = true
-kadra-record.workspace = true
+capshot-core.workspace = true
+capshot-encode.workspace = true
+capshot-overlay.workspace = true
+capshot-record.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true

@@ -88,7 +88,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             )?,
             &MenuItem::with_id(app, SETTINGS, "Settings", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, QUIT, "Quit Kadra", true, None::<&str>)?,
+            &MenuItem::with_id(app, QUIT, "Quit Capshot", true, None::<&str>)?,
         ],
     )
 }
@@ -120,7 +120,7 @@ fn open_recent(app: &AppHandle, index: usize) {
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip("Kadra")
+        .tooltip("Capshot")
         .menu(&build_menu(app)?)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {

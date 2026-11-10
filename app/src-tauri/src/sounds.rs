@@ -1,4 +1,4 @@
-//! Short sounds played by Kadra itself.
+//! Short sounds played by Capshot itself.
 
 use std::sync::OnceLock;
 

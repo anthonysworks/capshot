@@ -38,7 +38,7 @@ pub enum Kind {
 }
 
 pub fn kind(path: &Path) -> Option<Kind> {
-    if kadra_encode::format_of(path).is_some() {
+    if capshot_encode::format_of(path).is_some() {
         Some(Kind::Image)
     } else if crate::convert::is_video(path) {
         Some(Kind::Video)
@@ -106,7 +106,7 @@ pub fn open(app: &AppHandle, path: &Path) {
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let result = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title(format!("Kadra Editor · {name}"))
+        .title(format!("Capshot Editor · {name}"))
         .inner_size(1100.0, 760.0)
         .min_inner_size(640.0, 480.0)
         .center()
@@ -155,7 +155,7 @@ pub fn open_capture(app: &AppHandle, path: &Path) {
 
 /// Where the editing material of `video` lives: the copy without cursor
 /// and the cursor track.
-pub fn edit_files(paths: &kadra_core::Paths, video: &Path) -> (PathBuf, PathBuf) {
+pub fn edit_files(paths: &capshot_core::Paths, video: &Path) -> (PathBuf, PathBuf) {
     let name = video
         .file_name()
         .map_or_else(|| "video".into(), |n| n.to_string_lossy().into_owned());
@@ -167,14 +167,14 @@ pub fn edit_files(paths: &kadra_core::Paths, video: &Path) -> (PathBuf, PathBuf)
 }
 
 /// Editing material that exists for `video`.
-pub fn existing_edit_files(paths: &kadra_core::Paths, video: &Path) -> Option<(PathBuf, PathBuf)> {
+pub fn existing_edit_files(paths: &capshot_core::Paths, video: &Path) -> Option<(PathBuf, PathBuf)> {
     let (clean, track) = edit_files(paths, video);
     (clean.is_file() && track.is_file()).then_some((clean, track))
 }
 
 /// Keeps the material of the most recent recordings only: it doubles the
 /// disk space a recording takes.
-pub fn prune_edit_files(paths: &kadra_core::Paths) {
+pub fn prune_edit_files(paths: &capshot_core::Paths) {
     const KEEP: usize = 30;
     let dir = paths.edit_dir();
     if let Err(err) = std::fs::create_dir_all(dir) {
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn paths_survive_url_encoding() {
-        let path = r"C:\Users\Zoë\Vidéos\Kadra 2026-11-12 01-05-58 (1).mp4";
+        let path = r"C:\Users\Zoë\Vidéos\Capshot 2026-11-12 01-05-58 (1).mp4";
         let encoded = encode_component(path);
         assert!(encoded.is_ascii() && !encoded.contains(' '));
         assert_eq!(decode_component(&encoded).as_deref(), Some(path));

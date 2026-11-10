@@ -3,8 +3,8 @@
 
 use std::time::{Duration, Instant};
 
-use kadra_core::{AfterCapture, BgraImage, Rect};
-use kadra_overlay::{Action, CaptureRequest, CaptureResult, Mode, Overlay, Purpose};
+use capshot_core::{AfterCapture, BgraImage, Rect};
+use capshot_overlay::{Action, CaptureRequest, CaptureResult, Mode, Overlay, Purpose};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::recording;
@@ -94,7 +94,7 @@ impl CaptureService {
 pub struct Options {
     copy_to_clipboard: bool,
     after: AfterCapture,
-    format: kadra_core::RecordingFormat,
+    format: capshot_core::RecordingFormat,
     fps: u32,
     gif_fps: u32,
     countdown_secs: u32,
@@ -125,9 +125,9 @@ pub fn start(app: &AppHandle, purpose: Purpose) {
                 system_audio: config.recording.system_audio,
                 microphone: config.recording.microphone,
                 light: match config.appearance.theme {
-                    kadra_core::Theme::Light => true,
-                    kadra_core::Theme::Dark => false,
-                    kadra_core::Theme::System => kadra_overlay::system_uses_light_theme(),
+                    capshot_core::Theme::Light => true,
+                    capshot_core::Theme::Dark => false,
+                    capshot_core::Theme::System => capshot_overlay::system_uses_light_theme(),
                 },
             },
         )
@@ -222,7 +222,7 @@ fn run_action(app: &AppHandle, action: Action, image: &BgraImage, area: Rect) {
         }
     };
     let temporary = || {
-        kadra_encode::save_now(image, format, &crate::quick::pending_dir())
+        capshot_encode::save_now(image, format, &crate::quick::pending_dir())
             .map_err(|e| e.to_string())
     };
     let result: Result<(), String> = (|| {
@@ -230,7 +230,7 @@ fn run_action(app: &AppHandle, action: Action, image: &BgraImage, area: Rect) {
             Action::Copy => confirm(&temporary()?, "Copied to the clipboard"),
             Action::Save => {
                 let path =
-                    kadra_encode::save_now(image, format, &dir).map_err(|e| e.to_string())?;
+                    capshot_encode::save_now(image, format, &dir).map_err(|e| e.to_string())?;
                 remember(app, &path, image.width(), image.height());
                 let _ = app.emit(SAVED_EVENT, path.display().to_string());
                 confirm(&path, "Saved");
@@ -240,8 +240,8 @@ fn run_action(app: &AppHandle, action: Action, image: &BgraImage, area: Rect) {
                 let chosen = crate::quick::choose(app, &temp);
                 let _ = std::fs::remove_file(&temp);
                 if let Some(to) = chosen {
-                    let format = kadra_encode::format_of(&to).unwrap_or(format);
-                    let bytes = kadra_encode::encode(image, format).map_err(|e| e.to_string())?;
+                    let format = capshot_encode::format_of(&to).unwrap_or(format);
+                    let bytes = capshot_encode::encode(image, format).map_err(|e| e.to_string())?;
                     std::fs::write(&to, bytes).map_err(|e| e.to_string())?;
                     remember(app, &to, image.width(), image.height());
                     confirm(&to, "Saved");
@@ -252,10 +252,10 @@ fn run_action(app: &AppHandle, action: Action, image: &BgraImage, area: Rect) {
                 let dir = if keep {
                     dir
                 } else {
-                    std::env::temp_dir().join("Kadra")
+                    std::env::temp_dir().join("Capshot")
                 };
                 let path =
-                    kadra_encode::save_now(image, format, &dir).map_err(|e| e.to_string())?;
+                    capshot_encode::save_now(image, format, &dir).map_err(|e| e.to_string())?;
                 if keep {
                     remember(app, &path, image.width(), image.height());
                     let _ = app.emit(SAVED_EVENT, path.display().to_string());
@@ -326,11 +326,11 @@ fn save(app: &AppHandle, id: u64, image: &BgraImage) {
     let dir = match (enabled, edit || quick) {
         (true, _) => dir,
         (false, true) if quick => crate::quick::pending_dir(),
-        (false, true) => std::env::temp_dir().join("Kadra"),
+        (false, true) => std::env::temp_dir().join("Capshot"),
         (false, false) => return,
     };
     let start = Instant::now();
-    match kadra_encode::save_now(image, format, &dir) {
+    match capshot_encode::save_now(image, format, &dir) {
         Ok(path) => {
             tracing::info!(
                 path = %path.display(),
@@ -362,7 +362,7 @@ pub fn remember(app: &AppHandle, path: &std::path::Path, width: u32, height: u32
         .map_or(0, |d| d.as_secs());
     {
         let mut history = state.history();
-        history.push(kadra_core::history::Entry {
+        history.push(capshot_core::history::Entry {
             path: path.to_path_buf(),
             taken_at,
             width,

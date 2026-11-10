@@ -8,7 +8,7 @@ export type RecordingFormat = "mp4" | "gif";
 export type AfterCapture = "actions" | "editor" | "preview" | "nothing";
 export type Folder = "screenshots" | "recordings" | "logs";
 
-/** Mirrors `kadra_core::Config`. */
+/** Mirrors `capshot_core::Config`. */
 export interface Config {
   hotkeys: { capture: string; record: string };
   appearance: { theme: "system" | "dark" | "light" };
@@ -93,7 +93,7 @@ export const onFileDrop = (handler: (paths: string[] | null, over: boolean) => v
     else handler(null, false);
   });
 
-/** Selects a file created by Kadra in Explorer. */
+/** Selects a file created by Capshot in Explorer. */
 export const showInFolder = (path: string) => invoke<void>("show_in_folder", { path });
 
 // ── Editor ──────────────────────────────────────────────────────────────

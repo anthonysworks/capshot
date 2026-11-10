@@ -1,6 +1,6 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use kadra_core::{Config, History, Paths};
+use capshot_core::{Config, History, Paths};
 
 /// State shared by commands, hotkeys and the tray.
 #[derive(Debug)]

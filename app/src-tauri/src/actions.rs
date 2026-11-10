@@ -10,14 +10,14 @@ use crate::{capture, convert, recording};
 pub enum Action {
     Capture,
     Record,
-    /// Convert a video file to GIF (`kadra.exe --to-gif video.mp4`).
+    /// Convert a video file to GIF (`capshot.exe --to-gif video.mp4`).
     ToGif(PathBuf),
-    /// Open a file in the editor (`kadra.exe --edit capture.png`).
+    /// Open a file in the editor (`capshot.exe --edit capture.png`).
     Edit(PathBuf),
 }
 
 impl Action {
-    /// Command-line flag that triggers the action (`kadra.exe --capture`).
+    /// Command-line flag that triggers the action (`capshot.exe --capture`).
     /// Relative paths are resolved against `cwd`.
     pub fn from_args<S: AsRef<str>>(args: &[S], cwd: &Path) -> Option<Self> {
         let mut args = args.iter().map(AsRef::as_ref);
@@ -36,7 +36,7 @@ impl Action {
 
 pub fn trigger(app: &AppHandle, action: Action) {
     match action {
-        Action::Capture => capture::start(app, kadra_overlay::Purpose::Screenshot),
+        Action::Capture => capture::start(app, capshot_overlay::Purpose::Screenshot),
         // Starts selecting an area, or stops the current recording.
         Action::Record => recording::toggle(app),
         Action::ToGif(path) => {
@@ -54,13 +54,13 @@ mod tests {
     fn parses_command_line_flags() {
         let cwd = Path::new(r"C:\work");
         assert_eq!(
-            Action::from_args(&["kadra.exe", "--capture"], cwd),
+            Action::from_args(&["capshot.exe", "--capture"], cwd),
             Some(Action::Capture)
         );
         assert_eq!(Action::from_args(&["--record"], cwd), Some(Action::Record));
-        assert_eq!(Action::from_args(&["kadra.exe"], cwd), None);
+        assert_eq!(Action::from_args(&["capshot.exe"], cwd), None);
         assert_eq!(
-            Action::from_args(&["kadra.exe", "--to-gif", "clip.mp4"], cwd),
+            Action::from_args(&["capshot.exe", "--to-gif", "clip.mp4"], cwd),
             Some(Action::ToGif(PathBuf::from(r"C:\work\clip.mp4")))
         );
         assert_eq!(

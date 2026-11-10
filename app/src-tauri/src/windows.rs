@@ -1,6 +1,6 @@
 //! Web-based windows, created on demand.
 //!
-//! No webview exists while Kadra sits in the tray: windows are built when
+//! No webview exists while Capshot sits in the tray: windows are built when
 //! opened and destroyed when closed, which keeps idle memory low.
 
 use std::path::Path;
@@ -19,7 +19,7 @@ pub fn show_settings(app: &AppHandle) {
 
     let result =
         WebviewWindowBuilder::new(app, SETTINGS_LABEL, WebviewUrl::App("index.html".into()))
-            .title("Kadra Settings")
+            .title("Capshot Settings")
             .inner_size(680.0, 620.0)
             .min_inner_size(520.0, 420.0)
             .center()

@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use kadra_core::Config;
+use capshot_core::Config;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Manager, State};
@@ -147,10 +147,10 @@ pub fn editor_read(app: AppHandle, path: String) -> Result<Response, String> {
 #[tauri::command]
 pub fn editor_save(app: AppHandle, request: Request<'_>) -> Result<(), String> {
     let path = header_path(&app, &request)?;
-    let image = kadra_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
-    let format = kadra_encode::format_of(&path).ok_or("unsupported image format")?;
-    let bytes = kadra_encode::encode(&image, format).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("kadra-tmp");
+    let image = capshot_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
+    let format = capshot_encode::format_of(&path).ok_or("unsupported image format")?;
+    let bytes = capshot_encode::encode(&image, format).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("capshot-tmp");
     std::fs::write(&tmp, bytes)
         .and_then(|()| std::fs::rename(&tmp, &path))
         .map_err(|e| format!("cannot save {}: {e}", path.display()))?;
@@ -164,9 +164,9 @@ pub fn editor_save(app: AppHandle, request: Request<'_>) -> Result<(), String> {
 #[tauri::command]
 pub fn editor_save_copy(app: AppHandle, request: Request<'_>) -> Result<String, String> {
     let original = header_path(&app, &request)?;
-    let image = kadra_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
-    let format = kadra_encode::format_of(&original).ok_or("unsupported image format")?;
-    let bytes = kadra_encode::encode(&image, format).map_err(|e| e.to_string())?;
+    let image = capshot_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
+    let format = capshot_encode::format_of(&original).ok_or("unsupported image format")?;
+    let bytes = capshot_encode::encode(&image, format).map_err(|e| e.to_string())?;
     let dir = original.parent().ok_or("no folder")?;
     let stem = original
         .file_stem()
@@ -174,7 +174,7 @@ pub fn editor_save_copy(app: AppHandle, request: Request<'_>) -> Result<String, 
     let extension = original
         .extension()
         .map_or_else(|| "png".into(), |e| e.to_string_lossy().into_owned());
-    let path = kadra_encode::unique_path(dir, &format!("{stem} (edited)"), &extension);
+    let path = capshot_encode::unique_path(dir, &format!("{stem} (edited)"), &extension);
     std::fs::write(&path, bytes).map_err(|e| format!("cannot save {}: {e}", path.display()))?;
     tracing::info!(path = %path.display(), "edited copy saved");
     app.state::<EditorFiles>().allow(&path);
@@ -185,7 +185,7 @@ pub fn editor_save_copy(app: AppHandle, request: Request<'_>) -> Result<String, 
 /// Copies an edited image (PNG body) to the clipboard.
 #[tauri::command]
 pub fn editor_copy(app: AppHandle, request: Request<'_>) -> Result<(), String> {
-    let image = kadra_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
+    let image = capshot_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
     let service = app
         .try_state::<CaptureService>()
         .ok_or("the clipboard is unavailable")?;
@@ -307,7 +307,7 @@ pub fn editor_discard(app: AppHandle, window: tauri::Window, path: String) -> Re
     Ok(())
 }
 
-/// Selects a file in Explorer. Only files Kadra created (listed in the
+/// Selects a file in Explorer. Only files Capshot created (listed in the
 /// history) can be shown, never an arbitrary path coming from the webview.
 #[tauri::command]
 pub fn show_in_folder(state: State<'_, AppState>, path: String) {
@@ -346,9 +346,9 @@ pub fn editor_save_to(app: AppHandle, request: Request<'_>) -> Result<String, St
     if !app.state::<Saving>().take_chosen(&output) {
         return Err("this destination was not chosen in the editor".into());
     }
-    let image = kadra_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
-    let format = kadra_encode::format_of(&output).unwrap_or(kadra_core::ImageFormat::Png);
-    let bytes = kadra_encode::encode(&image, format).map_err(|e| e.to_string())?;
+    let image = capshot_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
+    let format = capshot_encode::format_of(&output).unwrap_or(capshot_core::ImageFormat::Png);
+    let bytes = capshot_encode::encode(&image, format).map_err(|e| e.to_string())?;
     std::fs::write(&output, bytes).map_err(|e| format!("cannot save {}: {e}", output.display()))?;
     tracing::info!(path = %output.display(), "image saved as");
     app.state::<EditorFiles>().allow(&output);

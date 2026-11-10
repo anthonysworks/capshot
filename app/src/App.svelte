@@ -22,6 +22,7 @@
     saveConfig,
   } from "./lib/api";
   import HotkeyInput from "./lib/HotkeyInput.svelte";
+  import Logo from "./lib/Logo.svelte";
   import Notches from "./lib/Notches.svelte";
   import { type Theme, setTheme } from "./lib/theme";
 
@@ -165,8 +166,8 @@
   <div class="settings">
     <nav class="rail" aria-label="Categories">
       <div class="brand">
-        <strong>Kadra</strong>
-        {#if info}<span>{info.version}</span>{/if}
+        <Logo height={26} />
+        {#if info}<span class="version">{info.version}</span>{/if}
       </div>
       {#each CATEGORIES as c (c.id)}
         <button
@@ -202,7 +203,7 @@
                 </label>
               {/each}
             </div>
-            <p class="hint">Applies at once to every Kadra window and to the capture toolbar.</p>
+            <p class="hint">Applies at once to every Capshot window and to the capture toolbar.</p>
           </section>
           <section>
             <h2>After a capture</h2>
@@ -499,16 +500,12 @@
   }
   .brand {
     display: flex;
-    align-items: baseline;
+    align-items: flex-end;
     gap: 8px;
     padding: 4px 24px 22px;
   }
-  .brand strong {
-    font-family: var(--font-display);
-    font-size: 20px;
-    font-weight: 700;
-  }
-  .brand span {
+  .brand .version {
+    padding-bottom: 2px;
     color: var(--text-faint);
     font-size: 12px;
   }

@@ -1,6 +1,6 @@
 //! Video jobs: conversion to GIF and trimming.
 //!
-//! Like recording, they run in a child process (`kadra.exe --gif-host`):
+//! Like recording, they run in a child process (`capshot.exe --gif-host`):
 //! decoders and encoders allocate a lot, and all of it is returned to the
 //! system when the process ends. The child reads one JSON request on stdin
 //! and reports progress as JSON lines on stdout.
@@ -12,10 +12,10 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use kadra_core::{GifSettings, Rect};
-use kadra_record::compose::Composition;
-use kadra_record::cursor::CursorTrack;
-use kadra_record::{GifOptions, Part, TrimOptions, VideoEdit, trim_video, video_to_gif};
+use capshot_core::{GifSettings, Rect};
+use capshot_record::compose::Composition;
+use capshot_record::cursor::CursorTrack;
+use capshot_record::{GifOptions, Part, TrimOptions, VideoEdit, trim_video, video_to_gif};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -29,7 +29,7 @@ pub const FLAG: &str = "--gif-host";
 pub const PROGRESS_EVENT: &str = "video-job";
 /// `CREATE_NO_WINDOW`: no console flashes on screen.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// Video files Kadra can read.
+/// Video files Capshot can read.
 pub const VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "wmv", "avi", "mkv"];
 /// Quality of edited videos (0 best – 51 smallest): edits should not lose
 /// visible detail.
@@ -272,7 +272,7 @@ pub fn run_host() -> i32 {
                     fps: *fps,
                     max_height: *height,
                     match_source: quality.is_none(),
-                    sound: kadra_record::SoundEdit {
+                    sound: capshot_record::SoundEdit {
                         volume: *volume,
                         fade_in: *fade_in,
                         fade_out: *fade_out,
@@ -302,7 +302,7 @@ pub fn run_host() -> i32 {
     }
 }
 
-/// Whether `path` looks like a video Kadra can read.
+/// Whether `path` looks like a video Capshot can read.
 pub fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -315,7 +315,7 @@ fn output_for(input: &Path, suffix: &str, extension: &str) -> PathBuf {
     let stem = input
         .file_stem()
         .map_or_else(|| "video".into(), |s| s.to_string_lossy().into_owned());
-    kadra_encode::unique_path(dir, &format!("{stem}{suffix}"), extension)
+    capshot_encode::unique_path(dir, &format!("{stem}{suffix}"), extension)
 }
 
 /// Converts a whole video to GIF with the GIF settings.

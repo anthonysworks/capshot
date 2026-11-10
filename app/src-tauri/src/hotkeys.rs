@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use kadra_core::config::Hotkeys;
+use capshot_core::config::Hotkeys;
 use tauri::plugin::TauriPlugin;
 use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};

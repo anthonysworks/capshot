@@ -19,6 +19,7 @@
     getConfig,
     onJobProgress,
   } from "../lib/api";
+  import Logo from "../lib/Logo.svelte";
   import Icon from "./Icon.svelte";
   import type { IconName } from "./icons";
   import Kbd from "./Kbd.svelte";
@@ -389,13 +390,13 @@
   /** Nothing was saved from this draft and nothing is being saved. */
   const mustAsk = $derived(unsaved && !savedOnce && !jobs.some((j) => !j.error));
 
-  // "Kadra Editor · name · size · length · rate · weight" in the title bar.
+  // "Capshot Editor · name · size · length · rate · weight" in the title bar.
   $effect(() => {
     if (!vw || !duration) return;
     const parts = [name(path), `${vw}×${vh}`, format(duration), `${sourceFps} fps`];
     if (sourceBytes) parts.push(size(sourceBytes));
     getCurrentWindow()
-      .setTitle(`Kadra Editor · ${parts.join(" · ")}`)
+      .setTitle(`Capshot Editor · ${parts.join(" · ")}`)
       .catch(() => {});
   });
 
@@ -1703,6 +1704,8 @@
   {/if}
   <header class="topbar">
     <div class="tb-side">
+      <Logo height={22} />
+      <span class="tb-divider" aria-hidden="true"></span>
       <button type="button" class="icon-btn" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}><Icon name="undo" /></button>
       <button type="button" class="icon-btn" title="Redo (Ctrl+Y)" aria-label="Redo" disabled={!future.length} onclick={redo}><Icon name="redo" /></button>
     </div>
@@ -1823,7 +1826,7 @@
         <div class="sec-head"><h3>Cursor and clicks</h3></div>
         <div class="stack">
         {#if !cursorTrack}
-          <p class="note">Needs a Kadra recording made with “editable cursor” on (Settings › Recording).</p>
+          <p class="note">Needs a Capshot recording made with “editable cursor” on (Settings › Recording).</p>
         {:else}
           {#if cursorEditable}
             <div class="looks" role="radiogroup" aria-label="Pointer">
@@ -2439,6 +2442,12 @@
     padding: 0 16px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+  }
+  .tb-divider {
+    width: 1px;
+    height: 24px;
+    margin: 0 6px;
+    background: var(--border);
   }
   .tb-side {
     display: flex;

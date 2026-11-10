@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use kadra_core::{AfterCapture, RecordingFormat, Rect};
+use capshot_core::{AfterCapture, RecordingFormat, Rect};
 use tauri::{AppHandle, Manager};
 
 use crate::capture::CaptureService;
@@ -63,7 +63,7 @@ pub fn toggle(app: &AppHandle) {
     if app.state::<RecorderState>().is_active() {
         stop(app);
     } else {
-        crate::capture::start(app, kadra_overlay::Purpose::Recording);
+        crate::capture::start(app, capshot_overlay::Purpose::Recording);
     }
 }
 
@@ -99,7 +99,7 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
         if let Err(err) = std::fs::create_dir_all(&dir) {
             tracing::error!("cannot create {}: {err}", dir.display());
         }
-        let stem = kadra_encode::file_stem(kadra_encode::now());
+        let stem = capshot_encode::file_stem(capshot_encode::now());
         let countdown = Duration::from_secs(u64::from(choices.countdown_secs));
         let extension = if gif { "gif" } else { "mp4" };
         // Recordings that open in the editor or the quick actions are drafts
@@ -110,7 +110,7 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
                 AfterCapture::Editor | AfterCapture::Actions
             );
         let output = if gif {
-            kadra_encode::unique_path(&dir, &stem, extension)
+            capshot_encode::unique_path(&dir, &stem, extension)
         } else {
             crate::saving::recording_path(app, &dir, &stem, draft)
         };

@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { editorCopy, editorImageSaveAs, editorRead, editorSave, editorSaveTo, showInFolder } from "../lib/api";
   import { VIVID } from "./colors";
+  import Logo from "../lib/Logo.svelte";
   import Icon from "./Icon.svelte";
   import Kbd from "./Kbd.svelte";
   import type { IconName } from "./icons";
@@ -155,7 +156,7 @@
         const weight = n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
         const name = path.split(/[\\/]/).pop() ?? path;
         getCurrentWindow()
-          .setTitle(`Kadra Editor · ${name} · ${image.width}×${image.height} · ${weight}`)
+          .setTitle(`Capshot Editor · ${name} · ${image.width}×${image.height} · ${weight}`)
           .catch(() => {});
       } catch (e) {
         error = String(e);
@@ -853,6 +854,8 @@
   {/if}
   <header class="topbar">
     <div class="tb-side">
+    <Logo height={22} />
+    <span class="tb-divider" aria-hidden="true"></span>
     <div class="group">
       <button type="button" class="icon" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}
         ><Icon name="undo" /></button
@@ -1108,6 +1111,12 @@
     padding: 0 16px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+  }
+  .tb-divider {
+    width: 1px;
+    height: 24px;
+    margin: 0 6px;
+    background: var(--border);
   }
   .tb-side {
     display: flex;

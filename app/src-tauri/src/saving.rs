@@ -73,7 +73,7 @@ impl Saving {
 /// Where a new recording goes: the drafts folder when it will open in the
 /// editor, named as it will be in `destination`.
 pub fn recording_path(app: &AppHandle, destination: &Path, stem: &str, draft: bool) -> PathBuf {
-    let final_path = kadra_encode::unique_path(destination, stem, "mp4");
+    let final_path = capshot_encode::unique_path(destination, stem, "mp4");
     if !draft {
         return final_path;
     }
@@ -85,7 +85,7 @@ pub fn recording_path(app: &AppHandle, destination: &Path, stem: &str, draft: bo
     let name = final_path
         .file_stem()
         .map_or_else(|| stem.to_owned(), |s| s.to_string_lossy().into_owned());
-    kadra_encode::unique_path(&dir, &name, "mp4")
+    capshot_encode::unique_path(&dir, &name, "mp4")
 }
 
 /// The folder exports of `input` go to: chosen in the editor, else the
@@ -123,7 +123,7 @@ pub fn export_path(app: &AppHandle, input: &Path, extension: &str) -> PathBuf {
     } else {
         format!("{stem} (edited)")
     };
-    kadra_encode::unique_path(&dir, &stem, extension)
+    capshot_encode::unique_path(&dir, &stem, extension)
 }
 
 /// Asks for a destination folder for the exports of `input`.
@@ -297,7 +297,7 @@ fn delete_draft(app: &AppHandle, input: &Path) {
     });
 }
 
-/// Drafts left by a previous session (Kadra quit with an editor open) are
+/// Drafts left by a previous session (Capshot quit with an editor open) are
 /// saved to the recording folder: never lose a recording.
 pub fn recover(app: &AppHandle) {
     let state = app.state::<AppState>();
@@ -319,7 +319,7 @@ pub fn recover(app: &AppHandle) {
     std::thread::spawn(move || {
         let _ = std::fs::create_dir_all(&folder);
         for draft in left {
-            let target = kadra_encode::unique_path(&folder, &stem_of(&draft), "mp4");
+            let target = capshot_encode::unique_path(&folder, &stem_of(&draft), "mp4");
             if move_file(&draft, &target).is_ok() {
                 tracing::info!(path = %target.display(), "recovered a draft");
                 crate::capture::remember(&app, &target, 0, 0);

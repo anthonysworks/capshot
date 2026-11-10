@@ -1,0 +1,461 @@
+//! Floating thumbnail shown after a capture.
+//!
+//! A small GDI-painted popup in the corner of the screen: clicking hands the
+//! saved file to the application (to open it in the editor), dragging drops it into any application, right click dismisses
+//! it. It never takes the keyboard focus and is excluded from captures.
+//!
+//! The same popup confirms a colour copied with the picker: a swatch and its
+//! code.
+
+// Win32 message parameters and structure sizes are packed integers.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+
+use std::ffi::c_void;
+use std::path::{Path, PathBuf};
+
+use capshot_core::{BgraImage, Point, Rect};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_LEFT,
+    DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_SEMIBOLD, FillRect, HGDIOBJ,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetDIBitsToDevice, SetTextColor,
+    TRANSPARENT,
+};
+use windows::Win32::System::Com::IDataObject;
+use windows::Win32::System::Ole::DROPEFFECT_COPY;
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Shell::{
+    BHID_DataObject, IShellItem, SHCreateItemFromParsingName, SHDoDragDrop,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CS_DROPSHADOW, CreateWindowExW, GetSystemMetrics, HWND_TOPMOST, IDC_HAND, KillTimer,
+    LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SM_CXDRAG, SM_CYDRAG, SW_HIDE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+    WDA_EXCLUDEFROMCAPTURE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
+};
+use windows::core::{HSTRING, w};
+
+/// Sent after `TrackMouseEvent(TME_LEAVE)` (defined in the Controls API set).
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// How long the preview stays when the mouse is not over it.
+const VISIBLE_MS: u32 = 6000;
+/// Remaining time once the mouse leaves it.
+const AFTER_HOVER_MS: u32 = 2500;
+/// A colour confirmation only needs a glance.
+const COLOUR_VISIBLE_MS: u32 = 2500;
+const HIDE_TIMER: usize = 1;
+
+const BACKGROUND: COLORREF = COLORREF(0x0011_0d0c); // #0C0D11
+/// Checkerboard behind transparent pixels (freeform captures).
+const CHECKER: [u8; 2] = [0x2b, 0x38];
+
+pub const CLASS_NAME: windows::core::PCWSTR = w!("CapshotCapturePreview");
+
+pub fn register_class(instance: windows::Win32::Foundation::HINSTANCE, wndproc: WNDPROC) -> bool {
+    // SAFETY: the class structure is fully initialised.
+    unsafe {
+        let class = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            style: CS_DROPSHADOW,
+            lpfnWndProc: wndproc,
+            hInstance: instance,
+            hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(),
+            lpszClassName: CLASS_NAME,
+            ..Default::default()
+        };
+        RegisterClassExW(&class) != 0
+    }
+}
+
+pub fn create_window(
+    instance: windows::Win32::Foundation::HINSTANCE,
+) -> windows::core::Result<HWND> {
+    // SAFETY: the class was registered by `register_class`.
+    unsafe {
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            CLASS_NAME,
+            w!("Capshot preview"),
+            WS_POPUP,
+            0,
+            0,
+            8,
+            8,
+            None,
+            None,
+            Some(instance),
+            None,
+        )?;
+        // Square, like the rest of Capshot.
+        let round = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&round).cast::<c_void>(),
+            size_of_val(&round) as u32,
+        );
+        // Never appear in the next screenshot or recording.
+        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        Ok(hwnd)
+    }
+}
+
+/// Flattens transparency over a checkerboard so the thumbnail can be painted
+/// with plain GDI.
+fn flatten(image: &mut BgraImage) {
+    let width = image.width() as usize;
+    for (i, px) in image
+        .as_bytes_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        let (x, y) = (i % width, i / width);
+        let bg = u32::from(CHECKER[(x / 8 + y / 8) % 2]);
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
+            *c = ((u32::from(*c) * a + bg * (255 - a) + 127) / 255) as u8;
+        }
+        px[3] = 255;
+    }
+}
+
+#[derive(Debug)]
+pub struct Preview {
+    hwnd: HWND,
+    thumbnail: Option<BgraImage>,
+    capture_id: u64,
+    file: Option<PathBuf>,
+    hovered: bool,
+    pressed_at: Option<Point>,
+    padding: i32,
+    /// Text shown right of the image (colour confirmation) or below it.
+    caption: Option<Vec<u16>>,
+    caption_below: bool,
+    font_height: i32,
+    /// File clicked, waiting to be handed to the application.
+    clicked: Option<PathBuf>,
+}
+
+fn lparam_point(lparam: LPARAM) -> Point {
+    Point::new(
+        i32::from(lparam.0 as u32 as u16 as i16),
+        i32::from((lparam.0 as u32 >> 16) as u16 as i16),
+    )
+}
+
+impl Preview {
+    pub fn new(hwnd: HWND) -> Self {
+        Self {
+            hwnd,
+            thumbnail: None,
+            capture_id: 0,
+            file: None,
+            hovered: false,
+            pressed_at: None,
+            padding: 6,
+            caption: None,
+            caption_below: false,
+            font_height: 15,
+            clicked: None,
+        }
+    }
+
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
+    /// Shows `image` in the bottom-right corner of `work_area` (desktop
+    /// coordinates), with an optional `label` under it.
+    pub fn show(
+        &mut self,
+        capture_id: u64,
+        image: &BgraImage,
+        work_area: Rect,
+        scale: f32,
+        label: Option<&str>,
+    ) {
+        let px = |v: f32| (v * scale).round() as i32;
+        let mut thumbnail = image.thumbnail(px(300.0) as u32, px(190.0) as u32);
+        flatten(&mut thumbnail);
+        self.padding = px(6.0);
+        // At least wide enough for the label.
+        let width = (thumbnail.width() as i32).max(if label.is_some() { px(180.0) } else { 0 })
+            + 2 * self.padding;
+        let mut height = thumbnail.height() as i32 + 2 * self.padding;
+        self.caption = label.map(|l| l.encode_utf16().collect());
+        self.caption_below = true;
+        if label.is_some() {
+            self.font_height = px(13.0);
+            height += px(22.0);
+        }
+        self.place(
+            capture_id,
+            thumbnail,
+            (width, height),
+            work_area,
+            scale,
+            VISIBLE_MS,
+        );
+    }
+
+    /// Confirms that `hex` (`#RRGGBB`) was copied: a swatch of the colour
+    /// and its code.
+    pub fn show_colour(&mut self, hex: &str, [r, g, b]: [u8; 3], work_area: Rect, scale: f32) {
+        let px = |v: f32| (v * scale).round() as i32;
+        let side = px(28.0) as u32;
+        let mut swatch = BgraImage::new(side, side);
+        for pixel in swatch.as_bytes_mut().as_chunks_mut::<4>().0 {
+            *pixel = [b, g, r, 255];
+        }
+        self.padding = px(8.0);
+        self.font_height = px(15.0);
+        let width = px(190.0);
+        let height = side as i32 + 2 * self.padding;
+        self.caption = Some(format!("{hex}   copied").encode_utf16().collect());
+        self.caption_below = false;
+        self.place(
+            0,
+            swatch,
+            (width, height),
+            work_area,
+            scale,
+            COLOUR_VISIBLE_MS,
+        );
+    }
+
+    fn place(
+        &mut self,
+        capture_id: u64,
+        thumbnail: BgraImage,
+        (width, height): (i32, i32),
+        work_area: Rect,
+        scale: f32,
+        visible_ms: u32,
+    ) {
+        let margin = (16.0 * scale).round() as i32;
+        let x = work_area.right - margin - width;
+        let y = work_area.bottom - margin - height;
+
+        self.thumbnail = Some(thumbnail);
+        self.capture_id = capture_id;
+        self.file = None;
+        self.hovered = false;
+        self.pressed_at = None;
+
+        // SAFETY: our own window, on its thread.
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            // Repaint even if the size did not change.
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.hwnd), None, true);
+            SetTimer(Some(self.hwnd), HIDE_TIMER, visible_ms, None);
+        }
+    }
+
+    /// The file the user clicked, if any.
+    pub fn take_clicked(&mut self) -> Option<PathBuf> {
+        self.clicked.take()
+    }
+
+    /// Associates the saved file with the capture currently shown.
+    pub fn attach_file(&mut self, capture_id: u64, path: PathBuf) {
+        if self.thumbnail.is_some() && capture_id == self.capture_id {
+            self.file = Some(path);
+        }
+    }
+
+    pub fn hide(&mut self) {
+        if self.thumbnail.take().is_none() {
+            return;
+        }
+        self.file = None;
+        self.pressed_at = None;
+        // SAFETY: our own window, on its thread.
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), HIDE_TIMER);
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+    }
+
+    pub fn handle(&mut self, msg: u32, _wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        match msg {
+            WM_PAINT => self.paint(),
+            WM_MOUSEACTIVATE => return Some(LRESULT(MA_NOACTIVATE as isize)),
+            WM_MOUSEMOVE => self.on_move(lparam_point(lparam)),
+            WM_MOUSELEAVE => {
+                self.hovered = false;
+                self.pressed_at = None;
+                // SAFETY: our own window.
+                unsafe { SetTimer(Some(self.hwnd), HIDE_TIMER, AFTER_HOVER_MS, None) };
+            }
+            WM_LBUTTONDOWN => self.pressed_at = Some(lparam_point(lparam)),
+            WM_LBUTTONUP => {
+                if self.pressed_at.take().is_some() {
+                    self.clicked = self.file.clone();
+                    self.hide();
+                }
+            }
+            // Timeout or right click.
+            WM_TIMER | WM_RBUTTONUP => self.hide(),
+            _ => return None,
+        }
+        Some(LRESULT(0))
+    }
+
+    fn on_move(&mut self, p: Point) {
+        if !self.hovered {
+            self.hovered = true;
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            // SAFETY: valid structure for our own window.
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), HIDE_TIMER);
+                let _ = TrackMouseEvent(&mut track);
+            }
+        }
+        let Some(start) = self.pressed_at else {
+            return;
+        };
+        // SAFETY: plain metrics queries.
+        let (dx, dy) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+        if (p.x - start.x).abs() > dx || (p.y - start.y).abs() > dy {
+            self.pressed_at = None;
+            if let Some(file) = self.file.clone() {
+                match drag(self.hwnd, &file) {
+                    Ok(()) => self.hide(),
+                    Err(err) => tracing::warn!("drag and drop failed: {err}"),
+                }
+            }
+        }
+    }
+
+    fn paint(&self) {
+        let mut ps = PAINTSTRUCT::default();
+        // SAFETY: standard paint cycle on our own window; GDI objects are
+        // released before returning.
+        unsafe {
+            let hdc = BeginPaint(self.hwnd, &mut ps);
+            let brush = CreateSolidBrush(BACKGROUND);
+            FillRect(hdc, &ps.rcPaint, brush);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+            if let Some(thumb) = &self.thumbnail {
+                let info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: thumb.width() as i32,
+                        biHeight: -(thumb.height() as i32),
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                SetDIBitsToDevice(
+                    hdc,
+                    self.padding,
+                    self.padding,
+                    thumb.width(),
+                    thumb.height(),
+                    0,
+                    0,
+                    0,
+                    thumb.height(),
+                    thumb.as_bytes().as_ptr().cast(),
+                    &info,
+                    DIB_RGB_COLORS,
+                );
+                if let Some(caption) = &self.caption {
+                    self.paint_caption(hdc, caption, thumb.width() as i32, thumb.height() as i32);
+                }
+            }
+            let _ = EndPaint(self.hwnd, &ps);
+        }
+    }
+}
+
+impl Preview {
+    /// SAFETY: `hdc` must be the paint DC of this window.
+    unsafe fn paint_caption(
+        &self,
+        hdc: windows::Win32::Graphics::Gdi::HDC,
+        caption: &[u16],
+        image_width: i32,
+        image_height: i32,
+    ) {
+        let mut client = windows::Win32::Foundation::RECT::default();
+        // SAFETY: valid DC and out pointer; the font is deselected and
+        // deleted before returning.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd, &mut client);
+            let font = CreateFontW(
+                -self.font_height,
+                0,
+                0,
+                0,
+                FW_SEMIBOLD.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                w!("Segoe UI Variable Text"),
+            );
+            let previous = SelectObject(hdc, HGDIOBJ(font.0));
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+            let mut rect = client;
+            let mut format = DT_LEFT | DT_VCENTER | DT_SINGLELINE;
+            if self.caption_below {
+                rect.top = self.padding + image_height;
+                rect.left = self.padding;
+                format = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
+            } else {
+                rect.left = self.padding * 2 + image_width;
+            }
+            rect.right -= self.padding;
+            let mut text = caption.to_vec();
+            DrawTextW(hdc, &mut text, &mut rect, format);
+            SelectObject(hdc, previous);
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
+    }
+}
+
+/// Starts a shell drag and drop of `file` (with the standard drag image).
+fn drag(hwnd: HWND, file: &Path) -> windows::core::Result<()> {
+    // SAFETY: COM calls on the window's STA thread with live objects.
+    unsafe {
+        let item: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(file.as_os_str()), None)?;
+        let data: IDataObject = item.BindToHandler(None, &BHID_DataObject)?;
+        SHDoDragDrop(Some(hwnd), &data, None, DROPEFFECT_COPY)?;
+    }
+    Ok(())
+}

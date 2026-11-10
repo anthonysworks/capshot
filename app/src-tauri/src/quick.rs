@@ -45,7 +45,7 @@ impl QuickFiles {
 
 /// Where screenshots wait until they are saved.
 pub fn pending_dir() -> PathBuf {
-    std::env::temp_dir().join("Kadra").join("captures")
+    std::env::temp_dir().join("Capshot").join("captures")
 }
 
 /// Opens the quick-actions window for a capture that was just taken.
@@ -78,9 +78,9 @@ pub fn open(app: &AppHandle, path: &Path) {
     );
     let result = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title(if kind == Kind::Video {
-            "Kadra · Recording"
+            "Capshot · Recording"
         } else {
-            "Kadra · Screenshot"
+            "Capshot · Screenshot"
         })
         .inner_size(width, height)
         .position(x, y)
@@ -192,11 +192,11 @@ pub fn save(app: &AppHandle, path: &Path, to: Option<PathBuf>) -> Result<PathBuf
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let stem = path
             .file_stem()
-            .map_or_else(|| "Kadra".into(), |s| s.to_string_lossy().into_owned());
+            .map_or_else(|| "Capshot".into(), |s| s.to_string_lossy().into_owned());
         let extension = path
             .extension()
             .map_or_else(|| "png".into(), |e| e.to_string_lossy().into_owned());
-        kadra_encode::unique_path(&dir, &stem, &extension)
+        capshot_encode::unique_path(&dir, &stem, &extension)
     };
     if video {
         crate::saving::keep_draft(app, path, &target).map_err(|e| e.to_string())?;
@@ -230,7 +230,7 @@ pub fn save(app: &AppHandle, path: &Path, to: Option<PathBuf>) -> Result<PathBuf
 fn image_size(path: &Path) -> (u32, u32) {
     std::fs::read(path)
         .ok()
-        .and_then(|bytes| kadra_encode::decode(&bytes).ok())
+        .and_then(|bytes| capshot_encode::decode(&bytes).ok())
         .map_or((0, 0), |image| (image.width(), image.height()))
 }
 
@@ -263,7 +263,7 @@ pub fn copy(app: &AppHandle, path: &Path) -> Result<(), String> {
         service.copy_files(vec![file]);
     } else {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        service.copy_image(kadra_encode::decode(&bytes).map_err(|e| e.to_string())?);
+        service.copy_image(capshot_encode::decode(&bytes).map_err(|e| e.to_string())?);
     }
     Ok(())
 }
@@ -276,18 +276,18 @@ pub fn done(app: &AppHandle, window: &tauri::Window, path: &Path, label: Option<
         && let Some(label) = label
         && let Some(service) = app.try_state::<crate::capture::CaptureService>()
         && let Ok(bytes) = std::fs::read(path)
-        && let Ok(image) = kadra_encode::decode(&bytes)
+        && let Ok(image) = capshot_encode::decode(&bytes)
     {
         mark(app, path, |entry| entry.kept = true);
         // The screen the window is on.
         let region = match (window.outer_position(), window.outer_size()) {
-            (Ok(p), Ok(s)) => kadra_core::Rect::from_size(
+            (Ok(p), Ok(s)) => capshot_core::Rect::from_size(
                 p.x,
                 p.y,
                 i32::try_from(s.width).unwrap_or(1),
                 i32::try_from(s.height).unwrap_or(1),
             ),
-            _ => kadra_core::Rect::from_size(0, 0, 1, 1),
+            _ => capshot_core::Rect::from_size(0, 0, 1, 1),
         };
         service.show_file_preview(image, path.to_path_buf(), region, Some(label));
     }
@@ -304,7 +304,7 @@ pub fn pin(app: &AppHandle, path: &Path, scale: f64) -> Result<(), String> {
     // A pinned file outlives the capture window: keep a copy of its own.
     let dir = pending_dir().join("pinned");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let pinned = kadra_encode::unique_path(&dir, "pin", "png");
+    let pinned = capshot_encode::unique_path(&dir, "pin", "png");
     std::fs::copy(path, &pinned).map_err(|e| e.to_string())?;
     let pinned = crate::editor::normalize(&pinned);
     app.state::<EditorFiles>().allow(&pinned);
@@ -318,7 +318,7 @@ pub fn pin(app: &AppHandle, path: &Path, scale: f64) -> Result<(), String> {
         crate::editor::encode_component(&pinned.to_string_lossy())
     );
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title("Kadra · Pinned")
+        .title("Capshot · Pinned")
         .inner_size(w * fit, h * fit)
         .decorations(false)
         .always_on_top(true)
@@ -339,11 +339,11 @@ pub fn pin(app: &AppHandle, path: &Path, scale: f64) -> Result<(), String> {
 /// languages of the user's profile.
 pub fn read_text(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    text_in(kadra_encode::decode(&bytes).map_err(|e| e.to_string())?)
+    text_in(capshot_encode::decode(&bytes).map_err(|e| e.to_string())?)
 }
 
 /// Text in a picture (Windows OCR).
-pub fn text_in(image: kadra_core::BgraImage) -> Result<String, String> {
+pub fn text_in(image: capshot_core::BgraImage) -> Result<String, String> {
     // WinRT needs an initialised thread; this one is ours alone.
     std::thread::spawn(move || ocr::recognize(&image))
         .join()
@@ -353,12 +353,12 @@ pub fn text_in(image: kadra_core::BgraImage) -> Result<String, String> {
 /// QR codes (and other 2D codes rqrr reads) in a screenshot.
 pub fn read_codes(path: &Path) -> Result<Vec<String>, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let image = kadra_encode::decode(&bytes).map_err(|e| e.to_string())?;
+    let image = capshot_encode::decode(&bytes).map_err(|e| e.to_string())?;
     Ok(codes_in(&image))
 }
 
 /// Contents of the QR codes in a picture.
-pub fn codes_in(image: &kadra_core::BgraImage) -> Vec<String> {
+pub fn codes_in(image: &capshot_core::BgraImage) -> Vec<String> {
     let (width, height) = (image.width() as usize, image.height() as usize);
     let data = image.as_bytes();
     let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
@@ -380,7 +380,7 @@ pub fn codes_in(image: &kadra_core::BgraImage) -> Vec<String> {
 }
 
 mod ocr {
-    use kadra_core::BgraImage;
+    use capshot_core::BgraImage;
     use windows::Globalization::Language;
     use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
     use windows::Media::Ocr::OcrEngine;

@@ -1,5 +1,5 @@
-//! Kadra desktop application: tray icon, global hotkeys and the windows built
-//! with Tauri. Capture and encoding live in the `kadra-*` crates.
+//! Capshot desktop application: tray icon, global hotkeys and the windows built
+//! with Tauri. Capture and encoding live in the `capshot-*` crates.
 
 mod actions;
 mod capture;
@@ -16,7 +16,7 @@ mod state;
 mod tray;
 mod windows;
 
-use kadra_core::{Config, Paths, logging};
+use capshot_core::{Config, Paths, logging};
 use tauri::{Manager, RunEvent};
 
 use crate::actions::Action;
@@ -30,7 +30,7 @@ pub fn run() {
     let Some(paths) = Paths::resolve() else {
         // Without a user profile there is nowhere to store settings; this
         // only happens in broken service/sandbox environments.
-        eprintln!("kadra: cannot locate the user profile directories");
+        eprintln!("capshot: cannot locate the user profile directories");
         std::process::exit(1);
     };
 
@@ -54,14 +54,14 @@ pub fn run() {
     }
 
     let mut log_guard = Some(logging::init(paths.log_dir()));
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Kadra");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Capshot");
 
     let config = Config::load_or_init(&paths.config_file()).unwrap_or_else(|err| {
         tracing::error!("{err}; using default settings for this session");
         Config::default()
     });
 
-    // A second launch such as `kadra.exe --capture` was started by the user
+    // A second launch such as `capshot.exe --capture` was started by the user
     // and may take the foreground; hand that right to the running instance
     // so its overlay gets keyboard focus.
     let args: Vec<String> = std::env::args().collect();
@@ -77,7 +77,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         // Must be registered first so a second launch exits before doing any work.
-        // `kadra.exe --capture` triggers a capture in the running instance,
+        // `capshot.exe --capture` triggers a capture in the running instance,
         // any other launch opens the settings.
         .plugin(tauri_plugin_single_instance::init(
             |app, args, cwd| match Action::from_args(&args, std::path::Path::new(&cwd)) {
@@ -155,7 +155,7 @@ pub fn run() {
     };
 
     app.run(move |_app, event| match event {
-        // Kadra lives in the tray: closing the last window must not quit.
+        // Capshot lives in the tray: closing the last window must not quit.
         // An explicit `exit` (tray "Quit") carries an exit code and goes through.
         RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
         RunEvent::Exit => {

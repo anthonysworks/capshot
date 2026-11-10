@@ -1,16 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4f7cff"/>
-      <stop offset="1" stop-color="#7b4dff"/>
+    <linearGradient id="body" x1="0.3" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#00b8ff"/>
+      <stop offset="0.22" stop-color="#05a6fc"/>
+      <stop offset="0.58" stop-color="#0060f2"/>
+      <stop offset="1" stop-color="#1b3af2"/>
     </linearGradient>
+    <radialGradient id="rim" cx="0.72" cy="0.8" r="0.5">
+      <stop offset="0.55" stop-color="#4466ff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#4f6dff" stop-opacity="0.5"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="0.26" cy="0.22" r="0.28">
+      <stop offset="0" stop-color="#a6eaff" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#9ee4ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="streak" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#fff" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="ball"><circle cx="256" cy="256" r="250"/></clipPath>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <g fill="none" stroke="#fff" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M128 200v-72h72"/>
-    <path d="M312 128h72v72"/>
-    <path d="M384 312v72h-72"/>
-    <path d="M200 384h-72v-72"/>
+  <g clip-path="url(#ball)">
+    <circle cx="256" cy="256" r="250" fill="url(#body)"/>
+    <circle cx="256" cy="256" r="250" fill="url(#rim)"/>
+    <circle cx="256" cy="256" r="250" fill="url(#glow)"/>
+    <path d="M60 200 C 140 130, 250 100, 330 92" fill="none" stroke="url(#streak)" stroke-width="7" stroke-linecap="round"/>
   </g>
-  <circle cx="256" cy="256" r="44" fill="#fff"/>
 </svg>
