@@ -124,9 +124,10 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
             system_audio: choices.system_audio && !gif,
             microphone: choices.microphone && !gif,
             output,
-            // Everything is prepared during the countdown, so recording
-            // starts exactly when it reaches zero.
-            start_paused: !countdown.is_zero(),
+            // Everything is prepared first (during the countdown), then
+            // recording starts once the start chime has played, so the
+            // video never catches it.
+            start_paused: true,
             gif: gif.then(|| config.gif.clone()),
             clean_output: None,
             cursor_track: None,
@@ -190,14 +191,6 @@ pub const CONFIG_EVENT: &str = "config-changed";
 /// Recorder start-up, countdown and hand-over to the recording phase.
 fn begin(app: &AppHandle, options: &HostOptions, countdown: Duration) {
     let started = Instant::now();
-    // The chime plays while the recorder starts or the countdown ends, so
-    // that the recording itself does not catch it.
-    let chime_at = countdown.saturating_sub(Duration::from_millis(450));
-    let mut chimed = false;
-    if chime_at.is_zero() {
-        crate::sounds::recording_starts();
-        chimed = true;
-    }
     let host = Host::start(options);
     let state = app.state::<RecorderState>();
 
@@ -217,11 +210,15 @@ fn begin(app: &AppHandle, options: &HostOptions, countdown: Duration) {
     // Wait for the end of the countdown, unless the user cancels.
     let cancelled = || matches!(*state.phase(), Phase::Starting { cancelled: true });
     while started.elapsed() < countdown && !cancelled() {
-        if !chimed && started.elapsed() >= chime_at {
-            crate::sounds::recording_starts();
-            chimed = true;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The indicator turns to recording with the chime; the recorder (ready
+    // and paused) resumes as soon as the chime is over.
+    if !cancelled() {
+        if let Some(service) = service(app) {
+            service.recording_started();
         }
-        std::thread::sleep(Duration::from_millis(20));
+        crate::sounds::recording_starts();
     }
 
     let mut phase = state.phase();
@@ -234,12 +231,7 @@ fn begin(app: &AppHandle, options: &HostOptions, countdown: Duration) {
         tray::refresh(app);
         return;
     }
-    if options.start_paused {
-        host.resume();
-    }
-    if let Some(service) = service(app) {
-        service.recording_started();
-    }
+    host.resume();
     tracing::info!(region = ?host.region(), "recording");
     *phase = Phase::Recording {
         host,

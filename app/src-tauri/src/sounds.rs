@@ -2,21 +2,31 @@
 
 use std::sync::OnceLock;
 
-use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+use std::time::Duration;
+
+use windows::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT, SND_SYNC};
 use windows::core::PCWSTR;
 
-/// A soft, round two-note chime: the recording starts.
+/// After the chime returns, what is still buffered in the audio device.
+const DRAIN: Duration = Duration::from_millis(120);
+
+/// A soft, round two-note chime: the recording starts. Returns once it has
+/// been heard, so that the recording can begin right after it without
+/// catching it.
 pub fn recording_starts() {
     static CHIME: OnceLock<Vec<u8>> = OnceLock::new();
     let wav = CHIME.get_or_init(|| wav(&chime(48_000), 48_000));
-    // SAFETY: the WAV data is static, so it outlives the asynchronous
-    // playback; SND_MEMORY makes the "name" a pointer to it.
-    unsafe {
-        let _ = PlaySoundW(
+    // SAFETY: the WAV data is static and the playback synchronous;
+    // SND_MEMORY makes the "name" a pointer to it.
+    let played = unsafe {
+        PlaySoundW(
             PCWSTR(wav.as_ptr().cast()),
             None,
-            SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
-        );
+            SND_MEMORY | SND_SYNC | SND_NODEFAULT,
+        )
+    };
+    if played.as_bool() {
+        std::thread::sleep(DRAIN);
     }
 }
 
@@ -28,7 +38,7 @@ pub fn recording_starts() {
 )]
 fn chime(rate: u32) -> Vec<i16> {
     let rate_f = rate as f32;
-    let length = (rate_f * 0.42) as usize;
+    let length = (rate_f * 0.3) as usize;
     let note = |t: f32, start: f32, hz: f32| {
         let t = t - start;
         if t < 0.0 {
@@ -36,12 +46,12 @@ fn chime(rate: u32) -> Vec<i16> {
         }
         let attack = (t / 0.012).min(1.0);
         let phase = 2.0 * std::f32::consts::PI * hz * t;
-        attack * (-t * 9.0).exp() * (phase.sin() + 0.12 * (2.0 * phase).sin())
+        attack * (-t * 14.0).exp() * (phase.sin() + 0.12 * (2.0 * phase).sin())
     };
     (0..length)
         .map(|i| {
             let t = i as f32 / rate_f;
-            let v = 0.55 * note(t, 0.0, 783.99) + 0.5 * note(t, 0.11, 1046.5);
+            let v = 0.55 * note(t, 0.0, 783.99) + 0.5 * note(t, 0.08, 1046.5);
             (v * 0.22 * 32767.0).clamp(-32768.0, 32767.0) as i16
         })
         .collect()
