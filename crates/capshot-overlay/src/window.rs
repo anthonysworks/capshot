@@ -97,7 +97,8 @@ impl Engine {
     /// a GPU driver costs, for the same end-to-end latency.
     /// `CAPSHOT_GPU=hardware` uses the graphics card instead.
     fn new() -> windows::core::Result<Self> {
-        let kind = if std::env::var("CAPSHOT_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("hardware")) {
+        let kind = if std::env::var("CAPSHOT_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("hardware"))
+        {
             GpuKind::Hardware
         } else {
             GpuKind::Software

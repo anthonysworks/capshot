@@ -146,7 +146,11 @@ impl Source {
     }
 
     /// Copies `area` of the latest frame to system memory.
-    pub fn read_area(&self, gpu: &Gpu, area: capshot_core::Rect) -> Result<capshot_core::BgraImage> {
+    pub fn read_area(
+        &self,
+        gpu: &Gpu,
+        area: capshot_core::Rect,
+    ) -> Result<capshot_core::BgraImage> {
         AreaReader::new(gpu, area)?.read(self, gpu)
     }
 

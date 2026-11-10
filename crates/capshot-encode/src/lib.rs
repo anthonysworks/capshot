@@ -4,12 +4,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use capshot_core::{BgraImage, ImageFormat};
 use chrono::{DateTime, Local};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageEncoder};
-use capshot_core::{BgraImage, ImageFormat};
 
 /// JPEG quality used for screenshots: visually lossless for UI content.
 const JPEG_QUALITY: u8 = 90;
@@ -146,8 +146,8 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use capshot_core::Point;
+    use chrono::TimeZone;
 
     fn sample() -> BgraImage {
         // Blue, green, red, transparent.
@@ -198,7 +198,10 @@ mod tests {
         let a = save(&sample(), ImageFormat::Png, dir.path(), time).unwrap();
         let b = save(&sample(), ImageFormat::Png, dir.path(), time).unwrap();
         assert_eq!(a.file_name().unwrap(), "Capshot 2026-11-11 09-05-03.png");
-        assert_eq!(b.file_name().unwrap(), "Capshot 2026-11-11 09-05-03 (2).png");
+        assert_eq!(
+            b.file_name().unwrap(),
+            "Capshot 2026-11-11 09-05-03 (2).png"
+        );
     }
 }
 

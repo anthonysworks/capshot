@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use imagequant::RGBA;
 use capshot_core::{BgraImage, Rect};
+use imagequant::RGBA;
 
 /// GIF delays are in hundredths of a second; browsers treat anything
 /// shorter than 2 as 10, so 50 FPS is the useful maximum.
@@ -548,7 +548,10 @@ mod tests {
     }
 
     fn temp(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("capshot-gif-test-{}-{name}.gif", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "capshot-gif-test-{}-{name}.gif",
+            std::process::id()
+        ))
     }
 
     #[test]

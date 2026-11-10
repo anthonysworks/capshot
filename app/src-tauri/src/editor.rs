@@ -167,7 +167,10 @@ pub fn edit_files(paths: &capshot_core::Paths, video: &Path) -> (PathBuf, PathBu
 }
 
 /// Editing material that exists for `video`.
-pub fn existing_edit_files(paths: &capshot_core::Paths, video: &Path) -> Option<(PathBuf, PathBuf)> {
+pub fn existing_edit_files(
+    paths: &capshot_core::Paths,
+    video: &Path,
+) -> Option<(PathBuf, PathBuf)> {
     let (clean, track) = edit_files(paths, video);
     (clean.is_file() && track.is_file()).then_some((clean, track))
 }
