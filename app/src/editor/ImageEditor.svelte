@@ -7,6 +7,7 @@
   import Icon from "./Icon.svelte";
   import Kbd from "./Kbd.svelte";
   import type { IconName } from "./icons";
+  import { DEVICE_FRAMES, type DeviceFrame, frameInsets, hasLook, hasTitle, renderFrame } from "./frames";
   import {
     BACKGROUNDS,
     BOXED,
@@ -112,6 +113,10 @@
   let shapes = $state<Shape[]>([]);
   let crop = $state<Rect | null>(null);
   let frame = $state<Frame>({ enabled: false, background: 0, padding: 64, radius: 12, shadow: true });
+  /** A device or window around the picture (part of the frame). */
+  let device = $state<DeviceFrame>("none");
+  let deviceTitle = $state("");
+  let deviceDark = $state(false);
   let draft = $state<Shape | null>(null);
   let cropDraft = $state<Rect | null>(null);
   let selected = $state<number | null>(null);
@@ -189,20 +194,49 @@
     else view = { ...view, dpr };
   }
 
+  /** File name without its extension (the default window title). */
+  const baseName = $derived((path.split(/[\\/]/).pop() ?? "").replace(/\.[^.]+$/, ""));
+
+  /** Room the device takes around the picture, in image pixels. */
+  function deviceInsets(area: Rect) {
+    if (!frame.enabled || device === "none") return { l: 0, t: 0, r: 0, b: 0 };
+    const i = frameInsets(device, area.w, area.h);
+    return { l: Math.round(i.l), t: Math.round(i.t), r: Math.round(i.r), b: Math.round(i.b) };
+  }
+
+  /** The whole result (background, device, picture) in image pixels. */
+  function resultBox(area: Rect): Rect {
+    const pad = frame.enabled ? frame.padding : 0;
+    const i = deviceInsets(area);
+    return { x: area.x - pad - i.l, y: area.y - pad - i.t, w: area.w + 2 * pad + i.l + i.r, h: area.h + 2 * pad + i.t + i.b };
+  }
+
+  /** The background and device under the picture, and what goes over it
+   * (sized like `resultBox`). */
+  const deviceArt = $derived.by(() => {
+    if (!image || !frame.enabled || device === "none") return null;
+    const area = crop ?? { x: 0, y: 0, w: image.width, h: image.height };
+    const box = resultBox(area);
+    const screen = { x: area.x - box.x, y: area.y - box.y, w: area.w, h: area.h };
+    const title = deviceTitle.trim() || baseName;
+    const index = frame.background;
+    return renderFrame({ w: box.w, h: box.h }, screen, { kind: device, title, dark: deviceDark }, frame.shadow ? 1 : 0, (ctx) =>
+      paintBackground(ctx, { x: 0, y: 0, w: box.w, h: box.h }, index),
+    );
+  });
+
   /** Fits the whole result in the window (never enlarging past 100 %). */
   function fit() {
     if (!image || !canvas) return;
     const dpr = window.devicePixelRatio || 1;
     const margin = 24 * dpr;
     const area = crop ?? { x: 0, y: 0, w: image.width, h: image.height };
-    const pad = frame.enabled ? frame.padding : 0;
-    const w = area.w + 2 * pad;
-    const h = area.h + 2 * pad;
-    const s = Math.min((canvas.width - margin * 2) / w, (canvas.height - margin * 2) / h, 1);
+    const box = resultBox(area);
+    const s = Math.min((canvas.width - margin * 2) / box.w, (canvas.height - margin * 2) / box.h, 1);
     view = {
       s,
-      ox: (canvas.width - w * s) / 2 + (pad - area.x) * s,
-      oy: (canvas.height - h * s) / 2 + (pad - area.y) * s,
+      ox: (canvas.width - box.w * s) / 2 - box.x * s,
+      oy: (canvas.height - box.h * s) / 2 - box.y * s,
       dpr,
     };
     fitMode = true;
@@ -239,12 +273,14 @@
     void $state.snapshot(crop);
     void frame.enabled;
     void frame.padding;
+    void device;
     if (image && fitMode) fit();
   });
 
   // Redraw whenever anything visible changes.
   $effect(() => {
     const state = $state.snapshot({ shapes, crop, draft, cropDraft, selected, view, editing, frame, tool });
+    void deviceArt;
     if (!image || !canvas) return;
     draw(state.shapes as Shape[], state.draft as Shape | null);
   });
@@ -262,7 +298,18 @@
     const cropping = tool === "crop";
     const img = image;
 
-    if (frame.enabled && !cropping) {
+    const art = deviceArt;
+    if (art && !cropping) {
+      const box = resultBox(area);
+      ctx.drawImage(art.under, box.x, box.y);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(area.x, area.y, area.w, area.h);
+      ctx.clip();
+      render(ctx, img, shown, scratch);
+      ctx.restore();
+      ctx.drawImage(art.over, box.x, box.y);
+    } else if (frame.enabled && !cropping) {
       const p = frame.padding;
       paintBackground(ctx, { x: area.x - p, y: area.y - p, w: area.w + 2 * p, h: area.h + 2 * p }, frame.background);
       paintCard(ctx, () => render(ctx, img, shown, scratch), area, frame);
@@ -656,7 +703,18 @@
     render(cctx, img, $state.snapshot(shapes) as Shape[], scratch);
 
     let out = content;
-    if (frame.enabled) {
+    const art = deviceArt;
+    if (art) {
+      const box = resultBox(area);
+      out = document.createElement("canvas");
+      out.width = box.w;
+      out.height = box.h;
+      const ctx = out.getContext("2d");
+      if (!ctx) throw new Error("no canvas");
+      ctx.drawImage(art.under, 0, 0);
+      ctx.drawImage(content, area.x - box.x, area.y - box.y);
+      ctx.drawImage(art.over, 0, 0);
+    } else if (frame.enabled) {
       const p = frame.padding;
       out = document.createElement("canvas");
       out.width = area.w + 2 * p;
@@ -972,6 +1030,34 @@
               ></button>
             {/each}
           </div>
+          <h3>Device</h3>
+          <div class="devices" role="radiogroup" aria-label="Device">
+            {#each DEVICE_FRAMES as d (d.value)}
+              {@const active = (frame.enabled ? device : "none") === d.value}
+              <button
+                type="button"
+                role="radio"
+                class="chip"
+                class:active
+                aria-checked={active}
+                onclick={() => {
+                  device = d.value;
+                  if (d.value !== "none" && !frame.enabled) setFrame({ enabled: true });
+                }}>{d.label}</button
+              >
+            {/each}
+          </div>
+          {#if frame.enabled && hasTitle(device)}
+            <label class="field stacked"
+              >Window title <input type="text" class="text-field" bind:value={deviceTitle} placeholder={baseName} /></label
+            >
+          {/if}
+          {#if frame.enabled && hasLook(device)}
+            <div class="devices" role="radiogroup" aria-label="Window look">
+              <button type="button" role="radio" class="chip" class:active={!deviceDark} aria-checked={!deviceDark} onclick={() => (deviceDark = false)}>Light</button>
+              <button type="button" role="radio" class="chip" class:active={deviceDark} aria-checked={deviceDark} onclick={() => (deviceDark = true)}>Dark</button>
+            </div>
+          {/if}
           <label class="field"
             >Margin <input
               type="range"
@@ -981,11 +1067,12 @@
               onchange={(e) => setFrame({ padding: Number(e.currentTarget.value), enabled: true })}
             /></label
           >
-          <label class="field"
+          <label class="field" class:off={device !== "none"}
             >Corners <input
               type="range"
               min="0"
               max="40"
+              disabled={device !== "none"}
               value={frame.radius}
               onchange={(e) => setFrame({ radius: Number(e.currentTarget.value), enabled: true })}
             /></label
@@ -1357,6 +1444,40 @@
   }
   .field input {
     flex: 1;
+  }
+  .field.stacked {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .field.off {
+    opacity: 0.45;
+  }
+  .devices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0 4px;
+  }
+  .devices .chip {
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 9px;
+    font-size: 12.5px;
+  }
+  .text-field {
+    height: 34px;
+    padding: 0 10px;
+    border: none;
+    border-radius: 9px;
+    background: var(--control);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+  }
+  .text-field:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .zoom .chip {
     min-width: 60px;

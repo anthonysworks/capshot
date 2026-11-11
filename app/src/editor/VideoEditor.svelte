@@ -26,6 +26,7 @@
   import Kbd from "./Kbd.svelte";
   import Notches from "../lib/Notches.svelte";
   import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, SMOOTHING, cursorAt, drawCursor, loadShapes, smoothTrack } from "./cursors";
+  import { DEVICE_FRAMES, type DeviceFrame, frameLayout, hasLook, hasTitle, renderFrame } from "./frames";
   import { CAMERA_STIFFNESS, ZOOM_LENGTH, ZOOM_SCALES, autoZooms, zoomView } from "./zoom";
   import { VIVID } from "./colors";
   import {
@@ -209,6 +210,10 @@
    * video on its background. */
   let radius = $state(0.04);
   let shadow = $state(0.5);
+  /** A device or window drawn around the video, on its background. */
+  let deviceFrame = $state<DeviceFrame>("none");
+  let frameTitle = $state("");
+  let frameDark = $state(false);
   let cursorVisible = $state(true);
   let cursorScale = $state(1);
   let cursorStyle = $state<CursorStyle>("original");
@@ -289,14 +294,30 @@
    * a shadow), in the chosen format or its own proportions. */
   const framed = $derived(fit === "fit");
   const canvasRatio = $derived<[number, number]>(ratio ?? [(crop ?? full).w, (crop ?? full).h]);
+  const device = $derived(framed && deviceFrame !== "none" ? deviceFrame : null);
+  /** The exported frame on its background, with its device if any. */
+  const framedLayout = $derived.by<Layout | null>(() => {
+    if (!framed || !vw) return null;
+    const c = crop ?? full;
+    if (!device) return fitLayout(c, canvasRatio, margin);
+    const f = frameLayout(c, ratio, margin, device);
+    return { out: f.out, crop: c, area: f.screen, background: true };
+  });
   /** What the export looks like (while cropping: the whole frame). */
-  const layout = $derived<Layout>(
-    cropping || !vw
-      ? plainLayout(full)
-      : framed
-        ? fitLayout(crop ?? full, canvasRatio, margin)
-        : plainLayout(crop ?? full),
-  );
+  const layout = $derived<Layout>(cropping || !vw ? plainLayout(full) : (framedLayout ?? plainLayout(crop ?? full)));
+  /** The background and device under the video, and what goes over it. */
+  const frameArt = $derived.by(() => {
+    if (!device || cropping || !framedLayout) return null;
+    const { out, area } = framedLayout;
+    const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
+    const title = frameTitle.trim() || baseName(path);
+    return renderFrame(out, area, { kind: device, title, dark: frameDark }, shadow, (ctx) => {
+      const g = ctx.createLinearGradient(0, 0, out.w, out.h);
+      stops.forEach((stop, i) => g.addColorStop(i / Math.max(1, stops.length - 1), stop));
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, out.w, out.h);
+    });
+  });
   /** CSS pixels per output pixel, and per source pixel. */
   const k = $derived(
     Math.max(
@@ -551,7 +572,10 @@
     const { out, crop: c, area } = layout;
     ctx.setTransform(dpr * k, 0, 0, dpr * k, 0, 0);
     ctx.clearRect(0, 0, out.w, out.h);
-    if (layout.background) {
+    const art = frameArt;
+    if (art) {
+      ctx.drawImage(art.under, 0, 0, out.w, out.h);
+    } else if (layout.background) {
       const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
       const gradient = ctx.createLinearGradient(0, 0, out.w, out.h);
       stops.forEach((stop, i) => gradient.addColorStop(i / Math.max(1, stops.length - 1), stop));
@@ -559,8 +583,8 @@
       ctx.fillRect(0, 0, out.w, out.h);
     }
     // On a background: rounded corners and a soft shadow, as in the export.
-    const corner = layout.background ? Math.max(0, Math.min(0.25, radius)) * Math.min(area.w, area.h) : 0;
-    if (layout.background && shadow > 0) {
+    const corner = layout.background && !art ? Math.max(0, Math.min(0.25, radius)) * Math.min(area.w, area.h) : 0;
+    if (layout.background && !art && shadow > 0) {
       const short = Math.min(area.w, area.h);
       const blur = Math.max(6, short * 0.08);
       ctx.save();
@@ -656,6 +680,8 @@
       for (const hp of shapeHandles(ctx, selectedItem.shape)) handleDot(ctx, hp, px);
     }
     ctx.restore();
+    // The device over the video's edges (round screen corners, camera).
+    if (art) ctx.drawImage(art.over, 0, 0, out.w, out.h);
 
     // Crop frame: the rest dimmed, thirds, corner brackets.
     if (cropping && cropDraft) {
@@ -1511,7 +1537,15 @@
             padding: margin,
             radius,
             shadow,
-            backdrop: null,
+            backdrop:
+              frameArt && framedLayout
+                ? {
+                    png: frameArt.under.toDataURL("image/png"),
+                    area: [framedLayout.area.x, framedLayout.area.y, framedLayout.area.w, framedLayout.area.h],
+                    radius: 0,
+                    front: frameArt.over.toDataURL("image/png"),
+                  }
+                : null,
           }
         : null,
       pixelate: overlays
@@ -1627,12 +1661,12 @@
   /** Size of the exported frame at full resolution. */
   const exportBase = $derived.by(() => {
     if (!vw) return { w: 0, h: 0 };
-    const fitted = framed ? fitLayout(crop ?? full, canvasRatio, margin).out : null;
+    const fitted = framedLayout?.out ?? null;
     return { w: Math.round(fitted?.w ?? crop?.w ?? vw) & ~1, h: Math.round(fitted?.h ?? crop?.h ?? vh) & ~1 };
   });
   const exportSize = $derived.by(() => {
     if (!vw) return { w: 0, h: 0 };
-    const fitted = framed ? fitLayout(crop ?? full, canvasRatio, margin).out : null;
+    const fitted = framedLayout?.out ?? null;
     let w = fitted?.w ?? crop?.w ?? vw;
     let h = fitted?.h ?? crop?.h ?? vh;
     if (exportKind === "mp4" && height && height < h) {
@@ -1784,6 +1818,8 @@
   const size = (bytes: number) =>
     bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
   const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
+  /** File name without its extension. */
+  const baseName = (p: string) => name(p).replace(/\.[^.]+$/, "");
   const stageCursor = $derived(
     cropping || pickingFocus
       ? "crosshair"
@@ -1799,7 +1835,7 @@
   );
   const outputSize = $derived.by(() => {
     if (!vw) return "";
-    const fitted = framed ? fitLayout(crop ?? full, canvasRatio, margin).out : null;
+    const fitted = framedLayout?.out ?? null;
     const w = fitted?.w ?? crop?.w ?? vw;
     const h = fitted?.h ?? crop?.h ?? vh;
     return `${Math.round(w) & ~1}×${Math.round(h) & ~1}`;
@@ -1927,6 +1963,40 @@
           {/each}
         </div>
         <div class="sec-head">
+          <h3>Device</h3>
+          <button type="button" class="link" disabled={deviceFrame === "none"} onclick={() => (deviceFrame = "none")}>Reset</button>
+        </div>
+        <div class="devices" role="radiogroup" aria-label="Device">
+          {#each DEVICE_FRAMES as d (d.value)}
+            {@const active = (framed ? deviceFrame : "none") === d.value}
+            <button
+              type="button"
+              role="radio"
+              class="device"
+              class:active
+              aria-checked={active}
+              onclick={() => {
+                deviceFrame = d.value;
+                if (d.value !== "none" && !framed) chooseBackground(background);
+              }}
+            >
+              <span class="device-art {d.value}" aria-hidden="true"></span>
+              {d.label}
+            </button>
+          {/each}
+        </div>
+        {#if device && hasTitle(device)}
+          <label class="field stacked"
+            ><span>Window title</span><input type="text" class="text-field" bind:value={frameTitle} placeholder={baseName(path)} /></label
+          >
+        {/if}
+        {#if device && hasLook(device)}
+          <div class="segmented" role="radiogroup" aria-label="Window look">
+            <button type="button" role="radio" aria-checked={!frameDark} class:active={!frameDark} onclick={() => (frameDark = false)}>Light</button>
+            <button type="button" role="radio" aria-checked={frameDark} class:active={frameDark} onclick={() => (frameDark = true)}>Dark</button>
+          </div>
+        {/if}
+        <div class="sec-head">
           <h3>Frame</h3>
           <button
             type="button"
@@ -1942,8 +2012,8 @@
             >{Math.round(shadow * 100)}%</b
           ></label
         >
-        <label class="range-pill" class:off={!framed} style="--v:{(radius / 0.25) * 100}%"
-          ><span>Radius</span><input type="range" min="0" max="0.25" step="0.005" bind:value={radius} disabled={!framed} /><b
+        <label class="range-pill" class:off={!framed || !!device} style="--v:{(radius / 0.25) * 100}%"
+          ><span>Radius</span><input type="range" min="0" max="0.25" step="0.005" bind:value={radius} disabled={!framed || !!device} /><b
             >{radiusPx} px</b
           ></label
         >
@@ -2952,6 +3022,95 @@
     border: 1.5px solid currentColor;
     border-radius: 3px;
     opacity: 0.85;
+  }
+  .devices {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .device {
+    flex-direction: column;
+    justify-content: center;
+    gap: 7px;
+    height: 70px;
+    padding: 6px 4px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  /* Little drawings of each device, in the text colour. */
+  .device-art {
+    position: relative;
+    display: block;
+    width: 30px;
+    height: 20px;
+    border: 1.5px solid currentColor;
+    border-radius: 4px;
+    opacity: 0.85;
+  }
+  .device-art.none {
+    border-style: dashed;
+  }
+  .device-art.macos,
+  .device-art.windows {
+    border-top-width: 5px;
+  }
+  .device-art.macos::before {
+    content: "";
+    position: absolute;
+    top: -4px;
+    left: 2px;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: #ff5f57;
+    box-shadow:
+      4px 0 #febc2e,
+      8px 0 #28c840;
+  }
+  .device-art.windows::before {
+    content: "";
+    position: absolute;
+    top: -4.5px;
+    right: 2px;
+    width: 8px;
+    height: 2px;
+    border-top: 1px solid var(--surface);
+  }
+  .device-art.macbook {
+    width: 24px;
+    height: 16px;
+    border-width: 2.5px 2px 3px;
+    border-radius: 3px 3px 0 0;
+  }
+  .device-art.macbook::after {
+    content: "";
+    position: absolute;
+    left: -7px;
+    right: -7px;
+    bottom: -6px;
+    height: 3px;
+    border-radius: 0 0 3px 3px;
+    background: currentColor;
+  }
+  .device-art.iphone {
+    width: 13px;
+    height: 24px;
+    border-width: 2.5px;
+    border-radius: 5px;
+  }
+  .text-field {
+    height: 36px;
+    padding: 0 12px;
+    border: none;
+    border-radius: 10px;
+    background: var(--control);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+  }
+  .text-field:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
   .pair {
     display: flex;
