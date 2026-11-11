@@ -33,8 +33,8 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CLEARTYPE_QUALITY,
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER,
     DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FONT_CHARSET,
-    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FW_BOLD, FW_SEMIBOLD, GdiFlush, HDC, HGDIOBJ,
-    InvalidateRect, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, GdiFlush, HDC, HGDIOBJ, InvalidateRect,
+    PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE,
@@ -587,7 +587,7 @@ impl Indicator {
         // Text goes on last, with GDI, over the finished picture.
         canvas.flush();
         if let Some((label, x, color, big)) = text {
-            let size = if big { 17.0 } else { 14.0 };
+            let size = if big { 15.0 } else { 14.0 };
             canvas.text_at(
                 &label,
                 Rect::new(x, 0, d.left - self.px(4.0), h),
@@ -881,7 +881,8 @@ impl Canvas {
         let _ = unsafe { GdiFlush() };
     }
 
-    /// Single-line text in Segoe UI Variable, left-aligned or centred.
+    /// Single-line text in Segoe UI Variable Display (Inter, the editors' font, is
+    /// only bundled for the web UI), left-aligned or centred.
     fn text_at(
         &mut self,
         label: &str,
@@ -899,7 +900,8 @@ impl Canvas {
                 0,
                 0,
                 0,
-                if bold { FW_BOLD.0 } else { FW_SEMIBOLD.0 } as i32,
+                // The weight of the editor titles (650).
+                if bold { 650 } else { 600 },
                 0,
                 0,
                 0,
@@ -908,11 +910,7 @@ impl Canvas {
                 FONT_CLIP_PRECISION(0),
                 CLEARTYPE_QUALITY,
                 0,
-                if bold {
-                    w!("Segoe UI Variable Display")
-                } else {
-                    w!("Segoe UI Variable Text")
-                },
+                w!("Segoe UI Variable Display"),
             );
             let previous_font = SelectObject(self.dc, HGDIOBJ(font.0));
             SetBkMode(self.dc, TRANSPARENT);
