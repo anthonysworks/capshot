@@ -117,7 +117,7 @@
   ];
   /** Sections of the side panel, from the rail on the left. */
   const PANELS: { id: "background" | "cursor" | "zoom" | "format" | "export"; icon: IconName; label: string }[] = [
-    { id: "background", icon: "frame", label: "Background and frame" },
+    { id: "background", icon: "device", label: "Background and frame" },
     { id: "cursor", icon: "cursor", label: "Cursor and clicks" },
     { id: "zoom", icon: "zoom", label: "Camera zoom" },
     { id: "format", icon: "crop", label: "Format and crop" },
@@ -214,6 +214,9 @@
   let deviceFrame = $state<DeviceFrame>("none");
   let frameTitle = $state("");
   let frameDark = $state(false);
+  /** A device without a wallpaper: the space around it stays transparent
+   * (MP4 has no transparency: it exports black there). */
+  let transparent = $state(false);
   let cursorVisible = $state(true);
   let cursorScale = $state(1);
   let cursorStyle = $state<CursorStyle>("original");
@@ -312,6 +315,7 @@
     const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
     const title = frameTitle.trim() || baseName(path);
     return renderFrame(out, area, { kind: device, title, dark: frameDark }, shadow, (ctx) => {
+      if (transparent) return;
       const g = ctx.createLinearGradient(0, 0, out.w, out.h);
       stops.forEach((stop, i) => g.addColorStop(i / Math.max(1, stops.length - 1), stop));
       ctx.fillStyle = g;
@@ -1207,7 +1211,15 @@
 
   /** Picks a background (or none) for the video. */
   function chooseBackground(index: number | null) {
-    if (index === null) return chooseFit("fill");
+    if (index === null) {
+      if (deviceFrame !== "none") {
+        transparent = true;
+        return chooseFit("fit");
+      }
+      transparent = false;
+      return chooseFit("fill");
+    }
+    transparent = false;
     background = index;
     chooseFit("fit");
   }
@@ -1234,8 +1246,11 @@
     const start = Math.min(time, Math.max(0, duration - 0.1));
     const overlay = { id: shape.id, shape, start, end: Math.min(duration, start + OVERLAY_LENGTH) };
     commit(() => overlays.push(overlay));
+    // Selected as if it had been clicked.
     selectedOverlay = overlay.id;
     selectedSegment = null;
+    selectedZoom = null;
+    tool = "select";
   }
 
   const measureCtx = () => stage.getContext("2d");
@@ -1382,8 +1397,14 @@
     if (current.kind === "cropCorner" && cropDraft && (cropDraft.w < 16 || cropDraft.h < 16)) {
       cropDraft = crop ? { ...crop } : { ...full };
     } else if (current.kind === "move" || current.kind === "resize") {
-      if (!current.moved) past.pop();
-      else future = [];
+      if (!current.moved) {
+        past.pop();
+        // A click on a text edits it right away.
+        const o = selectedItem;
+        if (current.kind === "move" && o?.shape.kind === "text") {
+          editing = { x: o.shape.x1, y: o.shape.y1, text: o.shape.text ?? "", id: o.id };
+        }
+      } else future = [];
     } else if (current.kind === "draw" && draft) {
       const shape = draft;
       draft = null;
@@ -1874,7 +1895,7 @@
   {/if}
   <header class="topbar">
     <div class="tb-side">
-      <Logo height={22} />
+      <Logo height={38} />
       <span class="tb-divider" aria-hidden="true"></span>
       <button type="button" class="icon-btn" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}><Icon name="undo" /></button>
       <button type="button" class="icon-btn" title="Redo (Ctrl+Y)" aria-label="Redo" disabled={!future.length} onclick={redo}><Icon name="redo" /></button>
@@ -1947,14 +1968,14 @@
           <button type="button" class="link" disabled={!framed} onclick={() => chooseBackground(null)}>Reset</button>
         </div>
         <div class="walls">
-          <button type="button" class="wall none" class:active={!framed} title="No background" aria-label="No background" onclick={() => chooseBackground(null)}
+          <button type="button" class="wall none" class:active={!framed || transparent} title="No background" aria-label="No background" onclick={() => chooseBackground(null)}
             ><Icon name="close" /></button
           >
           {#each BACKGROUNDS as b, i (b.name)}
             <button
               type="button"
               class="wall"
-              class:active={framed && background === i}
+              class:active={framed && !transparent && background === i}
               style="--wall:linear-gradient(135deg,{b.stops.join(',')})"
               title={b.name}
               aria-label={b.name}
@@ -1964,7 +1985,11 @@
         </div>
         <div class="sec-head">
           <h3>Device</h3>
-          <button type="button" class="link" disabled={deviceFrame === "none"} onclick={() => (deviceFrame = "none")}>Reset</button>
+          <button type="button" class="link" disabled={deviceFrame === "none"} onclick={() => {
+              deviceFrame = "none";
+              if (transparent) chooseBackground(null);
+            }}>Reset</button
+          >
         </div>
         <div class="devices" role="radiogroup" aria-label="Device">
           {#each DEVICE_FRAMES as d (d.value)}
@@ -1977,7 +2002,8 @@
               aria-checked={active}
               onclick={() => {
                 deviceFrame = d.value;
-                if (d.value !== "none" && !framed) chooseBackground(background);
+                if (d.value === "none" && transparent) chooseBackground(null);
+                else if (d.value !== "none" && !framed) chooseBackground(null);
               }}
             >
               <span class="device-art {d.value}" aria-hidden="true"></span>
@@ -2831,7 +2857,6 @@
     color: var(--on-accent);
     font-size: 15px;
     font-weight: 650;
-    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .export:hover:not(:disabled) {
     background: var(--accent-hover);

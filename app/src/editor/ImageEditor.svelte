@@ -77,7 +77,7 @@
       title: "Image",
       tools: [
         { tool: "crop", icon: "crop", label: "Crop", key: "C" },
-        { tool: "frame", icon: "frame", label: "Frame: background, margin, corners", key: "F" },
+        { tool: "frame", icon: "device", label: "Frame: background, device, margin, corners", key: "F" },
       ],
     },
   ];
@@ -117,6 +117,8 @@
   let device = $state<DeviceFrame>("none");
   let deviceTitle = $state("");
   let deviceDark = $state(false);
+  /** A device without a wallpaper: the space around it stays transparent. */
+  let noWall = $state(false);
   let draft = $state<Shape | null>(null);
   let cropDraft = $state<Rect | null>(null);
   let selected = $state<number | null>(null);
@@ -221,7 +223,7 @@
     const title = deviceTitle.trim() || baseName;
     const index = frame.background;
     return renderFrame({ w: box.w, h: box.h }, screen, { kind: device, title, dark: deviceDark }, frame.shadow ? 1 : 0, (ctx) =>
-      paintBackground(ctx, { x: 0, y: 0, w: box.w, h: box.h }, index),
+      noWall ? undefined : paintBackground(ctx, { x: 0, y: 0, w: box.w, h: box.h }, index),
     );
   });
 
@@ -501,7 +503,7 @@
     }
     if (tool === "number") {
       const n = Math.max(0, ...shapes.map((sh) => sh.n ?? 0)) + 1;
-      commit(() => shapes.push(make("number", p, { n })));
+      add(make("number", p, { n }));
       return;
     }
     if (tool === "crop") {
@@ -591,7 +593,14 @@
     if (!current || current.kind === "pan") return;
     if (current.kind === "move" || current.kind === "handle") {
       // Nothing changed: forget the history entry taken on press.
-      if (!current.moved) past.pop();
+      if (!current.moved) {
+        past.pop();
+        // A click on a text edits it right away.
+        const sh = selectedShape;
+        if (current.kind === "move" && sh?.kind === "text") {
+          editing = { x: sh.x1, y: sh.y1, text: sh.text ?? "", id: sh.id };
+        }
+      }
       return;
     }
     if (current.kind === "crop") {
@@ -607,8 +616,15 @@
     if (draft) {
       const shape = draft;
       draft = null;
-      if (current.moved) commit(() => shapes.push(shape));
+      if (current.moved) add(shape);
     }
+  }
+
+  /** Adds a shape and selects it, as if it had been clicked. */
+  function add(shape: Shape) {
+    commit(() => shapes.push(shape));
+    selected = shape.id;
+    tool = "select";
   }
 
   function doubleClick(e: MouseEvent) {
@@ -640,7 +656,7 @@
         else shapes = shapes.filter((sh) => sh.id !== id);
       });
     } else if (trimmed) {
-      commit(() => shapes.push(make("text", { x, y }, { text: trimmed })));
+      add(make("text", { x, y }, { text: trimmed }));
     }
   }
 
@@ -912,7 +928,7 @@
   {/if}
   <header class="topbar">
     <div class="tb-side">
-    <Logo height={22} />
+    <Logo height={38} />
     <span class="tb-divider" aria-hidden="true"></span>
     <div class="group">
       <button type="button" class="icon" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!past.length} onclick={undo}
@@ -1012,39 +1028,63 @@
     <aside class="panel" aria-label="Properties">
       {#if tool === "frame"}
         <section>
-          <h3>Frame</h3>
-          <label class="check"
-            ><input type="checkbox" checked={frame.enabled} onchange={(e) => setFrame({ enabled: e.currentTarget.checked })} />
-            Add a background</label
-          >
+          <h3>Background</h3>
           <div class="swatches">
+            <button
+              type="button"
+              class="swatch wide none"
+              class:active={!frame.enabled || noWall}
+              title="No background"
+              aria-label="No background"
+              onclick={() => {
+                if (device !== "none") {
+                  noWall = true;
+                  setFrame({ enabled: true });
+                } else {
+                  noWall = false;
+                  setFrame({ enabled: false });
+                }
+              }}><Icon name="close" /></button
+            >
             {#each BACKGROUNDS as b, i (b.name)}
               <button
                 type="button"
                 class="swatch wide"
-                class:active={frame.enabled && frame.background === i}
+                class:active={frame.enabled && !noWall && frame.background === i}
                 style="--swatch:linear-gradient(135deg,{b.stops.join(',')})"
                 title={b.name}
                 aria-label={b.name}
-                onclick={() => setFrame({ background: i, enabled: true })}
+                onclick={() => {
+                  noWall = false;
+                  setFrame({ background: i, enabled: true });
+                }}
               ></button>
             {/each}
           </div>
-          <h3>Device</h3>
-          <div class="devices" role="radiogroup" aria-label="Device">
+          <h3 class="spaced">Device</h3>
+          <div class="device-tiles" role="radiogroup" aria-label="Device">
             {#each DEVICE_FRAMES as d (d.value)}
               {@const active = (frame.enabled ? device : "none") === d.value}
               <button
                 type="button"
                 role="radio"
-                class="chip"
+                class="device"
                 class:active
                 aria-checked={active}
                 onclick={() => {
                   device = d.value;
-                  if (d.value !== "none" && !frame.enabled) setFrame({ enabled: true });
-                }}>{d.label}</button
+                  if (d.value === "none" && noWall) {
+                    noWall = false;
+                    setFrame({ enabled: false });
+                  } else if (d.value !== "none" && !frame.enabled) {
+                    noWall = true;
+                    setFrame({ enabled: true });
+                  }
+                }}
               >
+                <span class="device-art {d.value}" aria-hidden="true"></span>
+                {d.label}
+              </button>
             {/each}
           </div>
           {#if frame.enabled && hasTitle(device)}
@@ -1058,6 +1098,7 @@
               <button type="button" role="radio" class="chip" class:active={deviceDark} aria-checked={deviceDark} onclick={() => (deviceDark = true)}>Dark</button>
             </div>
           {/if}
+          <h3 class="spaced">Frame</h3>
           <label class="field"
             >Margin <input
               type="range"
@@ -1385,7 +1426,6 @@
     border-radius: 12px;
     background: var(--accent);
     color: var(--on-accent);
-    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
     font-size: 15px;
   }
   button.action.primary:hover {
@@ -1410,6 +1450,16 @@
   }
   .swatch:hover:not(:disabled) {
     background: var(--swatch);
+  }
+  .swatch.none {
+    display: grid;
+    place-items: center;
+    background: var(--control);
+    color: var(--text-muted);
+  }
+  .swatch.none :global(svg) {
+    width: 14px;
+    height: 14px;
   }
   .swatch.wide {
     width: 44px;
@@ -1464,6 +1514,97 @@
     padding: 0 12px;
     border-radius: 9px;
     font-size: 12.5px;
+  }
+  h3.spaced {
+    margin-top: 26px;
+  }
+  .device-tiles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin: 8px 0 4px;
+  }
+  .device {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 70px;
+    padding: 6px 4px;
+    border: none;
+    border-radius: 12px;
+    background: var(--control);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .device:hover {
+    background: var(--hover);
+  }
+  .device.active {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .device-art {
+    position: relative;
+    display: block;
+    width: 30px;
+    height: 20px;
+    border: 1.5px solid currentColor;
+    border-radius: 4px;
+    opacity: 0.85;
+  }
+  .device-art.none {
+    border-style: dashed;
+  }
+  .device-art.macos,
+  .device-art.windows {
+    border-top-width: 5px;
+  }
+  .device-art.macos::before {
+    content: "";
+    position: absolute;
+    top: -4px;
+    left: 2px;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: #ff5f57;
+    box-shadow:
+      4px 0 #febc2e,
+      8px 0 #28c840;
+  }
+  .device-art.windows::before {
+    content: "";
+    position: absolute;
+    top: -4.5px;
+    right: 2px;
+    width: 8px;
+    height: 2px;
+    border-top: 1px solid var(--surface);
+  }
+  .device-art.macbook {
+    width: 24px;
+    height: 16px;
+    border-width: 2.5px 2px 3px;
+    border-radius: 3px 3px 0 0;
+  }
+  .device-art.macbook::after {
+    content: "";
+    position: absolute;
+    left: -7px;
+    right: -7px;
+    bottom: -6px;
+    height: 3px;
+    border-radius: 0 0 3px 3px;
+    background: currentColor;
+  }
+  .device-art.iphone {
+    width: 13px;
+    height: 24px;
+    border-width: 2.5px;
+    border-radius: 5px;
   }
   .text-field {
     height: 34px;

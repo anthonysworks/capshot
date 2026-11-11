@@ -20,7 +20,7 @@ export const ICONS = {
   spotlight: "M10 5a5 5 0 100 10 5 5 0 000-10zM10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2",
   fit: "M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4",
   zoom: "M8.5 3a5.5 5.5 0 1 1 0 11a5.5 5.5 0 1 1 0-11zM12.5 12.5L17 17M8.5 6v5M6 8.5h5",
-  device: "M3.5 4.5h13v9h-13zM1.5 16h17",
+  device: "M3.5 3.5h13v9.5h-13zM7 17h6M10 13v4",
   frame: "M2.5 2.5h15v15h-15zM6 6h8v8H6z",
   split: "M10 2.5v15M6.5 6L10 2.5 13.5 6",
   trash: "M4 6h12M8 6V4h4v2M6 6l1 11h6l1-11",

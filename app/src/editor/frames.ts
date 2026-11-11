@@ -332,7 +332,7 @@ export function renderFrame(
   screen: Rect,
   style: FrameStyle,
   shadow: number,
-  paintBackground: (ctx: CanvasRenderingContext2D) => void,
+  paintBackground?: (ctx: CanvasRenderingContext2D) => void,
 ): { under: HTMLCanvasElement; over: HTMLCanvasElement } {
   const under = document.createElement("canvas");
   under.width = out.w;
@@ -343,7 +343,7 @@ export function renderFrame(
   over.height = out.h;
   const o = over.getContext("2d");
   if (!u || !o) return { under, over };
-  paintBackground(u);
+  paintBackground?.(u);
   drawDevice(u, style, screen, shadow);
   drawFront(o, style.kind, screen, under);
   return { under, over };
