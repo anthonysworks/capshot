@@ -49,9 +49,8 @@ impl CaptureService {
         });
     }
 
-    pub fn show_recording_indicator(&self, region: Rect, countdown: Duration, light: bool) {
-        self.overlay
-            .show_recording_indicator(region, countdown, light);
+    pub fn show_recording_indicator(&self, region: Rect, countdown: Duration) {
+        self.overlay.show_recording_indicator(region, countdown);
     }
 
     pub fn recording_started(&self) {
@@ -104,15 +103,6 @@ pub struct Options {
     light: bool,
 }
 
-/// Whether the native toolbars use the light theme.
-pub fn light_theme(config: &capshot_core::Config) -> bool {
-    match config.appearance.theme {
-        capshot_core::Theme::Light => true,
-        capshot_core::Theme::Dark => false,
-        capshot_core::Theme::System => capshot_overlay::system_uses_light_theme(),
-    }
-}
-
 /// Opens the overlay for `purpose` (after the configured delay for a
 /// screenshot; recordings have their own countdown).
 pub fn start(app: &AppHandle, purpose: Purpose) {
@@ -134,7 +124,11 @@ pub fn start(app: &AppHandle, purpose: Purpose) {
                 countdown_secs: config.recording.countdown_secs,
                 system_audio: config.recording.system_audio,
                 microphone: config.recording.microphone,
-                light: light_theme(&config),
+                light: match config.appearance.theme {
+                    capshot_core::Theme::Light => true,
+                    capshot_core::Theme::Dark => false,
+                    capshot_core::Theme::System => capshot_overlay::system_uses_light_theme(),
+                },
             },
         )
     };
@@ -195,7 +189,6 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
         CaptureResult::OpenFile(path) => crate::editor::open_capture(app, &path),
         CaptureResult::StopRecording => recording::stop(app),
         CaptureResult::DiscardRecording => recording::discard(app),
-        CaptureResult::RestartRecording => recording::restart(app),
         CaptureResult::TogglePause => recording::toggle_pause(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),
         CaptureResult::Cancelled => tracing::debug!("capture cancelled"),

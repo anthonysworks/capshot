@@ -33,8 +33,6 @@ enum Phase {
 #[derive(Debug, Default)]
 pub struct RecorderState {
     phase: Mutex<Phase>,
-    /// Area and choices of the last recording started, to start it again.
-    last: Mutex<Option<(Rect, Choices)>>,
 }
 
 impl RecorderState {
@@ -93,10 +91,6 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
     }
 
     remember(app, choices);
-    *app.state::<RecorderState>()
-        .last
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = Some((region, choices));
     let gif = choices.format == RecordingFormat::Gif;
     let (options, countdown) = {
         let app_state = app.state::<AppState>();
@@ -148,9 +142,8 @@ pub fn start(app: &AppHandle, region: Rect, choices: Choices) {
         (options, countdown)
     };
 
-    let light = crate::capture::light_theme(&app.state::<AppState>().config());
     if let Some(service) = service(app) {
-        service.show_recording_indicator(region, countdown, light);
+        service.show_recording_indicator(region, countdown);
     }
     tray::refresh(app);
 
@@ -279,27 +272,6 @@ pub fn stop(app: &AppHandle) {
 /// Stops the recording and deletes it.
 pub fn discard(app: &AppHandle) {
     finish(app, false);
-}
-
-/// Deletes the recording and records the same area again, with the same
-/// choices (and countdown).
-pub fn restart(app: &AppHandle) {
-    let last = *app
-        .state::<RecorderState>()
-        .last
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    finish(app, false);
-    let Some((region, choices)) = last else {
-        return;
-    };
-    tracing::info!("recording restarted");
-    let app = app.clone();
-    std::thread::spawn(move || {
-        // Let the recorder that is stopping release the screen first.
-        std::thread::sleep(Duration::from_millis(250));
-        start(&app, region, choices);
-    });
 }
 
 fn finish(app: &AppHandle, keep: bool) {

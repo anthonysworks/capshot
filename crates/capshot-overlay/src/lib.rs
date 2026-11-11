@@ -78,9 +78,6 @@ pub enum CaptureResult {
     /// The delete button of the recording indicator was clicked: stop and
     /// throw the recording away.
     DiscardRecording,
-    /// The restart button of the recording indicator was clicked: throw the
-    /// recording away and record the same area again.
-    RestartRecording,
     /// The pause/resume button of the recording indicator was clicked.
     TogglePause,
     /// The preview was clicked: open this file.
@@ -106,7 +103,6 @@ enum Command {
     ShowIndicator {
         region: Rect,
         countdown: Duration,
-        light: bool,
     },
     IndicatorRunning,
     IndicatorPaused(bool),
@@ -162,14 +158,10 @@ impl Overlay {
     }
 
     /// Shows the recording frame and pill around `region` (desktop
-    /// coordinates), counting down for `countdown` first, in the light or
-    /// dark theme. They are excluded from capture.
-    pub fn show_recording_indicator(&self, region: Rect, countdown: Duration, light: bool) {
-        self.send(Command::ShowIndicator {
-            region,
-            countdown,
-            light,
-        });
+    /// coordinates), counting down for `countdown` first. They are
+    /// excluded from capture.
+    pub fn show_recording_indicator(&self, region: Rect, countdown: Duration) {
+        self.send(Command::ShowIndicator { region, countdown });
     }
 
     /// The recording has actually started: the pill shows the timer.

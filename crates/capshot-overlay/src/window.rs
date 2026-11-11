@@ -513,13 +513,9 @@ impl State {
                                 tracing::warn!("cannot copy to the clipboard: {err}");
                             }
                         }
-                        Command::ShowIndicator {
-                            region,
-                            countdown,
-                            light,
-                        } => {
+                        Command::ShowIndicator { region, countdown } => {
                             let (_, work, scale) = monitor_of(region);
-                            self.indicator.show(region, work, scale, countdown, light);
+                            self.indicator.show(region, work, scale, countdown);
                         }
                         Command::IndicatorRunning => self.indicator.running(),
                         Command::IndicatorPaused(paused) => self.indicator.set_paused(paused),
@@ -1140,9 +1136,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 Some(indicator::Request::TogglePause) => {
                     (state.handler)(CaptureResult::TogglePause);
-                }
-                Some(indicator::Request::Restart) => {
-                    (state.handler)(CaptureResult::RestartRecording);
                 }
                 None => {}
             }

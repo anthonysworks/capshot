@@ -1,12 +1,10 @@
 //! On-screen indicator while recording: a red frame around the recorded
-//! area and a floating bar: a grip to move it, then a chip with the stop
-//! button and the elapsed time (a countdown first), and restart, pause and
-//! delete buttons.
+//! area and a small pill with a countdown, then the elapsed time, a
+//! pause/resume button and a stop button.
 //!
-//! The bar is a layered window drawn off screen with antialiased shapes
-//! (GDI's own are jagged) and per-pixel transparency, so it can be a true
-//! pill with a soft shadow, in the light or the dark theme. When the
-//! recording starts it widens smoothly to make room for restart and pause.
+//! The pill is drawn off screen with antialiased shapes (GDI's own are
+//! jagged), then copied in one go. When the recording starts it widens
+//! smoothly to make room for the pause button.
 //!
 //! Every window is excluded from capture, so none of it appears in the
 //! video, and the frame lets mouse clicks through.
@@ -26,25 +24,23 @@ use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
 use capshot_core::{Point, Rect};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DwmSetWindowAttribute,
+    DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CLEARTYPE_QUALITY, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush,
-    DIB_RGB_COLORS, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
-    DrawTextW, FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FW_BOLD, FW_SEMIBOLD,
-    GdiFlush, GetDC, HDC, HGDIOBJ, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CLEARTYPE_QUALITY,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER,
+    DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FONT_CHARSET,
+    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FW_BOLD, FW_SEMIBOLD, GdiFlush, HDC, HGDIOBJ,
+    InvalidateRect, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetWindowRect, HTCAPTION, HTCLIENT, HWND_TOPMOST, IDC_ARROW, KillTimer,
-    LWA_ALPHA, LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetTimer, SetWindowDisplayAffinity, SetWindowPos,
-    ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE,
-    WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_TIMER,
+    CreateWindowExW, HWND_TOPMOST, IDC_ARROW, KillTimer, LWA_ALPHA, LoadCursorW, MA_NOACTIVATE,
+    RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetLayeredWindowAttributes,
+    SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE,
+    WINDOW_EX_STYLE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER,
     WNDCLASSEXW, WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -53,67 +49,27 @@ use windows::core::{PCWSTR, w};
 const PILL_CLASS: PCWSTR = w!("CapshotRecordingPill");
 const FRAME_CLASS: PCWSTR = w!("CapshotRecordingFrame");
 const TICK_TIMER: usize = 1;
-/// Sent after `TrackMouseEvent(TME_LEAVE)` (defined in the Controls API set).
-const WM_MOUSELEAVE: u32 = 0x02A3;
 
-/// Capshot's palettes (`docs/UI_DESIGN.md`), as RGB.
+/// Capshot's dark palette (`docs/UI_DESIGN.md`), as RGB.
 type Rgb = [u8; 3];
+const SURFACE: Rgb = [0x1c, 0x1c, 0x1f];
+const CONTROL: Rgb = [0x2a, 0x2a, 0x2f];
 const ACCENT: Rgb = [0x25, 0x63, 0xeb];
 const RECORD: Rgb = [0xe5, 0x48, 0x4d];
 const AMBER: Rgb = [0xff, 0xb5, 0x47];
-const WHITE: Rgb = [0xff, 0xff, 0xff];
+const TEXT: Rgb = [0xf5, 0xf5, 0xf7];
+const MUTED: Rgb = [0x9a, 0x9a, 0xa3];
 /// The frame around the recorded area, as a GDI colour (0x00BBGGRR).
 const FRAME_COLOR: COLORREF = COLORREF(0x004d_48e5);
 
-/// Colours of the bar in one theme.
-struct Palette {
-    panel: Rgb,
-    /// The chip holding the stop button and the time.
-    chip: Rgb,
-    hover: Rgb,
-    /// Button glyphs, quieter than the time.
-    icon: Rgb,
-    text: Rgb,
-    muted: Rgb,
-    /// Hairline around the bar, and the shadow's strength.
-    border: (Rgb, f32),
-    shadow: f32,
-}
-
-const LIGHT: Palette = Palette {
-    panel: [0xff, 0xff, 0xff],
-    chip: [0xf0, 0xf0, 0xf3],
-    hover: [0xea, 0xea, 0xee],
-    icon: [0x6b, 0x6b, 0x74],
-    text: [0x1c, 0x1c, 0x1f],
-    muted: [0x6e, 0x6e, 0x78],
-    border: ([0x00, 0x00, 0x00], 0.08),
-    shadow: 0.16,
-};
-
-const DARK: Palette = Palette {
-    panel: [0x1c, 0x1c, 0x1f],
-    chip: [0x2a, 0x2a, 0x2f],
-    hover: [0x34, 0x34, 0x3a],
-    icon: [0xb4, 0xb4, 0xbd],
-    text: [0xf5, 0xf5, 0xf7],
-    muted: [0x9a, 0x9a, 0xa3],
-    border: ([0xff, 0xff, 0xff], 0.1),
-    shadow: 0.4,
-};
-
-/// Bar sizes, in pixels at 100% scale.
+/// Pill sizes, in pixels at 100% scale.
 const PILL_HEIGHT: f32 = 48.0;
 const PAD: f32 = 6.0;
-const GAP: f32 = 2.0;
-/// Room around the bar for its shadow.
-const SHADOW: f32 = 10.0;
-const GRIP_WIDTH: f32 = 22.0;
-/// The chip: the stop button and the time (or the countdown).
-const CHIP_WIDTH: f32 = 118.0;
-/// Square icon buttons.
-const BUTTON: f32 = 36.0;
-/// How long the bar takes to widen for restart and pause.
+const GAP: f32 = 6.0;
+const STOP_WIDTH: f32 = 88.0;
+/// Room for the status (countdown or time) on the left.
+const STATUS_WIDTH: f32 = 132.0;
+/// How long the pill takes to widen for the pause button.
 const OPEN_MS: f32 = 260.0;
 
 /// What a click on the indicator asks for.
@@ -123,8 +79,6 @@ pub enum Request {
     TogglePause,
     /// Stop and delete the recording.
     Discard,
-    /// Delete the recording and start again on the same area.
-    Restart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,14 +110,6 @@ impl Phase {
             _ => Duration::ZERO,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Part {
-    Stop,
-    Restart,
-    Pause,
-    Discard,
 }
 
 /// Where the pill goes: under the recorded area, else above it, else (the
@@ -242,41 +188,38 @@ fn ease(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-fn point(lparam: LPARAM) -> Point {
-    Point::new(
-        i32::from(lparam.0 as u32 as u16 as i16),
-        i32::from((lparam.0 as u32 >> 16) as u16 as i16),
-    )
-}
-
 #[derive(Debug)]
 pub struct Indicator {
     pill: HWND,
     /// Top, bottom, left, right edges of the frame.
     edges: [HWND; 4],
     phase: Phase,
-    /// When restart and pause started to slide in (recording started).
+    /// When the pause button started to slide in (recording started).
     opening: Option<Instant>,
-    /// Centre and top of the window, in desktop pixels: it widens around it.
+    /// Centre and top of the pill, in desktop pixels: it widens around it.
     centre: (i32, i32),
-    /// The window must stay inside these (desktop pixels).
+    /// The pill must stay inside these (desktop pixels).
     work: Rect,
-    /// Where the window is, in desktop pixels.
-    at: Rect,
-    grip: Rect,
-    stop_button: Rect,
-    restart_button: Rect,
     pause_button: Rect,
+    stop_button: Rect,
     discard_button: Rect,
-    hover: Option<Part>,
-    tracking: bool,
-    light: bool,
     scale: f32,
 }
 
 impl Indicator {
     pub fn new(instance: HINSTANCE) -> windows::core::Result<Self> {
-        let pill = create(instance, PILL_CLASS, WS_EX_LAYERED.0)?;
+        let pill = create(instance, PILL_CLASS, 0)?;
+        // Soft corners, like the rest of Capshot.
+        let round = DWMWCP_ROUND;
+        // SAFETY: valid attribute value for our window.
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                pill,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                std::ptr::from_ref(&round).cast::<c_void>(),
+                size_of_val(&round) as u32,
+            );
+        }
         let edge = || {
             let hwnd = create(instance, FRAME_CLASS, (WS_EX_LAYERED | WS_EX_TRANSPARENT).0)?;
             // Windows 11 rounds and outlines popups: on 2-pixel strips this
@@ -309,15 +252,9 @@ impl Indicator {
             opening: None,
             centre: (0, 0),
             work: Rect::default(),
-            at: Rect::default(),
-            grip: Rect::default(),
-            stop_button: Rect::default(),
-            restart_button: Rect::default(),
             pause_button: Rect::default(),
+            stop_button: Rect::default(),
             discard_button: Rect::default(),
-            hover: None,
-            tracking: false,
-            light: false,
             scale: 1.0,
         })
     }
@@ -326,15 +263,16 @@ impl Indicator {
         hwnd == self.pill || self.edges.contains(&hwnd)
     }
 
+    fn repaint(&self) {
+        // SAFETY: our own window.
+        let _ = unsafe { InvalidateRect(Some(self.pill), None, false) };
+    }
+
     fn px(&self, v: f32) -> i32 {
         (v * self.scale).round() as i32
     }
 
-    const fn palette(&self) -> &'static Palette {
-        if self.light { &LIGHT } else { &DARK }
-    }
-
-    /// How far restart and pause have slid in, 0 to 1.
+    /// How far the pause button has slid in, 0 to 1.
     fn open(&self) -> f32 {
         match (self.phase, self.opening) {
             (Phase::Running { .. }, Some(since)) => {
@@ -345,60 +283,32 @@ impl Indicator {
         }
     }
 
-    /// Width of the window (bar and shadow) with restart and pause `open`
-    /// (0 to 1).
+    /// Width of the pill with the pause button `open` (0 to 1).
     fn width(&self, open: f32) -> i32 {
-        let slots = 1.0 + 2.0 * open;
-        self.px(2.0 * SHADOW + PAD + GRIP_WIDTH + CHIP_WIDTH + (GAP + BUTTON) * slots + PAD)
+        let side = PILL_HEIGHT - 2.0 * PAD;
+        self.px(PAD + STATUS_WIDTH + side + GAP + (side + GAP) * open + STOP_WIDTH + PAD)
     }
 
-    fn height(&self) -> i32 {
-        self.px(PILL_HEIGHT + 2.0 * SHADOW)
-    }
-
-    /// The bar itself inside the window.
-    fn bar(&self, width: i32) -> Rect {
-        let m = self.px(SHADOW);
-        Rect::new(m, m, width - m, m + self.px(PILL_HEIGHT))
-    }
-
-    /// Places the parts for a window `width` wide: grip, chip (with Stop),
-    /// then Restart and Pause (sliding in) and Delete.
+    /// Places the buttons for a pill `width` wide, right to left: Stop,
+    /// Pause (sliding in), Delete.
     fn layout(&mut self, width: i32, open: f32) {
-        let bar = self.bar(width);
-        let pad = self.px(PAD);
-        let (top, side) = (bar.top + pad, bar.height() - 2 * pad);
-        self.grip = Rect::from_size(bar.left + pad, top, self.px(GRIP_WIDTH), side);
-        let chip = Rect::from_size(self.grip.right, top, self.px(CHIP_WIDTH), side);
-        self.stop_button = Rect::from_size(chip.left, top, side, side);
-        let button = self.px(BUTTON);
-        let y = bar.top + (bar.height() - button) / 2;
-        let step = self.px(GAP) + button;
-        self.discard_button = Rect::from_size(bar.right - pad - button, y, button, button);
-        let offset = |n: f32| ((step as f32) * n * open).round() as i32;
-        self.pause_button =
-            Rect::from_size(self.discard_button.left - offset(1.0), y, button, button);
-        self.restart_button =
-            Rect::from_size(self.discard_button.left - offset(2.0), y, button, button);
+        let (pad, gap) = (self.px(PAD), self.px(GAP));
+        let side = self.px(PILL_HEIGHT) - 2 * pad;
+        let stop_width = self.px(STOP_WIDTH);
+        self.stop_button = Rect::from_size(width - pad - stop_width, pad, stop_width, side);
+        let slot = ((side + gap) as f32 * open).round() as i32;
+        self.pause_button = Rect::from_size(self.stop_button.left - gap - side, pad, side, side);
+        self.discard_button =
+            Rect::from_size(self.stop_button.left - slot - gap - side, pad, side, side);
     }
 
-    fn chip(&self) -> Rect {
-        Rect::new(
-            self.grip.right,
-            self.grip.top,
-            self.grip.right + self.px(CHIP_WIDTH),
-            self.grip.bottom,
-        )
-    }
-
-    /// Moves and sizes the window for its current width, around its centre.
+    /// Moves and sizes the pill for its current width, around its centre.
     fn place(&mut self) {
         let open = self.open();
-        let (w, h) = (self.width(open), self.height());
+        let (w, h) = (self.width(open), self.px(PILL_HEIGHT));
         self.layout(w, open);
         let x = (self.centre.0 - w / 2)
             .clamp(self.work.left, (self.work.right - w).max(self.work.left));
-        self.at = Rect::from_size(x, self.centre.1, w, h);
         // SAFETY: our own window.
         unsafe {
             let _ = SetWindowPos(
@@ -414,15 +324,13 @@ impl Indicator {
         self.repaint();
     }
 
-    /// Shows the frame around `region` and the bar next to it, both in
-    /// desktop coordinates; the bar stays inside `work` (the monitor
+    /// Shows the frame around `region` and the pill next to it, both in
+    /// desktop coordinates; the pill stays inside `work` (the monitor
     /// without the taskbar, which would cover it). It counts down for
     /// `countdown` (then shows that the recording is starting) until
     /// [`Self::running`].
-    pub fn show(&mut self, region: Rect, work: Rect, scale: f32, countdown: Duration, light: bool) {
+    pub fn show(&mut self, region: Rect, work: Rect, scale: f32, countdown: Duration) {
         self.scale = scale;
-        self.light = light;
-        self.hover = None;
         let t = self.px(2.0).max(1);
         let edges = [
             Rect::new(
@@ -443,8 +351,8 @@ impl Indicator {
 
         // Positioned for its widest, so that widening never pushes it off
         // the screen or over the area.
-        let (w, h) = (self.width(1.0), self.height());
-        let (x, y) = pill_position(region, work, (w, h), 0);
+        let (w, h) = (self.width(1.0), self.px(PILL_HEIGHT));
+        let (x, y) = pill_position(region, work, (w, h), self.px(8.0));
         self.centre = (x + w / 2, y);
         self.work = work;
         self.opening = None;
@@ -471,7 +379,7 @@ impl Indicator {
     }
 
     /// The recording has actually started: the timer starts from zero and
-    /// the bar widens for restart and pause.
+    /// the pill widens for the pause button.
     pub fn running(&mut self) {
         if self.phase != Phase::Hidden {
             self.phase = Phase::Running {
@@ -516,21 +424,6 @@ impl Indicator {
         }
     }
 
-    fn part_at(&self, p: Point) -> Option<Part> {
-        let running = matches!(self.phase, Phase::Running { .. }) && self.opening.is_none();
-        if self.stop_button.contains(p) {
-            Some(Part::Stop)
-        } else if self.discard_button.contains(p) {
-            Some(Part::Discard)
-        } else if running && self.pause_button.contains(p) {
-            Some(Part::Pause)
-        } else if running && self.restart_button.contains(p) {
-            Some(Part::Restart)
-        } else {
-            None
-        }
-    }
-
     /// Handles a message for one of the indicator windows.
     pub fn handle(
         &mut self,
@@ -538,34 +431,15 @@ impl Indicator {
         msg: u32,
         lparam: LPARAM,
     ) -> Option<(LRESULT, Option<Request>)> {
-        if hwnd != self.pill {
-            return (msg == WM_MOUSEACTIVATE).then_some((LRESULT(MA_NOACTIVATE as isize), None));
-        }
         match msg {
             WM_MOUSEACTIVATE => Some((LRESULT(MA_NOACTIVATE as isize), None)),
-            // The grip moves the bar (the system drags it).
-            WM_NCHITTEST => {
-                let mut r = RECT::default();
-                // SAFETY: our own window.
-                let _ = unsafe { GetWindowRect(self.pill, &mut r) };
-                let p = point(lparam);
-                let local = Point::new(p.x - r.left, p.y - r.top);
-                let hit = if self.grip.contains(local) {
-                    HTCAPTION
-                } else {
-                    HTCLIENT
-                };
-                Some((LRESULT(hit as isize), None))
-            }
-            WM_EXITSIZEMOVE => {
-                let mut r = RECT::default();
-                // SAFETY: our own window.
-                let _ = unsafe { GetWindowRect(self.pill, &mut r) };
-                self.centre = (i32::midpoint(r.left, r.right), r.top);
-                self.at = Rect::new(r.left, r.top, r.right, r.bottom);
+            // Painted whole, off screen: no flicker.
+            WM_ERASEBKGND if hwnd == self.pill => Some((LRESULT(1), None)),
+            WM_PAINT if hwnd == self.pill => {
+                self.paint();
                 Some((LRESULT(0), None))
             }
-            WM_TIMER => {
+            WM_TIMER if hwnd == self.pill => {
                 if let Some(since) = self.opening {
                     if since.elapsed().as_secs_f32() * 1000.0 >= OPEN_MS {
                         self.opening = None;
@@ -576,39 +450,22 @@ impl Indicator {
                 }
                 Some((LRESULT(0), None))
             }
-            WM_MOUSEMOVE => {
-                if !self.tracking {
-                    self.tracking = true;
-                    let mut track = TRACKMOUSEEVENT {
-                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: self.pill,
-                        dwHoverTime: 0,
-                    };
-                    // SAFETY: valid structure for our own window.
-                    let _ = unsafe { TrackMouseEvent(&mut track) };
-                }
-                let hover = self.part_at(point(lparam));
-                if hover != self.hover {
-                    self.hover = hover;
-                    self.repaint();
-                }
-                Some((LRESULT(0), None))
-            }
-            WM_MOUSELEAVE => {
-                self.tracking = false;
-                if self.hover.take().is_some() {
-                    self.repaint();
-                }
-                Some((LRESULT(0), None))
-            }
-            WM_LBUTTONUP => {
-                let request = match self.part_at(point(lparam)) {
-                    Some(Part::Stop) => Some(Request::Stop),
-                    Some(Part::Discard) => Some(Request::Discard),
-                    Some(Part::Pause) => Some(Request::TogglePause),
-                    Some(Part::Restart) => Some(Request::Restart),
-                    None => None,
+            WM_LBUTTONUP if hwnd == self.pill => {
+                let p = Point::new(
+                    i32::from(lparam.0 as u32 as u16 as i16),
+                    i32::from((lparam.0 as u32 >> 16) as u16 as i16),
+                );
+                let request = if self.stop_button.contains(p) {
+                    Some(Request::Stop)
+                } else if self.discard_button.contains(p) {
+                    Some(Request::Discard)
+                } else if self.pause_button.contains(p)
+                    && self.opening.is_none()
+                    && matches!(self.phase, Phase::Running { .. })
+                {
+                    Some(Request::TogglePause)
+                } else {
+                    None
                 };
                 Some((LRESULT(0), request))
             }
@@ -616,76 +473,51 @@ impl Indicator {
         }
     }
 
-    /// Draws the bar and puts it on screen.
-    fn repaint(&self) {
-        if self.phase == Phase::Hidden {
-            return;
-        }
-        let (w, h) = (self.at.width(), self.at.height());
-        if w <= 0 || h <= 0 {
-            return;
-        }
-        // SAFETY: the screen DC is released below.
-        let screen = unsafe { GetDC(None) };
-        if let Some(mut canvas) = Canvas::new(screen, w, h) {
-            self.draw(&mut canvas);
-            canvas.present_layered(self.pill, screen, Point::new(self.at.left, self.at.top));
-        }
-        // SAFETY: obtained above.
+    fn paint(&self) {
+        let mut ps = PAINTSTRUCT::default();
+        // SAFETY: standard paint cycle on our own window.
         unsafe {
-            ReleaseDC(None, screen);
+            let hdc = BeginPaint(self.pill, &mut ps);
+            let mut client = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.pill, &mut client);
+            self.draw(hdc, &client);
+            let _ = EndPaint(self.pill, &ps);
         }
     }
 
-    /// Draws the whole window into `canvas`.
+    /// Draws the whole pill (`area` is its client rectangle) into `hdc`.
     #[allow(clippy::too_many_lines)]
-    fn draw(&self, canvas: &mut Canvas) {
-        let s = self.scale;
-        let p = self.palette();
-        let open = self.open();
-        let bar = self.bar(canvas.w);
-        let radius = bar.height() as f32 / 2.0;
-        // The bar is drawn on its own colour everywhere (GDI text needs an
-        // opaque background); its shape and shadow become the alpha last.
-        canvas.fill(p.panel);
-
-        // Grip: two columns of three dots.
-        let g = self.grip;
-        let (gx, gy) = (
-            g.left as f32 + g.width() as f32 / 2.0,
-            g.top as f32 + g.height() as f32 / 2.0,
-        );
-        for col in [-1.0, 1.0] {
-            for row in [-1.0, 0.0, 1.0] {
-                canvas.circle(gx + col * 3.0 * s, gy + row * 5.5 * s, 1.6 * s, p.icon, 0.8);
-            }
+    fn draw(&self, hdc: HDC, area: &RECT) {
+        let (w, h) = (area.right - area.left, area.bottom - area.top);
+        if w <= 0 || h <= 0 {
+            return;
         }
+        let Some(mut canvas) = Canvas::new(hdc, w, h) else {
+            return;
+        };
+        let s = self.scale;
+        let open = self.open();
+        canvas.fill(SURFACE);
 
-        // The chip: Stop (or the countdown) and the time.
-        let chip = self.chip();
-        canvas.rounded(chip, chip.height() as f32 / 2.0, p.chip, 1.0);
-        let b = self.stop_button;
-        let (cx, cy) = (
-            b.left as f32 + b.width() as f32 / 2.0,
-            b.top as f32 + b.height() as f32 / 2.0,
-        );
-        let mut text: Option<(String, Rgb, bool)> = None;
+        let status_left = PAD * s + 6.0 * s;
+        let mid = h as f32 / 2.0;
+        let mut text: Option<(String, i32, Rgb, bool)> = None;
         match self.phase {
             Phase::Countdown { until } => {
                 let left = until.saturating_duration_since(Instant::now());
-                let r = 13.0 * s;
+                let r = 15.0 * s;
+                let (cx, cy) = (status_left + r, mid);
                 if left.is_zero() {
                     // Getting the recorder ready: a still red dot.
                     canvas.circle(cx, cy, 6.0 * s, RECORD, 1.0);
-                    text = Some(("Starting…".into(), p.muted, false));
+                    text = Some(("Starting…".into(), (cx + r + 9.0 * s) as i32, MUTED, false));
                 } else {
-                    // The seconds left in an accent disc, ringed by the time
-                    // left in this second.
+                    // The number of seconds left in an accent disc, ringed
+                    // by the time left in this second.
                     let secs = left.as_secs() + 1;
                     let frac = (left.as_secs_f32() - left.as_secs() as f32).clamp(0.0, 1.0);
                     canvas.circle(cx, cy, r, ACCENT, 1.0);
-                    canvas.ring(cx, cy, r - 2.2 * s, 2.0 * s, frac, WHITE, 0.9);
-                    canvas.flush();
+                    canvas.ring(cx, cy, r - 2.2 * s, 2.0 * s, frac, [255, 255, 255], 0.9);
                     canvas.text_at(
                         &secs.to_string(),
                         Rect::new(
@@ -694,12 +526,12 @@ impl Indicator {
                             (cx + r) as i32,
                             (cy + r) as i32,
                         ),
-                        (13.0 * s) as i32,
-                        WHITE,
+                        (14.0 * s) as i32,
+                        TEXT,
                         true,
                         true,
                     );
-                    text = Some(("Get ready".into(), p.muted, false));
+                    text = Some(("Get ready".into(), (cx + r + 9.0 * s) as i32, MUTED, false));
                 }
             }
             Phase::Running {
@@ -707,102 +539,78 @@ impl Indicator {
                 paused_since,
                 ..
             } => {
-                // Stop: a red disc with a white square; it pulses softly
-                // while recording, and turns amber when paused.
-                let r = 13.0 * s;
-                let hovered = self.hover == Some(Part::Stop);
+                let (cx, cy) = (status_left + 6.0 * s, mid);
                 if paused_since.is_some() {
-                    canvas.circle(cx, cy, r, AMBER, 1.0);
+                    canvas.circle(cx, cy, 5.5 * s, AMBER, 1.0);
                 } else {
+                    // A soft pulse rather than a blink.
                     let t = started.elapsed().as_secs_f32();
                     let pulse = 0.5 + 0.5 * (t * std::f32::consts::TAU / 1.6).cos();
-                    canvas.circle(cx, cy, r + 3.0 * s * pulse, RECORD, 0.2 * pulse);
-                    canvas.circle(cx, cy, r, RECORD, 1.0);
+                    canvas.circle(cx, cy, 5.5 * s + 4.0 * s * pulse, RECORD, 0.22 * pulse);
+                    canvas.circle(cx, cy, 5.5 * s, RECORD, 1.0);
                 }
-                if hovered {
-                    canvas.circle(cx, cy, r, [0, 0, 0], 0.12);
-                }
-                let square = 9.0 * s;
-                canvas.rounded_f(
-                    cx - square / 2.0,
-                    cy - square / 2.0,
-                    square,
-                    square,
-                    2.0 * s,
-                    WHITE,
-                    1.0,
-                );
                 let secs = self.phase.elapsed().as_secs();
-                text = Some((format!("{:02}:{:02}", secs / 60, secs % 60), p.text, true));
+                let label = format!("{:02}:{:02}", secs / 60, secs % 60);
+                text = Some((label, (cx + 15.0 * s) as i32, TEXT, true));
             }
             Phase::Hidden => {}
         }
 
-        // Restart and Pause (sliding in), Delete.
-        let radius_button = 10.0 * s;
-        let paused = matches!(
-            self.phase,
-            Phase::Running {
-                paused_since: Some(_),
-                ..
-            }
-        );
-        if open > 0.0 {
-            // Uncovered from under Delete as the bar widens.
-            for (part, rect) in [
-                (Part::Restart, self.restart_button),
-                (Part::Pause, self.pause_button),
-            ] {
-                if self.hover == Some(part) {
-                    canvas.rounded(rect, radius_button, p.hover, open);
-                }
-                match part {
-                    Part::Restart => canvas.restart_icon(rect, p.icon, open),
-                    _ => canvas.pause_icon(rect, paused, p.icon, open),
-                }
-            }
-        }
+        // Buttons: Delete, Pause (sliding in), Stop.
+        let radius = 10.0 * s;
         let d = self.discard_button;
-        // Covers the buttons sliding out from under it.
-        canvas.rounded(d, radius_button, p.panel, 1.0);
-        if self.hover == Some(Part::Discard) {
-            canvas.rounded(d, radius_button, p.hover, 1.0);
+        canvas.rounded(d, radius, CONTROL, 1.0);
+        canvas.trash(d, TEXT);
+        if open > 0.0 {
+            let p = self.pause_button;
+            canvas.rounded(p, radius, CONTROL, open);
+            canvas.pause_icon(
+                p,
+                matches!(
+                    self.phase,
+                    Phase::Running {
+                        paused_since: Some(_),
+                        ..
+                    }
+                ),
+                TEXT,
+                open,
+            );
         }
-        let bin_back = if self.hover == Some(Part::Discard) {
-            p.hover
-        } else {
-            p.panel
-        };
-        canvas.trash(d, p.icon, bin_back);
+        let b = self.stop_button;
+        canvas.rounded(b, radius, RECORD, 1.0);
+        let icon = 11.0 * s;
+        let icon_left = b.left as f32 + 15.0 * s;
+        let top = b.top as f32 + (b.height() as f32 - icon) / 2.0;
+        canvas.rounded_f(icon_left, top, icon, icon, 3.0 * s, [255, 255, 255], 1.0);
 
         // Text goes on last, with GDI, over the finished picture.
         canvas.flush();
-        if let Some((label, color, big)) = text {
-            let size = if big { 16.0 } else { 13.0 };
+        if let Some((label, x, color, big)) = text {
+            let size = if big { 17.0 } else { 14.0 };
             canvas.text_at(
                 &label,
-                Rect::new(
-                    b.right + self.px(8.0),
-                    chip.top,
-                    chip.right - self.px(8.0),
-                    chip.bottom,
-                ),
+                Rect::new(x, 0, d.left - self.px(4.0), h),
                 (size * s) as i32,
                 color,
                 big,
                 false,
             );
         }
-        // The shape: a pill with a hairline and a soft shadow underneath.
-        let (border, border_alpha) = p.border;
-        canvas.finish(
-            bar,
-            radius,
-            border,
-            border_alpha,
-            p.shadow,
-            SHADOW * s * 0.8,
+        canvas.text_at(
+            "Stop",
+            Rect::new(
+                (icon_left + icon + 7.0 * s) as i32,
+                b.top,
+                b.right - self.px(10.0),
+                b.bottom,
+            ),
+            (14.0 * s) as i32,
+            [255, 255, 255],
+            true,
+            false,
         );
+        canvas.present(hdc);
     }
 }
 
@@ -1015,7 +823,7 @@ impl Canvas {
     }
 
     /// A small bin: lid with a handle, and a rounded body.
-    fn trash(&mut self, b: Rect, color: Rgb, back: Rgb) {
+    fn trash(&mut self, b: Rect, color: Rgb) {
         let size = b.width() as f32 * 0.42;
         let (cx, cy) = (
             b.left as f32 + b.width() as f32 / 2.0,
@@ -1060,7 +868,7 @@ impl Canvas {
                 0.8 * unit,
                 size - 5.6 * unit,
                 0.4 * unit,
-                back,
+                CONTROL,
                 1.0,
             );
         }
@@ -1127,124 +935,10 @@ impl Canvas {
         self.flush();
     }
 
-    /// A filled triangle.
-    fn triangle(&mut self, a: (f32, f32), b: (f32, f32), c: (f32, f32), color: Rgb, alpha: f32) {
-        // Inside must be negative: flip the edges if the centre is not.
-        let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
-        let (b, c) = if area < 0.0 { (c, b) } else { (b, c) };
-        let edge = |p: (f32, f32), q: (f32, f32), x: f32, y: f32| {
-            let (dx, dy) = (q.0 - p.0, q.1 - p.1);
-            ((x - p.0) * dy - (y - p.1) * dx) / dx.hypot(dy)
-        };
-        let bounds = (
-            a.0.min(b.0).min(c.0),
-            a.1.min(b.1).min(c.1),
-            a.0.max(b.0).max(c.0),
-            a.1.max(b.1).max(c.1),
-        );
-        self.shade(bounds, color, alpha, |x, y| {
-            edge(a, b, x, y).max(edge(b, c, x, y)).max(edge(c, a, x, y))
-        });
-    }
-
-    /// A circular arrow, going clockwise: start again.
-    fn restart_icon(&mut self, b: Rect, color: Rgb, alpha: f32) {
-        let size = b.width() as f32 * 0.42;
-        let (cx, cy) = (
-            b.left as f32 + b.width() as f32 / 2.0,
-            b.top as f32 + b.height() as f32 / 2.0,
-        );
-        let r = size / 2.0 - size * 0.08;
-        let thick = size * 0.15;
-        let share = 0.76;
-        self.ring(cx, cy, r, thick, share, color, alpha);
-        let angle = share * std::f32::consts::TAU;
-        let end = (cx + r * angle.sin(), cy - r * angle.cos());
-        let along = (angle.cos(), angle.sin());
-        let out = (angle.sin(), -angle.cos());
-        let head = size * 0.36;
-        self.triangle(
-            (end.0 + along.0 * head * 0.7, end.1 + along.1 * head * 0.7),
-            (end.0 + out.0 * head * 0.6, end.1 + out.1 * head * 0.6),
-            (end.0 - out.0 * head * 0.6, end.1 - out.1 * head * 0.6),
-            color,
-            alpha,
-        );
-    }
-
-    /// Turns the picture into the bar: opaque inside the rounded rectangle
-    /// `bar` (with a hairline `border` along its edge), a soft shadow
-    /// `blur` wide below it, transparent elsewhere; premultiplied, as
-    /// layered windows expect.
-    fn finish(
-        &mut self,
-        bar: Rect,
-        radius: f32,
-        border: Rgb,
-        border_alpha: f32,
-        shadow: f32,
-        blur: f32,
-    ) {
-        let (cx, cy) = (
-            (bar.left + bar.right) as f32 / 2.0,
-            (bar.top + bar.bottom) as f32 / 2.0,
-        );
-        let (hw, hh) = (bar.width() as f32 / 2.0, bar.height() as f32 / 2.0);
-        let r = radius.min(hw).min(hh);
-        let sdf = |x: f32, y: f32| {
-            let qx = (x - cx).abs() - (hw - r);
-            let qy = (y - cy).abs() - (hh - r);
-            qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
-        };
-        let drop = blur * 0.3;
-        let w = self.w;
-        let h = self.h;
-        let pixels = self.pixels();
-        for y in 0..h {
-            for x in 0..w {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                let d = sdf(fx, fy);
-                let inside = (0.5 - d).clamp(0.0, 1.0);
-                let line = (1.0 - (d + 0.5).abs()).clamp(0.0, 1.0) * border_alpha;
-                let ds = sdf(fx, fy - drop).max(0.0);
-                let cast = shadow * (1.0 - (ds / blur.max(1.0))).clamp(0.0, 1.0).powi(2);
-                let alpha = inside + (1.0 - inside) * cast;
-                let i = ((y * w + x) * 4) as usize;
-                for (c, v) in [border[2], border[1], border[0]].into_iter().enumerate() {
-                    let base = f32::from(pixels[i + c]);
-                    let lined = base + (f32::from(v) - base) * line;
-                    // Premultiplied: the shadow is black.
-                    pixels[i + c] = (lined * inside).round() as u8;
-                }
-                pixels[i + 3] = (alpha * 255.0).round() as u8;
-            }
-        }
-    }
-
-    /// Puts the picture on screen as `hwnd`'s content, at `at`.
-    fn present_layered(&self, hwnd: HWND, screen: HDC, at: Point) {
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        // SAFETY: both DCs are valid; the bitmap is premultiplied BGRA.
+    fn present(&self, target: HDC) {
+        // SAFETY: both DCs are valid for the copy.
         unsafe {
-            let _ = UpdateLayeredWindow(
-                hwnd,
-                Some(screen),
-                Some(&POINT { x: at.x, y: at.y }),
-                Some(&SIZE {
-                    cx: self.w,
-                    cy: self.h,
-                }),
-                Some(self.dc),
-                Some(&POINT { x: 0, y: 0 }),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            );
+            let _ = BitBlt(target, 0, 0, self.w, self.h, Some(self.dc), 0, 0, SRCCOPY);
         }
     }
 }
