@@ -97,6 +97,8 @@
     { fill: "soft", label: "Tinted" },
     { fill: "solid", label: "Solid" },
   ];
+  /** Texts can also be plain: no outline, no box. */
+  const TEXT_FILLS: { fill: Fill; label: string }[] = [{ fill: "plain", label: "Plain" }, ...FILLS];
   /** Tools whose shapes use the fill setting. */
   const FILLABLE: ShapeKind[] = ["rect", "ellipse", "text"];
 
@@ -122,6 +124,8 @@
   let draft = $state<Shape | null>(null);
   let cropDraft = $state<Rect | null>(null);
   let selected = $state<number | null>(null);
+  /** Bumped when a drag ends, to bring the selected item's toolbar back. */
+  let barTick = $state(0);
   let past = $state<string[]>([]);
   let future = $state<string[]>([]);
   let dirty = $state(false);
@@ -454,7 +458,7 @@
       kind,
       color,
       size: kind === "text" ? (level + 1) * unit : kind === "blur" ? 6 * unit : stroke,
-      fill: FILLABLE.includes(kind) ? fill : "none",
+      fill: FILLABLE.includes(kind) ? (kind !== "text" && fill === "plain" ? "none" : fill) : "none",
       ...(kind === "text" ? { ...textLook } : {}),
       x1: p.x,
       y1: p.y,
@@ -593,14 +597,9 @@
     if (!current || current.kind === "pan") return;
     if (current.kind === "move" || current.kind === "handle") {
       // Nothing changed: forget the history entry taken on press.
-      if (!current.moved) {
-        past.pop();
-        // A click on a text edits it right away.
-        const sh = selectedShape;
-        if (current.kind === "move" && sh?.kind === "text") {
-          editing = { x: sh.x1, y: sh.y1, text: sh.text ?? "", id: sh.id };
-        }
-      }
+      if (!current.moved) past.pop();
+      // The selected item's toolbar shows once the pointer is up.
+      barTick++;
       return;
     }
     if (current.kind === "crop") {
@@ -690,7 +689,9 @@
   function setFill(f: Fill) {
     fill = f;
     const sh = selectedShape;
-    if (sh && tool === "select" && FILLABLE.includes(sh.kind)) commit(() => (sh.fill = f));
+    if (sh && tool === "select" && FILLABLE.includes(sh.kind) && (f !== "plain" || sh.kind === "text")) {
+      commit(() => (sh.fill = f));
+    }
   }
 
   /** Font, bold, italic: for new texts and the selected one. */
@@ -893,6 +894,26 @@
     return `left:${left}px;top:${top}px;font:${font};color:${color}`;
   });
 
+  /** Where the toolbar of the selected item sits, above it (or below when
+   * there is no room), in stage pixels. */
+  const itemBar = $derived.by(() => {
+    void barTick;
+    void view.s;
+    void view.ox;
+    void view.oy;
+    const sh = selectedShape;
+    if (!sh || tool !== "select" || editing || drag || !canvas || !image) return null;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const b = bounds(ctx, sh);
+    const left = (b.x * view.s + view.ox) / view.dpr;
+    const right = ((b.x + b.w) * view.s + view.ox) / view.dpr;
+    const top = (b.y * view.s + view.oy) / view.dpr;
+    const bottom = ((b.y + b.h) * view.s + view.oy) / view.dpr;
+    const x = Math.max(8, Math.min(canvas.clientWidth - 8, (left + right) / 2));
+    return top > 60 ? { x, y: top - 12, below: false } : { x, y: bottom + 12, below: true };
+  });
+
   const showFill = $derived(
     FILLABLE.includes(tool as ShapeKind) ||
       (tool === "select" && !!selectedShape && FILLABLE.includes(selectedShape.kind)),
@@ -995,6 +1016,40 @@
         ondblclick={doubleClick}
         onwheel={wheel}
       ></canvas>
+      {#if itemBar && selectedShape}
+        {@const s = selectedShape}
+        <div
+          class="item-bar"
+          class:below={itemBar.below}
+          style="left:{itemBar.x}px;top:{itemBar.y}px"
+          onpointerdown={(e) => e.stopPropagation()}
+          role="toolbar"
+          aria-label="Selected item"
+          tabindex="-1"
+        >
+          {#if s.kind === "text"}
+            {#each TEXT_FONTS as f (f.value)}
+              <button type="button" class="ib" class:active={(s.font ?? "sans") === f.value} style="font-family:{f.family}" title={f.label} onclick={() => setTextLook({ font: f.value })}>Aa</button>
+            {/each}
+            <span class="ib-sep"></span>
+            <button type="button" class="ib" class:active={s.bold !== false} style="font-weight:700" title="Bold" onclick={() => setTextLook({ bold: s.bold === false })}>B</button>
+            <button type="button" class="ib" class:active={!!s.italic} style="font-style:italic;font-family:Georgia,serif" title="Italic" onclick={() => setTextLook({ italic: !s.italic })}>I</button>
+            <span class="ib-sep"></span>
+            {#each TEXT_FILLS as fl (fl.fill)}
+              <button type="button" class="ib" class:active={s.fill === fl.fill} title={fl.label} onclick={() => setFill(fl.fill)}
+                ><span class="fill-demo {fl.fill}" style="--c:{s.color}">A</span></button
+              >
+            {/each}
+            <span class="ib-sep"></span>
+          {/if}
+          {#each COLORS.slice(0, 6) as c (c)}
+            <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
+          {/each}
+          <span class="ib-sep"></span>
+          <button type="button" class="ib" title="Duplicate (Ctrl+D)" aria-label="Duplicate" onclick={duplicate}><Icon name="duplicate" /></button>
+          <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeSelected}><Icon name="trash" /></button>
+        </div>
+      {/if}
       {#if editing}
         <textarea
           bind:value={editing.text}
@@ -1172,8 +1227,11 @@
           <section>
             <h3>{tool === "text" || selectedShape?.kind === "text" ? "Background" : "Fill"}</h3>
             <div class="row">
-              {#each FILLS as fl (fl.fill)}
-                <button type="button" class="chip" class:active={fill === fl.fill} onclick={() => setFill(fl.fill)}
+              {#each tool === "text" || selectedShape?.kind === "text" ? TEXT_FILLS : FILLS as fl (fl.fill)}
+                <button
+                  type="button"
+                  class="chip"
+                  class:active={(selectedShape?.kind === "text" && tool === "select" ? selectedShape.fill : fill) === fl.fill} onclick={() => setFill(fl.fill)}
                   >{fl.label}</button
                 >
               {/each}
@@ -1515,6 +1573,89 @@
     border-radius: 9px;
     font-size: 12.5px;
   }
+  .item-bar {
+    position: absolute;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    transform: translate(-50%, -100%);
+    cursor: default;
+  }
+  .item-bar.below {
+    transform: translate(-50%, 0);
+  }
+  .ib {
+    display: grid;
+    place-items: center;
+    min-width: 32px;
+    height: 32px;
+    padding: 0 6px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .ib:hover {
+    background: var(--hover);
+  }
+  .ib.active {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .ib.danger:hover {
+    color: var(--danger);
+  }
+  .ib-sep {
+    width: 1px;
+    height: 20px;
+    margin: 0 3px;
+    background: var(--border);
+  }
+  .ib-swatch {
+    width: 20px;
+    height: 20px;
+    margin: 0 2px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--c);
+    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
+    cursor: pointer;
+  }
+  .ib-swatch.active {
+    box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+  }
+  .fill-demo {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    font-weight: 800;
+    font-size: 13px;
+  }
+  .fill-demo.plain {
+    color: var(--c);
+  }
+  .fill-demo.none {
+    color: var(--c);
+    -webkit-text-stroke: 0.6px var(--text);
+  }
+  .fill-demo.soft {
+    background: color-mix(in srgb, var(--c) 70%, transparent);
+    color: #fff;
+  }
+  .fill-demo.solid {
+    background: var(--c);
+    color: #fff;
+  }
   h3.spaced {
     margin-top: 26px;
   }
@@ -1693,7 +1834,7 @@
     background: rgb(0 0 0 / 0.45);
   }
   .dialog {
-    width: min(440px, calc(100vw - 32px));
+    width: min(560px, calc(100vw - 32px));
     padding: 26px 28px;
     border-radius: var(--radius-lg);
     background: var(--surface);
@@ -1709,7 +1850,10 @@
   }
   .dialog-actions {
     display: flex;
-    flex-wrap: wrap;
     gap: 8px;
+  }
+  .dialog-actions .action {
+    flex: none;
+    white-space: nowrap;
   }
 </style>

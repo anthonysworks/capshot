@@ -111,6 +111,7 @@
   const FADES = [0, 0.5, 1, 2];
   /** Text backgrounds. */
   const FILLS: { value: Shape["fill"]; label: string }[] = [
+    { value: "plain", label: "Plain text" },
     { value: "none", label: "Outlined text" },
     { value: "soft", label: "On a tinted box" },
     { value: "solid", label: "On a solid box" },
@@ -121,7 +122,7 @@
     { id: "cursor", icon: "cursor", label: "Cursor and clicks" },
     { id: "zoom", icon: "zoom", label: "Camera zoom" },
     { id: "format", icon: "crop", label: "Format and crop" },
-    { id: "export", icon: "export", label: "Export settings" },
+    { id: "export", icon: "settings", label: "Export settings" },
   ];
   /** "Curved arrow (drag its middle…)" → "Curved arrow". */
   const shortLabel = (label: string) => label.replace(/\s*[(:,—].*$/, "");
@@ -231,6 +232,8 @@
   let smoothing = $state(0);
   let zooms = $state<Zoom[]>([]);
   let selectedZoom = $state<number | null>(null);
+  /** Bumped when a drag ends, to bring the selected item's toolbar back. */
+  let barTick = $state(0);
   /** The next click on the video sets the selected zoom's point. */
   let pickingFocus = $state(false);
   /** Part of the video in view in the last frame painted (zoom), in video pixels. */
@@ -281,6 +284,7 @@
     | { kind: "move"; last: Point; moved: boolean }
     | { kind: "resize"; handle: number; original: Shape; moved: boolean }
     | { kind: "bar"; id: number; edge: "start" | "end" | "both"; from: number; start: number; end: number }
+    | { kind: "focus"; view: Rect; moved: boolean }
     | { kind: "zoom"; id: number; edge: "start" | "end" | "both"; from: number; start: number; end: number }
     | null = null;
 
@@ -535,11 +539,10 @@
   }
 
   /** Pointer position in source pixels. */
-  function toSource(e: { clientX: number; clientY: number }): Point {
+  function toSource(e: { clientX: number; clientY: number }, v: Rect = shownView()): Point {
     const r = stage.getBoundingClientRect();
     const ox = (e.clientX - r.left) / k;
     const oy = (e.clientY - r.top) / k;
-    const v = shownView();
     const s = layout.area.w / v.w;
     return {
       x: Math.max(0, Math.min(vw, (ox - layout.area.x) / s + v.x)),
@@ -1289,6 +1292,19 @@
       changeZoom({ focus: [Math.round(p.x), Math.round(p.y)] });
       return;
     }
+    // The point of the selected zoom is a handle: drag it.
+    const focus = selectedZoomItem?.focus;
+    if (focus && !cropping) {
+      const at = toPlayer({ x: focus[0], y: focus[1] });
+      const box = player.getBoundingClientRect();
+      if (Math.hypot(e.clientX - box.left - at.x, e.clientY - box.top - at.y) <= 14) {
+        video.pause();
+        past.push(snapshot());
+        future = [];
+        drag = { kind: "focus", view: { ...shownView() }, moved: false };
+        return;
+      }
+    }
     if (cropping && cropDraft) {
       const r = cropDraft;
       const cs = corners(r);
@@ -1348,7 +1364,14 @@
       hover = !cropping && tool === "select" ? handleAt(p) : -1;
       return;
     }
-    if (drag.kind === "cropCorner") {
+    if (drag.kind === "focus") {
+      // Mapped with the view as it was when the drag began, so that the
+      // picture moving under the pointer does not make the point run away.
+      const z = selectedZoomItem;
+      const at = toSource(e, drag.view);
+      if (z) z.focus = [Math.round(at.x), Math.round(at.y)];
+      drag.moved = true;
+    } else if (drag.kind === "cropCorner") {
       cropDraft = dragCorner(drag.anchor, p, full, lockedRatio);
     } else if (drag.kind === "cropMove") {
       const r = drag.rect;
@@ -1396,15 +1419,13 @@
     drag = null;
     if (current.kind === "cropCorner" && cropDraft && (cropDraft.w < 16 || cropDraft.h < 16)) {
       cropDraft = crop ? { ...crop } : { ...full };
+    } else if (current.kind === "focus") {
+      if (!current.moved) past.pop();
     } else if (current.kind === "move" || current.kind === "resize") {
-      if (!current.moved) {
-        past.pop();
-        // A click on a text edits it right away.
-        const o = selectedItem;
-        if (current.kind === "move" && o?.shape.kind === "text") {
-          editing = { x: o.shape.x1, y: o.shape.y1, text: o.shape.text ?? "", id: o.id };
-        }
-      } else future = [];
+      if (!current.moved) past.pop();
+      else future = [];
+      // The item's toolbar shows once the pointer is up.
+      barTick++;
     } else if (current.kind === "draw" && draft) {
       const shape = draft;
       draft = null;
@@ -1735,6 +1756,7 @@
    * there is no room), in player pixels. */
   const itemBar = $derived.by(() => {
     void time;
+    void barTick;
     const o = selectedItem;
     if (!o || cropping || editing || drag || time < o.start || time >= o.end || !stage) return null;
     const ctx = stage.getContext("2d");
@@ -3434,6 +3456,9 @@
   .fill-demo.none {
     color: var(--c);
     -webkit-text-stroke: 0.6px var(--text);
+  }
+  .fill-demo.plain {
+    color: var(--c);
   }
   .fill-demo.soft {
     background: color-mix(in srgb, var(--c) 70%, transparent);

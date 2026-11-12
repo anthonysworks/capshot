@@ -17,7 +17,8 @@ export type ShapeKind =
 
 /** Rectangles and ellipses: outline only, tinted, or solid (redaction).
  * Text: no background, or a background box. */
-export type Fill = "none" | "soft" | "solid";
+/** `plain` (texts only): the text alone, with no outline and no box. */
+export type Fill = "none" | "soft" | "solid" | "plain";
 
 export interface Point {
   x: number;
@@ -158,7 +159,7 @@ function textBox(ctx: CanvasRenderingContext2D, s: Shape): Rect {
   ctx.font = textFont(s, size);
   const lines = (s.text ?? "").split("\n");
   const w = Math.max(...lines.map((l) => ctx.measureText(l).width), 4);
-  const pad = s.fill === "none" ? 0 : size * 0.3;
+  const pad = s.fill === "none" || s.fill === "plain" ? 0 : size * 0.3;
   return { x: s.x1 - pad, y: s.y1 - pad, w: w + 2 * pad, h: lines.length * size * 1.25 + 2 * pad };
 }
 
@@ -419,7 +420,7 @@ export function renderAnnotations(ctx: CanvasRenderingContext2D, shapes: Shape[]
       case "text": {
         const size = fontSize(s.size);
         let ink = s.color;
-        if (s.fill !== "none") {
+        if (s.fill !== "none" && s.fill !== "plain") {
           // A box behind the text: tinted or solid.
           const box = textBox(ctx, s);
           roundRect(ctx, box, size * 0.25);
@@ -427,7 +428,7 @@ export function renderAnnotations(ctx: CanvasRenderingContext2D, shapes: Shape[]
           ctx.fill();
           ctx.globalAlpha = 1;
           ink = contrast(s.color);
-        } else {
+        } else if (s.fill === "none") {
           ctx.lineWidth = Math.max(2, size / 7);
           ctx.strokeStyle = contrast(s.color);
         }
