@@ -182,6 +182,31 @@ fn win_rect(r: Rect) -> RECT {
     }
 }
 
+/// `Inter SemiBold`, the font of the editors' titles, shipped in the program
+/// (SIL Open Font Licence, `assets/Inter-LICENSE.txt`).
+static INTER: &[u8] = include_bytes!("../assets/Inter-SemiBold.ttf");
+
+/// Makes Inter available to this process, once; false if Windows refuses
+/// (the text then falls back to Segoe UI).
+fn register_font() -> bool {
+    use std::sync::OnceLock;
+    use windows::Win32::Graphics::Gdi::AddFontMemResourceEx;
+    static LOADED: OnceLock<bool> = OnceLock::new();
+    *LOADED.get_or_init(|| {
+        let mut count = 0u32;
+        // SAFETY: the font data is static and stays valid for the process.
+        let handle = unsafe {
+            AddFontMemResourceEx(
+                INTER.as_ptr().cast(),
+                INTER.len() as u32,
+                None,
+                &raw mut count,
+            )
+        };
+        !handle.is_invalid() && count > 0
+    })
+}
+
 /// Smooth start and end.
 fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -881,8 +906,8 @@ impl Canvas {
         let _ = unsafe { GdiFlush() };
     }
 
-    /// Single-line text in Segoe UI Variable Display (Inter, the editors' font, is
-    /// only bundled for the web UI), left-aligned or centred.
+    /// Single-line text in `Inter SemiBold`, the editors' font (bundled, see
+    /// [`register_font`]), left-aligned or centred.
     fn text_at(
         &mut self,
         label: &str,
@@ -893,6 +918,8 @@ impl Canvas {
         centred: bool,
     ) {
         self.flush();
+        let inter = register_font();
+        let _ = bold;
         // SAFETY: the font is selected, used and deleted here.
         unsafe {
             let font = CreateFontW(
@@ -900,8 +927,7 @@ impl Canvas {
                 0,
                 0,
                 0,
-                // The weight of the editor titles (650).
-                if bold { 650 } else { 600 },
+                if inter { 400 } else { 650 },
                 0,
                 0,
                 0,
@@ -910,7 +936,11 @@ impl Canvas {
                 FONT_CLIP_PRECISION(0),
                 CLEARTYPE_QUALITY,
                 0,
-                w!("Segoe UI Variable Display"),
+                if inter {
+                    w!("Inter SemiBold")
+                } else {
+                    w!("Segoe UI Variable Display")
+                },
             );
             let previous_font = SelectObject(self.dc, HGDIOBJ(font.0));
             SetBkMode(self.dc, TRANSPARENT);
