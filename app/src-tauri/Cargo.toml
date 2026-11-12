@@ -41,6 +41,7 @@ windows = { workspace = true, features = [
     "Storage_Streams",
     "Win32_System_WinRT",
     "Win32_Media_Audio",
+    "Win32_System_Registry",
 ] }
 
 [features]

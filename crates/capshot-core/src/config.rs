@@ -46,6 +46,10 @@ pub struct Config {
     /// (missing: written before versions existed).
     #[serde(default)]
     pub version: u32,
+    /// The first-run setup was completed (or skipped).
+    pub setup_done: bool,
+    /// Start Capshot, in the tray, when the user signs in.
+    pub startup: bool,
     pub hotkeys: Hotkeys,
     pub appearance: Appearance,
     pub capture: CaptureSettings,
@@ -57,6 +61,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
+            setup_done: false,
+            startup: false,
             hotkeys: Hotkeys::default(),
             appearance: Appearance::default(),
             capture: CaptureSettings::default(),

@@ -19,6 +19,7 @@
     onJobProgress,
     showInFolder,
     openFolder,
+    openSetup,
     saveConfig,
   } from "./lib/api";
   import HotkeyInput from "./lib/HotkeyInput.svelte";
@@ -178,6 +179,7 @@
           onclick={() => (category = c.id)}><span class="glyph" aria-hidden="true">{c.glyph}</span>{c.label}</button
         >
       {/each}
+      <button type="button" class="logs first" onclick={openSetup}>Run the setup again</button>
       <button type="button" class="logs" onclick={() => openFolder("logs")}>Open logs</button>
     </nav>
 
@@ -535,7 +537,7 @@
     font-weight: 400;
   }
   .logs {
-    margin: auto 20px 0;
+    margin: 0 20px 8px;
     padding: 0;
     border: none;
     background: none;
@@ -543,6 +545,9 @@
     font-weight: 400;
     font-size: 13px;
     text-align: left;
+  }
+  .logs.first {
+    margin-top: auto;
   }
   .logs:not(:disabled):hover {
     color: var(--text);

@@ -30,6 +30,31 @@ pub fn show_settings(app: &AppHandle) {
     }
 }
 
+const SETUP_LABEL: &str = "setup";
+
+/// The first-run setup (also reachable from the settings).
+pub fn show_setup(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(SETUP_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let result = WebviewWindowBuilder::new(
+        app,
+        SETUP_LABEL,
+        WebviewUrl::App("index.html?setup=1".into()),
+    )
+    .title("Welcome to Capshot")
+    .inner_size(760.0, 640.0)
+    .min_inner_size(640.0, 560.0)
+    .center()
+    .build();
+    if let Err(err) = result {
+        tracing::error!("cannot open the setup window: {err}");
+    }
+}
+
 /// Opens a folder in File Explorer, creating it first if needed.
 pub fn open_in_explorer(dir: &Path) {
     if let Err(err) = std::fs::create_dir_all(dir) {

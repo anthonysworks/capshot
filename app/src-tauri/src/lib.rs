@@ -13,6 +13,7 @@ mod recording;
 mod saving;
 mod sounds;
 mod state;
+mod system;
 mod tray;
 mod windows;
 
@@ -95,6 +96,19 @@ pub fn run() {
         .manage(quick::QuickFiles::default())
         .setup(move |app| {
             tray::create(app.handle())?;
+            // Starting with Windows follows the setting, and repairs the
+            // entry if the program was moved.
+            if let Ok(exe) = std::env::current_exe() {
+                let startup = app.state::<AppState>().config().startup;
+                if startup && let Err(err) = system::set_startup(true, &exe) {
+                    tracing::warn!("cannot register the start with Windows: {err}");
+                }
+            }
+            if !app.state::<AppState>().config().setup_done
+                && Action::from_args(&args, &cwd).is_none()
+            {
+                windows::show_setup(app.handle());
+            }
             saving::recover(app.handle());
             std::thread::spawn(quick::clean_pending);
             let state = app.state::<AppState>();
@@ -143,6 +157,11 @@ pub fn run() {
             commands::quick_discard,
             commands::quick_done,
             commands::copy_text,
+            commands::print_screen_taken,
+            commands::release_print_screen,
+            commands::open_keyboard_settings,
+            commands::pick_folder,
+            commands::open_setup,
         ])
         .build(tauri::generate_context!());
 

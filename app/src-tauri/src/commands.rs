@@ -49,6 +49,13 @@ pub fn save_config(
         return Err(err.to_string());
     }
 
+    if previous.startup != config.startup
+        && let Ok(exe) = std::env::current_exe()
+        && let Err(err) = crate::system::set_startup(config.startup, &exe)
+    {
+        tracing::warn!("cannot change starting with Windows: {err}");
+    }
+
     config
         .save(&state.paths().config_file())
         .map_err(|e| e.to_string())?;
@@ -58,6 +65,50 @@ pub fn save_config(
     let _ = tauri::Emitter::emit(&app, crate::recording::CONFIG_EVENT, &*state.config());
     tracing::info!("settings saved");
     Ok(())
+}
+
+/// Whether Windows keeps the Print Screen key for its own screen capture.
+#[tauri::command]
+pub fn print_screen_taken() -> bool {
+    crate::system::print_screen_taken()
+}
+
+/// Turns Windows' own Print Screen capture off, for this user.
+#[tauri::command]
+pub fn release_print_screen() -> Result<(), String> {
+    crate::system::release_print_screen()
+}
+
+/// Opens the Windows page where the Print Screen key can be freed.
+#[tauri::command]
+pub fn open_keyboard_settings() {
+    if let Err(err) = std::process::Command::new("explorer")
+        .arg("ms-settings:easeofaccess-keyboard")
+        .spawn()
+    {
+        tracing::warn!("cannot open the keyboard settings: {err}");
+    }
+}
+
+/// Asks for a folder; returns it, or nothing when the dialog is closed.
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle, title: String, start: String) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file().set_title(title);
+    if std::path::Path::new(&start).is_dir() {
+        dialog = dialog.set_directory(&start);
+    }
+    dialog
+        .blocking_pick_folder()?
+        .into_path()
+        .ok()
+        .map(|p| p.display().to_string())
+}
+
+/// Opens the setup again from the settings.
+#[tauri::command]
+pub fn open_setup(app: AppHandle) {
+    windows::show_setup(&app);
 }
 
 #[derive(Debug, Serialize)]

@@ -10,6 +10,8 @@ export type Folder = "screenshots" | "recordings" | "logs";
 
 /** Mirrors `capshot_core::Config`. */
 export interface Config {
+  setup_done: boolean;
+  startup: boolean;
   hotkeys: { capture: string; record: string };
   appearance: { theme: "system" | "dark" | "light" };
   capture: {
@@ -59,6 +61,16 @@ export const getConfig = () => invoke<Config>("get_config");
 export const saveConfig = (config: Config) => invoke<void>("save_config", { config });
 export const appInfo = () => invoke<AppInfo>("app_info");
 export const openFolder = (folder: Folder) => invoke<void>("open_folder", { folder });
+
+/** Whether Windows keeps the Print Screen key for its own screen capture. */
+export const printScreenTaken = () => invoke<boolean>("print_screen_taken");
+/** Turns Windows' own Print Screen capture off, for this user. */
+export const releasePrintScreen = () => invoke<void>("release_print_screen");
+export const openKeyboardSettings = () => invoke<void>("open_keyboard_settings");
+/** Asks for a folder; null when the dialog is closed. */
+export const pickFolder = (title: string, start: string) => invoke<string | null>("pick_folder", { title, start });
+/** Opens the first-run setup. */
+export const openSetup = () => invoke<void>("open_setup");
 
 /** Configuration changed outside the settings window (e.g. the overlay). */
 export const onConfigChanged = (handler: (config: Config) => void) =>
