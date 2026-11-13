@@ -331,6 +331,16 @@ impl Config {
         if self.version < 1 && self.capture.after_capture == AfterCapture::Editor {
             self.capture.after_capture = AfterCapture::Actions;
         }
+        // The program used to be called Kadra: its default folders follow
+        // the new name (the files already in the old ones stay there).
+        for dir in [&mut self.capture.output_dir, &mut self.recording.output_dir] {
+            if dir
+                .file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("Kadra"))
+            {
+                dir.set_file_name("Capshot");
+            }
+        }
         self.version = CONFIG_VERSION;
     }
 
@@ -366,6 +376,23 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folders_named_after_the_old_name_follow_the_new_one() {
+        let mut config = Config::default();
+        config.capture.output_dir = PathBuf::from(r"C:\Users\a\Pictures\Kadra");
+        config.recording.output_dir = PathBuf::from(r"D:\Clips\Kadra Videos");
+        config.upgrade();
+        assert_eq!(
+            config.capture.output_dir,
+            PathBuf::from(r"C:\Users\a\Pictures\Capshot")
+        );
+        // Only a folder named exactly like that is renamed.
+        assert_eq!(
+            config.recording.output_dir,
+            PathBuf::from(r"D:\Clips\Kadra Videos")
+        );
+    }
+
     use super::*;
 
     #[test]
