@@ -76,6 +76,10 @@ pub fn run() {
         };
     }
 
+    // The first-run setup opens once the event loop runs (see `RunEvent::Ready`):
+    // a web view built earlier, while the app is still starting, hangs.
+    let first_run = !config.setup_done && Action::from_args(&args, &cwd).is_none();
+
     let app = tauri::Builder::default()
         // Must be registered first so a second launch exits before doing any work.
         // `capshot.exe --capture` triggers a capture in the running instance,
@@ -103,11 +107,6 @@ pub fn run() {
                 if startup && let Err(err) = system::set_startup(true, &exe) {
                     tracing::warn!("cannot register the start with Windows: {err}");
                 }
-            }
-            if !app.state::<AppState>().config().setup_done
-                && Action::from_args(&args, &cwd).is_none()
-            {
-                windows::show_setup(app.handle());
             }
             saving::recover(app.handle());
             std::thread::spawn(quick::clean_pending);
@@ -173,7 +172,8 @@ pub fn run() {
         }
     };
 
-    app.run(move |_app, event| match event {
+    app.run(move |app, event| match event {
+        RunEvent::Ready if first_run => windows::show_setup(app),
         // Capshot lives in the tray: closing the last window must not quit.
         // An explicit `exit` (tray "Quit") carries an exit code and goes through.
         RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
