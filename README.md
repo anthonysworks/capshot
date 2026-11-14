@@ -100,7 +100,7 @@ Capshot against the current ShareX release, measured on the same Windows 11 mach
 
 <br>
 
-- **Installer size**: the `setup` installers published by each project. Capshot 0.1.0, ShareX 22.4.0.
+- **Installer size**: the `setup` installers published by each project. Capshot 1.0.0, ShareX 22.4.0.
 - **Size on disk**: Capshot's installed folder, and ShareX 22.4.0 unzipped from its portable build.
 - **Idle memory**: both apps sitting in the tray with no window open. ShareX was launched three times with `-silent` and sampled 32 seconds after start (the mean of the three is shown). Capshot was sampled while idle in the tray. *Private* is private bytes, *working set* is the memory resident in RAM, shared pages included.
 - ShareX runs on .NET and ships its own runtime, which accounts for much of the difference. The two apps do not do exactly the same things, and ShareX offers many features Capshot does not (uploaders and automation workflows, for a start).
@@ -127,6 +127,13 @@ npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
 The installer ends up in `target/release/bundle/nsis`. For development, `npm run tauri dev` starts the app with hot reload. Tests and lints run with `cargo test --workspace` and `cargo clippy --workspace --all-targets`.
 
 The flag skips the update signature, which official releases get from a private key kept in CI.
+
+## Code signing policy
+
+Windows installers are being set up for free code signing by [SignPath Foundation](https://signpath.org), through [SignPath.io](https://signpath.io). Until that is approved, installers are not signed and Windows SmartScreen may warn when you run one: choose *More info*, then *Run anyway*. Updates installed from inside Capshot are not affected, since they do not go through the browser.
+
+- **Who signs**: releases are built by GitHub Actions from the tagged source in this repository, and only [@anthonysworks](https://github.com/anthonysworks) (maintainer and sole approver) can approve a signing request.
+- **Privacy**: Capshot sends nothing anywhere on its own. The only network access is the check for a new version, which asks GitHub for `latest.json`; it can be turned off in **Settings → General**. Screenshots and recordings never leave your computer unless you copy or move them yourself.
 
 ## Contributing
 

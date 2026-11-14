@@ -1,18 +1,29 @@
 name: Release
 
-# Push a tag such as v0.2.0 (matching the version in Cargo.toml) to publish a
-# release: the signed installer plus latest.json, which installed copies of
-# Capshot read to find updates.
+# Push a tag such as v1.2.0 (matching the version in Cargo.toml) to publish a
+# release: one installer, Capshot-Setup.exe, plus latest.json, which installed
+# copies of Capshot read to find updates.
+#
+# The installer is signed by SignPath once the project is set up there (see
+# the repository variables below); until then it is published unsigned.
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # Code signing is switched on by adding the SIGNPATH_API_TOKEN secret and
+      # the SIGNPATH_ORGANIZATION_ID variable.
+      SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,25 +42,71 @@ jobs:
         working-directory: app
         run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: Capshot ${{ github.ref_name }}
-          releaseDraft: false
-          uploadUpdaterJson: true
+      - name: Build the installer
+        working-directory: app
+        run: npm run tauri build
 
-      # A fixed file name, so the README's download button can always point
-      # at /releases/latest/download/Capshot-Setup.exe.
-      - name: Publish the installer under a stable name
+      - name: Check the tag matches the version
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match Cargo.toml ($version)" }
+
+      - name: Collect the installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist-release | Out-Null
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          Copy-Item $setup.FullName Capshot-Setup.exe
-          gh release upload "${{ github.ref_name }}" Capshot-Setup.exe --clobber
+          Copy-Item $setup.FullName dist-release/Capshot-Setup.exe
+
+      - name: Upload the unsigned installer
+        if: env.SIGNPATH == 'true'
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-unsigned
+          path: dist-release/Capshot-Setup.exe
+
+      - name: Sign the installer with SignPath
+        if: env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: capshot
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Use the signed installer
+        if: env.SIGNPATH == 'true'
+        shell: pwsh
+        run: Copy-Item signed/Capshot-Setup.exe dist-release/Capshot-Setup.exe -Force
+
+      # The update signature covers the installer's bytes, so it is made last,
+      # after code signing changed them.
+      - name: Sign the update and write latest.json
+        shell: pwsh
+        working-directory: app
+        run: |
+          npm exec -- tauri signer sign --password "" ../dist-release/Capshot-Setup.exe
+          $signature = (Get-Content ../dist-release/Capshot-Setup.exe.sig -Raw).Trim()
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $latest = [ordered]@{
+            version  = $version
+            notes    = ""
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = @{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url       = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Capshot-Setup.exe"
+              }
+            }
+          }
+          $latest | ConvertTo-Json -Depth 5 | Set-Content ../dist-release/latest.json -Encoding utf8
+          Remove-Item ../dist-release/Capshot-Setup.exe.sig
+
+      - name: Publish the release
+        shell: pwsh
+        run: gh release create "${{ github.ref_name }}" dist-release/Capshot-Setup.exe dist-release/latest.json --title "Capshot ${{ github.ref_name }}" --generate-notes
