@@ -7,6 +7,7 @@ mod commands;
 mod convert;
 mod editor;
 mod hotkeys;
+mod keyhook;
 mod quick;
 mod recorder_host;
 mod recording;

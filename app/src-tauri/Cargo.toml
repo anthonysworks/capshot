@@ -33,6 +33,7 @@ tracing.workspace = true
 rqrr.workspace = true
 windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Foundation",
     "Foundation_Collections",
     "Globalization",

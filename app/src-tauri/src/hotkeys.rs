@@ -6,9 +6,10 @@ use anyhow::{Context, Result};
 use capshot_core::config::Hotkeys;
 use tauri::plugin::TauriPlugin;
 use tauri::{AppHandle, Manager, Wry};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::actions::{self, Action};
+use crate::keyhook;
 
 /// Shortcuts currently registered, with the action each one triggers.
 #[derive(Debug, Default)]
@@ -50,6 +51,36 @@ pub fn apply(app: &AppHandle, hotkeys: &Hotkeys) -> Result<()> {
         (parse(&hotkeys.capture)?, Action::Capture),
         (parse(&hotkeys.record)?, Action::Record),
     ];
+
+    // Like ShareX, switch off the Windows option that opens the Snipping Tool
+    // on Print Screen as soon as Capshot uses the key, so users need not.
+    let bare_print_screen = wanted
+        .iter()
+        .any(|(s, _)| s.key == Code::PrintScreen && s.mods.is_empty());
+    if bare_print_screen && crate::system::print_screen_taken() {
+        match crate::system::release_print_screen() {
+            Ok(()) => tracing::info!("Windows' own Print Screen capture switched off"),
+            Err(err) => tracing::warn!("cannot switch off Windows' Print Screen capture: {err}"),
+        }
+    }
+
+    // Print Screen goes through the keyboard hook: Windows may still hold it.
+    let (print_screen, wanted): (Vec<_>, Vec<_>) = wanted
+        .into_iter()
+        .partition(|(shortcut, _)| shortcut.key == Code::PrintScreen);
+    let hooked = keyhook::set(
+        app,
+        print_screen
+            .iter()
+            .map(|(shortcut, action)| (shortcut.mods, action.clone()))
+            .collect(),
+    );
+    // Without the hook they are registered like any other shortcut.
+    let wanted: Vec<_> = if hooked {
+        wanted
+    } else {
+        wanted.into_iter().chain(print_screen).collect()
+    };
 
     let manager = app.global_shortcut();
     manager

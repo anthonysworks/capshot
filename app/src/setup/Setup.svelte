@@ -232,7 +232,7 @@
       <h2>Print Screen is yours</h2>
       <p>
         {released
-          ? "Windows no longer opens the Snipping Tool on Print Screen. If it still does, sign out of Windows and back in."
+          ? "Windows no longer opens the Snipping Tool on Print Screen. Capshot also intercepts the key itself, so it works right away, without signing out."
           : "Windows is not using Print Screen, so Capshot can have it."}
       </p>
     </section>
