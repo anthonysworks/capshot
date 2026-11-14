@@ -32,8 +32,8 @@ Small, fast, open source. An alternative to ShareX with a built-in editor.
 <br>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/editor-dark.webp">
-  <img src="docs/images/editor-light.webp" alt="The Capshot editor annotating a capture" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/video-dark.webp">
+  <img src="docs/images/video-light.webp" alt="The Capshot video editor" width="100%">
 </picture>
 
 <br>
@@ -64,7 +64,19 @@ Press **Print Screen**, select an area, and choose what happens: copy, save, ope
 
 ## Edit
 
-Screenshots open in an editor with arrows, shapes, a highlighter, text, numbered steps, blur and crop. Videos get a timeline editor with trimming, a camera zoom, cursor and click effects, backgrounds and frames.
+Screenshots open in an editor with arrows, shapes, a highlighter, text, numbered steps, blur and crop.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/editor-dark.webp">
+  <img src="docs/images/editor-light.webp" alt="The image editor" width="100%">
+</picture>
+
+Recordings open in a video editor with a timeline, trimming, a camera zoom, cursor and click effects, backgrounds and window frames. Export to MP4 or GIF.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/video-dark.webp">
+  <img src="docs/images/video-light.webp" alt="The video editor" width="100%">
+</picture>
 
 ## And the rest
 
