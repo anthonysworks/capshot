@@ -50,6 +50,8 @@ pub struct Config {
     pub setup_done: bool,
     /// Start Capshot, in the tray, when the user signs in.
     pub startup: bool,
+    /// Look for new versions in the background and download them.
+    pub auto_update: bool,
     pub hotkeys: Hotkeys,
     pub appearance: Appearance,
     pub capture: CaptureSettings,
@@ -63,6 +65,7 @@ impl Default for Config {
             version: CONFIG_VERSION,
             setup_done: false,
             startup: false,
+            auto_update: true,
             hotkeys: Hotkeys::default(),
             appearance: Appearance::default(),
             capture: CaptureSettings::default(),

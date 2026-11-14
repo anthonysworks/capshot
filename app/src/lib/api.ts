@@ -12,6 +12,7 @@ export type Folder = "screenshots" | "recordings" | "logs";
 export interface Config {
   setup_done: boolean;
   startup: boolean;
+  auto_update: boolean;
   hotkeys: { capture: string; record: string };
   appearance: { theme: "system" | "dark" | "light" };
   capture: {
@@ -60,6 +61,14 @@ export const GIF_WIDTHS = [0, 1280, 960, 800, 640, 480] as const;
 export const getConfig = () => invoke<Config>("get_config");
 export const saveConfig = (config: Config) => invoke<void>("save_config", { config });
 export const appInfo = () => invoke<AppInfo>("app_info");
+export type UpdateStatus =
+  | { state: "upToDate" }
+  | { state: "ready"; version: string }
+  | { state: "failed"; message: string };
+/** Looks for a new version and downloads it. */
+export const checkForUpdates = () => invoke<UpdateStatus>("check_for_updates");
+/** Installs the downloaded update; Capshot restarts. */
+export const installUpdate = () => invoke<void>("install_update");
 export const openFolder = (folder: Folder) => invoke<void>("open_folder", { folder });
 
 /** Whether Windows keeps the Print Screen key for its own screen capture. */

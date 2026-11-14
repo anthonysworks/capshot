@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="536" viewBox="0 0 900 536" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+<rect width="900" height="536" rx="14" fill="#0d1117"/>
+<text x="32" y="42" font-size="20" font-weight="600" fill="#e6edf3">Capshot vs ShareX</text>
+<text x="868" y="42" font-size="13" text-anchor="end" fill="#8b949e">lower is better</text>
+<line x1="32" x2="868" y1="56" y2="56" stroke="#262c36"/>
+<text x="32" y="80" font-size="15" font-weight="600" fill="#e6edf3">Installer size</text>
+<text x="868" y="80" font-size="13" font-weight="600" text-anchor="end" fill="#4c8dff">34× smaller</text>
+<text x="32" y="113" font-size="13" fill="#8b949e">Capshot</text>
+<rect x="110" y="97" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="97" width="19.81430536451169" height="22" rx="6" fill="#4c8dff"/>
+<text x="794" y="113" font-size="14" font-weight="600" fill="#e6edf3">4.3 MB</text>
+<text x="32" y="146" font-size="13" fill="#8b949e">ShareX</text>
+<rect x="110" y="130" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="130" width="670" height="22" rx="6" fill="#4a5260"/>
+<text x="794" y="146" font-size="14" font-weight="600" fill="#e6edf3">145.4 MB</text>
+<line x1="32" x2="868" y1="168" y2="168" stroke="#262c36"/>
+<text x="32" y="192" font-size="15" font-weight="600" fill="#e6edf3">Size on disk</text>
+<text x="868" y="192" font-size="13" font-weight="600" text-anchor="end" fill="#4c8dff">34× smaller</text>
+<text x="32" y="225" font-size="13" fill="#8b949e">Capshot</text>
+<rect x="110" y="209" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="209" width="19.45576923076923" height="22" rx="6" fill="#4c8dff"/>
+<text x="794" y="225" font-size="14" font-weight="600" fill="#e6edf3">15.1 MB</text>
+<text x="32" y="258" font-size="13" fill="#8b949e">ShareX</text>
+<rect x="110" y="242" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="242" width="670" height="22" rx="6" fill="#4a5260"/>
+<text x="794" y="258" font-size="14" font-weight="600" fill="#e6edf3">520 MB</text>
+<line x1="32" x2="868" y1="280" y2="280" stroke="#262c36"/>
+<text x="32" y="304" font-size="15" font-weight="600" fill="#e6edf3">Idle memory (private)</text>
+<text x="868" y="304" font-size="13" font-weight="600" text-anchor="end" fill="#4c8dff">4.8× less</text>
+<text x="32" y="337" font-size="13" fill="#8b949e">Capshot</text>
+<rect x="110" y="321" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="321" width="140.41637751561416" height="22" rx="6" fill="#4c8dff"/>
+<text x="794" y="337" font-size="14" font-weight="600" fill="#e6edf3">30.2 MB</text>
+<text x="32" y="370" font-size="13" fill="#8b949e">ShareX</text>
+<rect x="110" y="354" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="354" width="670" height="22" rx="6" fill="#4a5260"/>
+<text x="794" y="370" font-size="14" font-weight="600" fill="#e6edf3">144.1 MB</text>
+<line x1="32" x2="868" y1="392" y2="392" stroke="#262c36"/>
+<text x="32" y="416" font-size="15" font-weight="600" fill="#e6edf3">Idle memory (working set)</text>
+<text x="868" y="416" font-size="13" font-weight="600" text-anchor="end" fill="#4c8dff">2× less</text>
+<text x="32" y="449" font-size="13" fill="#8b949e">Capshot</text>
+<rect x="110" y="433" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="433" width="326.87145069695407" height="22" rx="6" fill="#4c8dff"/>
+<text x="794" y="449" font-size="14" font-weight="600" fill="#e6edf3">94.5 MB</text>
+<text x="32" y="482" font-size="13" fill="#8b949e">ShareX</text>
+<rect x="110" y="466" width="670" height="22" rx="6" fill="#1b222c"/>
+<rect x="110" y="466" width="670" height="22" rx="6" fill="#4a5260"/>
+<text x="794" y="482" font-size="14" font-weight="600" fill="#e6edf3">193.7 MB</text>
+</svg>

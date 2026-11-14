@@ -508,3 +508,15 @@ pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     service.copy_text(text);
     Ok(())
 }
+
+/// Looks for an update now (the settings button).
+#[tauri::command]
+pub async fn check_for_updates(app: AppHandle) -> crate::updates::Status {
+    crate::updates::check(&app).await
+}
+
+/// Installs the downloaded update and restarts.
+#[tauri::command]
+pub fn install_update(app: AppHandle) -> Result<(), String> {
+    crate::updates::install(&app)
+}

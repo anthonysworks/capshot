@@ -18,27 +18,51 @@
         "enable": true,
         "scope": []
       },
-      "capabilities": ["default"]
+      "capabilities": [
+        "default"
+      ]
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "category": "Utility",
     "shortDescription": "Fast, minimal screen capture and recording",
     "copyright": "Capshot contributors",
     "license": "GPL-3.0-or-later",
     "licenseFile": "../../LICENSE",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["English", "French"],
+        "languages": [
+          "English",
+          "French"
+        ],
         "displayLanguageSelector": true,
         "headerImage": "installer/header.bmp",
         "sidebarImage": "installer/sidebar.bmp",
         "installerIcon": "icons/icon.ico",
         "installerHooks": "installer/hooks.nsh"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwRUFBREU2OTlDM0RGMjQKUldRazM4T1o1cTNxTUNqa0NLSTRQdGgxdmI3aHBkZHIvd0FQSDE1OUFPOXViaVoxOTllTVVhKzQK",
+      "endpoints": [
+        "https://github.com/anthonysworks/capshot/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

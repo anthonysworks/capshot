@@ -16,6 +16,7 @@ const RECORD: &str = "record";
 const PAUSE: &str = "pause";
 const SCREENSHOTS: &str = "screenshots";
 const SETTINGS: &str = "settings";
+const UPDATE: &str = "update";
 const QUIT: &str = "quit";
 /// Prefix of the "recent capture" items, followed by their index.
 const RECENT: &str = "recent:";
@@ -71,26 +72,59 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     };
     let recent_menu = Submenu::with_items(app, "Recent captures", true, &recent_refs)?;
 
-    Menu::with_items(
+    let menu = Menu::new(app)?;
+    if let Some(version) = app.state::<crate::updates::Updates>().pending_version() {
+        let label = format!("Restart to update to {version}");
+        menu.append(&MenuItem::with_id(app, UPDATE, label, true, None::<&str>)?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    menu.append(&MenuItem::with_id(
         app,
-        &[
-            &MenuItem::with_id(app, CAPTURE, "Capture", true, Some(&hotkeys.capture))?,
-            &MenuItem::with_id(app, RECORD, record_label, true, Some(&hotkeys.record))?,
-            &MenuItem::with_id(app, PAUSE, pause_label, recording, None::<&str>)?,
-            &PredefinedMenuItem::separator(app)?,
-            &recent_menu,
-            &MenuItem::with_id(
-                app,
-                SCREENSHOTS,
-                "Open screenshots folder",
-                true,
-                None::<&str>,
-            )?,
-            &MenuItem::with_id(app, SETTINGS, "Settings", true, None::<&str>)?,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, QUIT, "Quit Capshot", true, None::<&str>)?,
-        ],
-    )
+        CAPTURE,
+        "Capture",
+        true,
+        Some(&hotkeys.capture),
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        RECORD,
+        record_label,
+        true,
+        Some(&hotkeys.record),
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        PAUSE,
+        pause_label,
+        recording,
+        None::<&str>,
+    )?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&recent_menu)?;
+    let screenshots = MenuItem::with_id(
+        app,
+        SCREENSHOTS,
+        "Open screenshots folder",
+        true,
+        None::<&str>,
+    )?;
+    menu.append(&screenshots)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        SETTINGS,
+        "Settings",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        QUIT,
+        "Quit Capshot",
+        true,
+        None::<&str>,
+    )?)?;
+    Ok(menu)
 }
 
 /// Rebuilds the menu, e.g. after a capture or a hotkey change.
@@ -132,6 +166,11 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
                 windows::open_in_explorer(&dir);
             }
             SETTINGS => windows::show_settings(app),
+            UPDATE => {
+                if let Err(err) = crate::updates::install(app) {
+                    tracing::warn!("cannot install the update: {err}");
+                }
+            }
             QUIT => app.exit(0),
             id => {
                 if let Some(index) = id.strip_prefix(RECENT).and_then(|i| i.parse().ok()) {

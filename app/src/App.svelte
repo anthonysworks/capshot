@@ -10,6 +10,9 @@
     GIF_FPS_PRESETS,
     GIF_WIDTHS,
     appInfo,
+    checkForUpdates,
+    installUpdate,
+    type UpdateStatus,
     type JobProgress,
     convertToGif,
     getConfig,
@@ -49,6 +52,16 @@
     { value: "nothing", title: "Silent", text: "Copied and saved, nothing on screen." },
   ];
   let dragging = $state(false);
+  let update = $state<UpdateStatus | "checking" | null>(null);
+
+  async function lookForUpdate() {
+    update = "checking";
+    try {
+      update = await checkForUpdates();
+    } catch (e) {
+      update = { state: "failed", message: String(e) };
+    }
+  }
 
   const dirty = $derived(config !== null && JSON.stringify(config) !== saved);
   const fpsValid = $derived(
@@ -222,6 +235,31 @@
               <input type="checkbox" bind:checked={config.capture.copy_to_clipboard} />
               <span>Copy to the clipboard (videos are copied as files, ready to paste in a chat or a folder)</span>
             </label>
+          </section>
+          <section>
+            <h2>Updates</h2>
+            <label class="row check">
+              <input type="checkbox" bind:checked={config.auto_update} />
+              <span>Download new versions in the background and offer to install them from the tray menu</span>
+            </label>
+            <div class="row">
+              {#if update && update !== "checking" && update.state === "ready"}
+                <button class="primary" onclick={() => installUpdate().catch((e) => (update = { state: "failed", message: String(e) }))}>
+                  Restart to install {update.version}
+                </button>
+              {:else}
+                <button onclick={lookForUpdate} disabled={update === "checking"}>
+                  {update === "checking" ? "Checking…" : "Check for updates"}
+                </button>
+              {/if}
+              {#if update && update !== "checking"}
+                <span class="hint">
+                  {#if update.state === "upToDate"}You have the latest version{info ? ` (${info.version})` : ""}.
+                  {:else if update.state === "ready"}Version {update.version} is downloaded.
+                  {:else}Could not check: {update.message}{/if}
+                </span>
+              {/if}
+            </div>
           </section>
         {:else if category === "shortcuts"}
           <h1>Shortcuts</h1>

@@ -15,6 +15,7 @@ mod sounds;
 mod state;
 mod system;
 mod tray;
+mod updates;
 mod windows;
 
 use capshot_core::{Config, Paths, logging};
@@ -92,11 +93,13 @@ pub fn run() {
         ))
         .plugin(hotkeys::plugin())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new(paths, config))
         .manage(hotkeys::Registered::default())
         .manage(recording::RecorderState::default())
         .manage(editor::EditorFiles::default())
         .manage(saving::Saving::default())
+        .manage(updates::Updates::default())
         .manage(quick::QuickFiles::default())
         .setup(move |app| {
             tray::create(app.handle())?;
@@ -109,6 +112,7 @@ pub fn run() {
                 }
             }
             saving::recover(app.handle());
+            updates::start(app.handle());
             std::thread::spawn(quick::clean_pending);
             let state = app.state::<AppState>();
             let hotkeys = state.config().hotkeys.clone();
@@ -161,6 +165,8 @@ pub fn run() {
             commands::open_keyboard_settings,
             commands::pick_folder,
             commands::open_setup,
+            commands::check_for_updates,
+            commands::install_update,
         ])
         .build(tauri::generate_context!());
 
