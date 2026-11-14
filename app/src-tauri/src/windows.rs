@@ -46,8 +46,8 @@ pub fn show_setup(app: &AppHandle) {
         WebviewUrl::App("index.html?setup=1".into()),
     )
     .title("Welcome to Capshot")
-    .inner_size(760.0, 640.0)
-    .min_inner_size(640.0, 560.0)
+    .inner_size(840.0, 720.0)
+    .min_inner_size(720.0, 620.0)
     .center()
     .build();
     if let Err(err) = result {
