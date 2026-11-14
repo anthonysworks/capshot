@@ -102,7 +102,7 @@ Capshot against the current ShareX release, measured on the same Windows 11 mach
 
 - **Installer size**: the `setup` installers published by each project. Capshot 1.0.0, ShareX 22.4.0.
 - **Size on disk**: Capshot's installed folder, and ShareX 22.4.0 unzipped from its portable build.
-- **Idle memory**: both apps sitting in the tray with no window open. ShareX was launched three times with `-silent` and sampled 32 seconds after start (the mean of the three is shown). Capshot was sampled while idle in the tray. *Private* is private bytes, *working set* is the memory resident in RAM, shared pages included.
+- **Idle memory**: both apps sitting in the tray with no window open. ShareX was launched three times with `-silent` and sampled 32 seconds after start (the mean of the three is shown). Capshot was sampled while idle in the tray, on the build made before automatic updates were added. *Private* is private bytes, *working set* is the memory resident in RAM, shared pages included.
 - ShareX runs on .NET and ships its own runtime, which accounts for much of the difference. The two apps do not do exactly the same things, and ShareX offers many features Capshot does not (uploaders and automation workflows, for a start).
 
 </details>
