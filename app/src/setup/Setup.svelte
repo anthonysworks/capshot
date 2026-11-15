@@ -10,10 +10,7 @@
   import {
     type Config,
     getConfig,
-    openKeyboardSettings,
     pickFolder,
-    printScreenTaken,
-    releasePrintScreen,
     saveConfig,
   } from "../lib/api";
   import HotkeyInput from "../lib/HotkeyInput.svelte";
@@ -34,25 +31,22 @@
   const SHORTCUTS = [
     {
       id: "capture",
-      title: "Screenshot",
-      text: "Press it anywhere, drag over what you want, then copy, save, edit or pin it.",
+      title: "Take a screenshot",
+      text: "Drag over what you want, then copy, save or edit it.",
       keys: ["PrintScreen", "Ctrl+Shift+S", "Ctrl+Alt+S"],
       art: { light: captureLight, dark: captureDark, alt: "The selection and its action bar" },
     },
     {
       id: "record",
-      title: "Recording",
-      text: "Press it, choose the area, and record a video or a GIF.",
+      title: "Record the screen",
+      text: "Choose an area, then record a video or a GIF.",
       keys: ["Shift+PrintScreen", "Ctrl+Shift+R", "Ctrl+Alt+R"],
       art: { light: recordLight, dark: recordDark, alt: "The recording toolbar" },
     },
   ] as const;
-  const FALLBACK: Record<Which, string> = { capture: "Ctrl+Shift+S", record: "Ctrl+Shift+R" };
 
   const label = (key: string) => key.replace("PrintScreen", "Print Screen");
   const caps = (key: string) => key.split("+").map(label);
-  /** Windows only reacts to the key on its own, not to Shift+Print Screen. */
-  const isBarePrintScreen = (key: string) => key.toLowerCase() === "printscreen";
 
   const IMAGE_FORMATS = [
     { value: "png", title: "PNG", text: "Sharp, no loss" },
@@ -87,18 +81,10 @@
   let config = $state<Config | null>(null);
   let step = $state<Step>("welcome");
   let custom = $state<Record<Which, boolean>>({ capture: false, record: false });
-  /** Windows opens its own capture on Print Screen. */
-  let taken = $state(false);
-  let released = $state(false);
-  let keptWindowsKey = $state(false);
   let error = $state("");
   let saving = $state(false);
 
   const index = $derived(STEPS.findIndex((s) => s.id === step));
-  const usesPrintScreen = $derived(
-    !!config && (isBarePrintScreen(config.hotkeys.capture) || isBarePrintScreen(config.hotkeys.record)),
-  );
-  const conflict = $derived(usesPrintScreen && taken);
 
   onMount(() => {
     getConfig().then((c) => {
@@ -107,42 +93,12 @@
       c.startup = true;
       config = c;
     });
-    // The Windows setting may be changed in its own page meanwhile: ask again
-    // whenever this window comes back to the front.
-    void checkPrintScreen();
-    window.addEventListener("focus", checkPrintScreen);
-    return () => window.removeEventListener("focus", checkPrintScreen);
   });
-
-  async function checkPrintScreen() {
-    taken = await printScreenTaken().catch(() => false);
-  }
-
-  async function freePrintScreen() {
-    error = "";
-    try {
-      await releasePrintScreen();
-      released = true;
-      await checkPrintScreen();
-    } catch (e) {
-      error = String(e);
-    }
-  }
 
   function choose(which: Which, key: string) {
     if (!config) return;
     custom[which] = false;
-    keptWindowsKey = false;
     config.hotkeys[which] = key;
-  }
-
-  /** Leaves Print Screen to Windows. */
-  function keepWindowsKey() {
-    if (!config) return;
-    config.hotkeys.capture = FALLBACK.capture;
-    config.hotkeys.record = FALLBACK.record;
-    custom = { capture: false, record: false };
-    keptWindowsKey = true;
   }
 
   async function folder(kind: "capture" | "recording") {
@@ -198,52 +154,6 @@
   <img class="on-dark" src={dark} alt="" aria-hidden="true" draggable="false" />
 {/snippet}
 
-{#snippet printScreenNotice()}
-  {#if conflict}
-    <section class="notice warn" aria-labelledby="ps-title">
-      <h2 id="ps-title">Windows also uses Print Screen</h2>
-      <p>Windows opens its Snipping Tool on that key, so both programs would start. Pick one to continue:</p>
-      <div class="options">
-        <div class="option">
-          <h3>Capshot takes it <span class="tag">Recommended</span></h3>
-          <p>
-            Switches off the Windows option <em>“Use the Print screen button to open screen capture”</em> for your
-            account. You can turn it back on in Settings › Accessibility › Keyboard.
-          </p>
-          <div class="buttons">
-            <button type="button" class="primary" onclick={freePrintScreen}>Turn it off for me</button>
-            <button type="button" class="link" onclick={openKeyboardSettings}>Open that Windows page</button>
-          </div>
-        </div>
-        <div class="option">
-          <h3>Windows keeps it</h3>
-          <p>
-            Print Screen stays with the Snipping Tool. Capshot uses <b>Ctrl+Shift+S</b> to capture and
-            <b>Ctrl+Shift+R</b> to record.
-          </p>
-          <div class="buttons">
-            <button type="button" onclick={keepWindowsKey}>Use Ctrl+Shift+S and R</button>
-          </div>
-        </div>
-      </div>
-    </section>
-  {:else if usesPrintScreen}
-    <section class="notice ok" role="status">
-      <h2>Print Screen is yours</h2>
-      <p>
-        {released
-          ? "Windows no longer opens the Snipping Tool on Print Screen. Capshot also intercepts the key itself, so it works right away, without signing out."
-          : "Windows is not using Print Screen, so Capshot can have it."}
-      </p>
-    </section>
-  {:else if keptWindowsKey}
-    <section class="notice ok" role="status">
-      <h2>Print Screen stays with Windows</h2>
-      <p>Capshot uses Ctrl+Shift+S to capture and Ctrl+Shift+R to record.</p>
-    </section>
-  {/if}
-{/snippet}
-
 {#if config}
   <div class="setup">
     <header>
@@ -270,16 +180,15 @@
         </div>
       {:else if step === "shortcuts"}
         <h1>Shortcuts</h1>
-        <p class="lead">Capshot waits in the background. These keys start a capture from any program.</p>
+        <p class="lead">Capshot waits in the background. Press one of these keys, in any program.</p>
 
         {#each SHORTCUTS as s (s.id)}
           <section class="shortcut">
+            <figure>{@render themed(s.art.light, s.art.dark, s.art.alt)}</figure>
             <div class="shortcut-body">
-              <div class="head">
-                <h2>{s.title}</h2>
-                {@render keys(config.hotkeys[s.id])}
-              </div>
+              <h2>{s.title}</h2>
               <p class="desc">{s.text}</p>
+              <div class="bigkeys">{@render keys(config.hotkeys[s.id])}</div>
               <div class="choices" role="radiogroup" aria-label="{s.title} shortcut">
                 {#each s.keys as key (key)}
                   <button
@@ -294,9 +203,7 @@
               </div>
               {#if custom[s.id]}<HotkeyInput label="{s.title} shortcut" bind:value={config.hotkeys[s.id]} />{/if}
             </div>
-            <figure>{@render themed(s.art.light, s.art.dark, s.art.alt)}</figure>
           </section>
-          {#if s.id === "capture"}{@render printScreenNotice()}{/if}
         {/each}
       {:else if step === "folders"}
         <h1>Where to save</h1>
@@ -443,7 +350,7 @@
       {#if step === "done"}
         <button type="button" class="primary" onclick={() => getCurrentWindow().close()}>Start using Capshot</button>
       {:else}
-        <button type="button" class="primary" onclick={next} disabled={saving || (step === "shortcuts" && conflict)}>{step === "look" ? "Finish" : "Continue"}</button>
+        <button type="button" class="primary" onclick={next} disabled={saving}>{step === "look" ? "Finish" : "Continue"}</button>
       {/if}
     </footer>
   </div>
@@ -593,7 +500,7 @@
   /* Shortcuts */
   .shortcut {
     display: grid;
-    grid-template-columns: 1fr 230px;
+    grid-template-columns: 240px 1fr;
     align-items: center;
     gap: 20px;
     margin-top: 14px;
@@ -601,11 +508,12 @@
     border-radius: 14px;
     background: var(--surface);
   }
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+  .bigkeys {
+    margin: 12px 0 14px;
+  }
+  .bigkeys kbd {
+    padding: 6px 14px;
+    font-size: 16px;
   }
   figure {
     margin: 0;
@@ -658,62 +566,6 @@
     font-weight: 400;
     opacity: 0.75;
   }
-  .notice {
-    margin-top: 14px;
-    padding: 16px 18px;
-    border-radius: 14px;
-    background: var(--surface);
-  }
-  .notice p {
-    margin: 4px 0 0;
-    font-size: 13.5px;
-    color: var(--text-muted);
-  }
-  .notice.warn {
-    box-shadow: inset 0 0 0 1.5px var(--warning);
-  }
-  .notice.ok {
-    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
-  }
-  .options {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    margin-top: 12px;
-  }
-  .option {
-    display: flex;
-    flex-direction: column;
-    padding: 12px 14px;
-    border-radius: 12px;
-    background: var(--bg);
-    box-shadow: inset 0 0 0 1px var(--border);
-  }
-  .option p {
-    flex: 1;
-    margin: 0 0 12px;
-  }
-  .option b {
-    color: var(--text);
-    font-weight: 650;
-  }
-  .tag {
-    margin-left: 6px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent-text);
-    font-size: 11px;
-    font-weight: 650;
-    vertical-align: 1px;
-  }
-  .buttons {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px 14px;
-  }
-
   /* Folders and other groups */
   .group {
     margin-top: 16px;
@@ -874,9 +726,5 @@
     background: none;
     color: var(--text-muted);
     text-decoration: underline;
-  }
-  .buttons button.link {
-    height: auto;
-    color: var(--accent-text);
   }
 </style>
