@@ -31,6 +31,11 @@ Small, fast, open source. An alternative to ShareX with a built-in editor.
 
 <br>
 
+> [!WARNING]
+> **Windows SmartScreen will warn you when you run the installer. This is normal.** Capshot is free and open source, and I cannot afford a code-signing certificate. Click **More info**, then **Run anyway**.
+
+<br>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/video-dark.webp">
   <img src="docs/images/video-light.webp" alt="The Capshot video editor" width="100%">
@@ -128,12 +133,9 @@ The installer ends up in `target/release/bundle/nsis`. For development, `npm run
 
 The flag skips the update signature, which official releases get from a private key kept in CI.
 
-## Code signing policy
+## Privacy
 
-Windows installers are being set up for free code signing by [SignPath Foundation](https://signpath.org), through [SignPath.io](https://signpath.io). Until that is approved, installers are not signed and Windows SmartScreen may warn when you run one: choose *More info*, then *Run anyway*. Updates installed from inside Capshot are not affected, since they do not go through the browser.
-
-- **Who signs**: releases are built by GitHub Actions from the tagged source in this repository, and only [@anthonysworks](https://github.com/anthonysworks) (maintainer and sole approver) can approve a signing request.
-- **Privacy**: Capshot sends nothing anywhere on its own. The only network access is the check for a new version, which asks GitHub for `latest.json`; it can be turned off in **Settings → General**. Screenshots and recordings never leave your computer unless you copy or move them yourself.
+Capshot sends nothing anywhere on its own. The only network access is the check for a new version, which asks GitHub for `latest.json`; it can be turned off in **Settings → General**. Screenshots and recordings never leave your computer unless you copy or move them yourself.
 
 ## Contributing
 
