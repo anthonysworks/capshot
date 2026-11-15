@@ -89,6 +89,8 @@ pub struct TrimOptions {
     pub sound: SoundEdit,
     /// Music played under (or instead of) the recorded sound.
     pub music: Option<Music>,
+    /// Videos added after the edited one, each scaled to fit.
+    pub clips: Vec<PathBuf>,
 }
 
 /// A sound file mixed into the result.
@@ -161,6 +163,7 @@ impl TrimOptions {
             match_source: true,
             sound: SoundEdit::default(),
             music: None,
+            clips: Vec::new(),
         }
     }
 
@@ -592,7 +595,7 @@ struct Pipeline {
     synth_audio: bool,
     duration: Duration,
     fps: u32,
-    _manager: IMFDXGIDeviceManager,
+    manager: IMFDXGIDeviceManager,
 }
 
 /// Bitrate that keeps what the source has: re-encoding below the source's
@@ -736,7 +739,10 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         // No sound in the source but click sounds wanted: generate a track.
         let mut synth_audio = false;
         let audio_out = match audio_out {
-            None if options.click_sound() || options.music.is_some() => {
+            None if options.click_sound()
+                || options.music.is_some()
+                || (options.audio && !options.clips.is_empty()) =>
+            {
                 let pcm = audio_type(&MFAudioFormat_PCM, 48_000, 2)?;
                 pcm.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4)?;
                 pcm.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 48_000 * 4)?;
@@ -760,7 +766,7 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
             synth_audio,
             duration,
             fps: out_fps,
-            _manager: manager,
+            manager,
         })
     }
 }
@@ -905,10 +911,13 @@ unsafe fn run(
         // The music, decoded once at the rate and channels of the result.
         let bed = match &options.music {
             Some(music) => {
-                let length = music
-                    .length
-                    .unwrap_or(f64::INFINITY)
-                    .min((output_seconds - music.start).max(0.0));
+                // Without added videos, the music stops with the result.
+                let room = if options.clips.is_empty() {
+                    (output_seconds - music.start).max(0.0)
+                } else {
+                    f64::INFINITY
+                };
+                let length = music.length.unwrap_or(f64::INFINITY).min(room);
                 let pcm = decode_music(&music.path, music.from, length, rate, channels)?;
                 Some((
                     pcm,
@@ -1049,6 +1058,20 @@ unsafe fn run(
             // The next segment follows the last frame written.
             offset = offset.max(segment_end);
         }
+        // Videos added after the edited one.
+        for clip in &options.clips {
+            let (end, written) = append_clip(
+                &p,
+                clip,
+                offset,
+                (frame_ticks, min_gap),
+                (rate, channels),
+                bed.as_ref(),
+                progress,
+            )?;
+            offset = end;
+            frames += written;
+        }
         if frames == 0 {
             return Err(RecordError::EmptyRegion);
         }
@@ -1152,6 +1175,152 @@ impl AudioReader {
         let length = ((end - start) as f64 / 1e7 * f64::from(rate)) as usize * channels;
         out.truncate(length);
         Ok(out)
+    }
+}
+
+/// Writes `clip` after the result written so far (`offset`, 100 ns units):
+/// scaled to fit the frame of the result, with black bars, its sound at the
+/// rate and channels of the result. Returns where it ends and how many
+/// frames were written.
+///
+/// SAFETY: Media Foundation must be started; `p` is the open pipeline.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+unsafe fn append_clip(
+    p: &Pipeline,
+    clip: &Path,
+    offset: i64,
+    (frame_ticks, min_gap): (i64, i64),
+    (rate, channels): (u32, usize),
+    bed: Option<&(Vec<i16>, Bed)>,
+    progress: &mut impl FnMut(f32) -> bool,
+) -> Result<(i64, u64)> {
+    // SAFETY: Media Foundation and Direct3D calls with valid arguments.
+    unsafe {
+        let gpu = &p.frames.gpu;
+        let mut attributes: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attributes, 3)?;
+        let attributes = attributes.ok_or(RecordError::ThreadLost)?;
+        attributes.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &p.manager)?;
+        attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
+        attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(clip.as_os_str()), &attributes)?;
+        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        reader.SetStreamSelection(VIDEO, true)?;
+        let wanted = MFCreateMediaType()?;
+        wanted.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+        wanted.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+        reader.SetCurrentMediaType(VIDEO, None, &wanted)?;
+        let decoded = reader.GetCurrentMediaType(VIDEO)?;
+        let layout = layout(&decoded)?;
+        let space = match decoded.GetUINT32(&MF_MT_YUV_MATRIX) {
+            Ok(m) if m == MFVideoTransferMatrix_BT601.0 as u32 => Space::Bt601,
+            _ => Space::Bt709,
+        };
+        let fps = decoded
+            .GetUINT64(&MF_MT_FRAME_RATE)
+            .ok()
+            .map(|r| {
+                let (num, den) = ((r >> 32) as u32, (r as u32).max(1));
+                (num + den / 2) / den
+            })
+            .filter(|&f| f > 0)
+            .unwrap_or(30);
+        let duration = reader
+            .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+            .ok()
+            .and_then(|v| u64::try_from(&v).ok())
+            .map_or(0, |t| t as i64);
+
+        // The clip as decoded, then scaled into the frame of the result.
+        let frames = Frames::new(gpu, layout, space, fps, &TrimOptions::whole(false, 0))?;
+        let (cw, ch) = frames.size;
+        let (ow, oh) = p.frames.size;
+        let scale = (f64::from(ow) / f64::from(cw)).min(f64::from(oh) / f64::from(ch));
+        let dw = ((f64::from(cw) * scale) as u32 & !1).clamp(2, ow);
+        let dh = ((f64::from(ch) * scale) as u32 & !1).clamp(2, oh);
+        let (dx, dy) = (((ow - dw) / 2) & !1, ((oh - dh) / 2) & !1);
+        let dest = Rect::new(dx as i32, dy as i32, (dx + dw) as i32, (dy + dh) as i32);
+        let clip_full = Rect::new(0, 0, cw as i32, ch as i32);
+        let scaler = Blitter::new(gpu, (cw, ch), (ow, oh), fps, (Space::Bt709, Space::Bt709))?;
+
+        // A black frame (NV12: luma 16, chroma 128) to start each one from.
+        let black = render_texture(gpu, (ow, oh), DXGI_FORMAT_NV12)?;
+        let pixels = ow as usize * oh as usize;
+        let mut nv12 = vec![16u8; pixels];
+        nv12.resize(pixels + pixels / 2, 128);
+        gpu.context()
+            .UpdateSubresource(&black, 0, None, nv12.as_ptr().cast(), ow, 0);
+
+        // Its sound; silent when it has none (or when the result has none).
+        let mut pending = match p.audio_out {
+            Some(stream) => {
+                let mut pcm =
+                    decode_music(clip, 0.0, f64::INFINITY, rate, channels).unwrap_or_default();
+                let wanted = (duration as f64 / 1e7 * f64::from(rate)) as usize * channels;
+                pcm.resize(pcm.len().max(wanted), 0);
+                if let Some((music, bed)) = bed {
+                    mix_bed(&mut pcm, channels, rate, offset as f64 / 1e7, music, bed);
+                }
+                Some(PendingPcm::new(pcm, stream, offset))
+            }
+            None => None,
+        };
+
+        let (mut first, mut last_written, mut end, mut written) = (None, i64::MIN, offset, 0u64);
+        loop {
+            let (mut flags, mut time) = (0u32, 0i64);
+            let mut sample: Option<IMFSample> = None;
+            reader.ReadSample(
+                VIDEO,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut time),
+                Some(&mut sample),
+            )?;
+            if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 | MF_SOURCE_READERF_ERROR.0) as u32 != 0 {
+                break;
+            }
+            let Some(sample) = sample else {
+                continue;
+            };
+            let first = *first.get_or_insert(time);
+            let at = offset + (time - first).max(0);
+            let length = sample.GetSampleDuration().unwrap_or(frame_ticks);
+            end = end.max(at + length);
+            if last_written == i64::MIN || at - last_written >= min_gap {
+                let texture = frames.render(&sample, time as f64 / 1e7)?;
+                drop(sample);
+                let output = render_texture(gpu, (ow, oh), DXGI_FORMAT_NV12)?;
+                gpu.context().CopyResource(&output, &black);
+                scaler.blit(
+                    &scaler.input(&texture, 0)?,
+                    clip_full,
+                    &scaler.output(&output)?,
+                    dest,
+                )?;
+                if let Some(pending) = &mut pending {
+                    pending.write_until(&p.writer, at + 5_000_000, channels, rate)?;
+                }
+                write_texture(&p.writer, p.video_out, &output, at, length)?;
+                last_written = at;
+                written += 1;
+            }
+            // Stays below 100 % until everything is written.
+            if !progress(0.99) {
+                return Err(RecordError::Cancelled);
+            }
+        }
+        if let Some(pending) = &mut pending {
+            pending.write_until(&p.writer, i64::MAX, channels, rate)?;
+        }
+        Ok((end, written))
     }
 }
 

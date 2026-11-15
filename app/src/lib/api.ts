@@ -226,6 +226,8 @@ export type ExportTask =
         fade_in: number;
         fade_out: number;
       } | null;
+      /** Videos added after this one (paths), in order. */
+      clips: string[];
     }
   | { kind: "gif"; gif: Config["gif"]; edit: VideoEdit | null };
 

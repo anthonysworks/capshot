@@ -203,6 +203,16 @@
   }
   let music = $state<Music | null>(null);
   let musicPlayer: HTMLAudioElement | null = null;
+  /** Videos added after this one: scaled to fit and written one after the other. */
+  interface Clip {
+    id: number;
+    path: string;
+    name: string;
+    /** Length in seconds. */
+    length: number;
+  }
+  let clips = $state<Clip[]>([]);
+  const clipsSeconds = $derived(clips.reduce((sum, c) => sum + c.length, 0));
   /** What is saved, and how. */
   let exportKind = $state<"mp4" | "gif">("mp4");
   let height = $state<number | null>(null);
@@ -285,7 +295,7 @@
   let draft = $state<Shape | null>(null);
   let zoom = $state(1);
   let viewWidth = $state(800);
-  let menu = $state<"speed" | "sound" | "music" | "style" | null>(null);
+  let menu = $state<"speed" | "sound" | "music" | "clips" | "style" | null>(null);
   /** Section shown in the side panel. */
   let panel = $state<"background" | "cursor" | "zoom" | "format" | "export">("background");
   /** A new format is being framed: Cancel goes back to the one before. */
@@ -824,7 +834,7 @@
   }
 
   /** How long the music plays on the result. */
-  const musicSeconds = $derived(music ? Math.max(0, Math.min(music.length - music.from, output - music.start)) : 0);
+  const musicSeconds = $derived(music ? Math.max(0, Math.min(music.length - music.from, output + clipsSeconds - music.start)) : 0);
 
   /** Level of the music at `rel` seconds after it starts. */
   function musicLevel(m: Music, rel: number) {
@@ -859,7 +869,10 @@
       notify(String(e));
       return null;
     });
-    if (!picked) return;
+    if (picked) await useMusic(picked);
+  }
+
+  async function useMusic(picked: string) {
     const player = new Audio(convertFileSrc(picked));
     player.preload = "auto";
     try {
@@ -1632,13 +1645,55 @@
     });
   }
 
-  /** Brings a file into the video: a picture so far. */
+  const AUDIO_FILE = /\.(mp3|wav|m4a|aac|flac|ogg|oga|opus|wma)$/i;
+  const VIDEO_FILE = /\.(mp4|mov|m4v|mkv|webm|avi|wmv)$/i;
+
+  /** Brings a file into the video: a picture, music or another video. */
   function importMedia(file: string) {
     if (IMAGE_FILE.test(file)) {
       editorRead(file)
         .then((bytes) => placePicture(new Blob([bytes])))
         .catch((e) => notify(`Cannot use this picture: ${e}`));
+    } else if (AUDIO_FILE.test(file)) {
+      void useMusic(file);
+    } else if (VIDEO_FILE.test(file)) {
+      void useClip(file);
     }
+  }
+
+  /** Asks for a video and adds it after this one. */
+  async function addClip() {
+    const picked = await editorPickMedia("video").catch((e) => {
+      notify(String(e));
+      return null;
+    });
+    if (picked) await useClip(picked);
+  }
+
+  async function useClip(picked: string) {
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.src = convertFileSrc(picked);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        probe.addEventListener("loadedmetadata", () => resolve(), { once: true });
+        probe.addEventListener("error", () => reject(new Error("this video cannot be read")), { once: true });
+      });
+    } catch (e) {
+      notify(String(e instanceof Error ? e.message : e));
+      return;
+    }
+    const length = Number.isFinite(probe.duration) ? probe.duration : 0;
+    probe.removeAttribute("src");
+    clips.push({ id: nextId++, path: picked, name: picked.split(/[\\/]/).pop() ?? picked, length });
+    menu = "clips";
+  }
+
+  function moveClip(i: number, by: number) {
+    const j = i + by;
+    if (j < 0 || j >= clips.length) return;
+    const [moved] = clips.splice(i, 1);
+    if (moved) clips.splice(j, 0, moved);
   }
 
   async function addPictureFromFile() {
@@ -1823,6 +1878,7 @@
               fade_in: fadeIn,
               fade_out: fadeOut,
               music: musicTask(),
+              clips: clips.map((c) => c.path),
             }
           : {
               kind,
@@ -1906,7 +1962,7 @@
     const rate = Math.min(fps ?? sourceFps, sourceFps);
     const bpp = 0.08 * 2 ** ((23 - crf) / 6);
     const bits = Math.min(2e8, Math.max(1e6, exportSize.w * exportSize.h * rate * bpp));
-    return (bits / 8 + (audio || music ? 24_000 : 0)) * output;
+    return (bits / 8 + (audio || music ? 24_000 : 0)) * (output + clipsSeconds);
   });
 
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2862,6 +2918,33 @@
                   <button type="button" class="link" onclick={addMusic}>Change the music…</button>
                   <button type="button" class="link danger" onclick={removeMusic}>Remove</button>
                 </div>
+              </div>
+            {/if}
+          </div>
+          <div class="anchor">
+            <button
+              type="button"
+              class="pill-btn opens-menu"
+              class:on={clips.length > 0}
+              disabled={!duration}
+              aria-expanded={menu === "clips"}
+              title={clips.length ? "Videos added after this one" : "Add a video after this one"}
+              onclick={() => (clips.length ? (menu = menu === "clips" ? null : "clips") : addClip())}
+              ><Icon name="film" /> {clips.length ? `Videos (${clips.length})` : "Add video"} {#if clips.length}<Icon name="chevron" />{/if}</button
+            >
+            {#if menu === "clips" && clips.length}
+              <div class="popover sound align-right" role="dialog" aria-label="Added videos">
+                <p class="hint">Played after this video, in this order, scaled to fit. MP4 exports only.</p>
+                {#each clips as c, i (c.id)}
+                  <div class="clip-row">
+                    <span class="clip-name" title={c.path}>{c.name}</span>
+                    <span class="value">{format(c.length)}</span>
+                    <button type="button" class="ib" title="Move earlier" aria-label="Move earlier" disabled={i === 0} onclick={() => moveClip(i, -1)}>↑</button>
+                    <button type="button" class="ib" title="Move later" aria-label="Move later" disabled={i === clips.length - 1} onclick={() => moveClip(i, 1)}>↓</button>
+                    <button type="button" class="ib danger" title="Remove" aria-label="Remove" onclick={() => (clips = clips.filter((x) => x.id !== c.id))}><Icon name="trash" /></button>
+                  </div>
+                {/each}
+                <div class="field"><button type="button" class="link" onclick={addClip}>Add another video…</button></div>
               </div>
             {/if}
           </div>
@@ -4386,6 +4469,24 @@
   }
   .ib-range input {
     width: 90px;
+  }
+  .clip-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 280px;
+  }
+  .clip-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .hint {
+    margin: 0 0 6px;
+    font-size: 12px;
+    color: var(--text-muted);
   }
   .music-file {
     display: flex;

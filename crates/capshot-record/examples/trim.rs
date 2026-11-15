@@ -1,7 +1,7 @@
 //! Trims a video and prints the time taken.
 //!
 //! ```text
-//! cargo run --release -p capshot-record --example trim -- <in.mp4> <out.mp4> <start-s> <end-s> [mute|sound] [speed] [fps] [height] [music-file]
+//! cargo run --release -p capshot-record --example trim -- <in.mp4> <out.mp4> <start-s> <end-s> [mute|sound] [speed] [fps] [height] [music-file] [clip...]
 //! ```
 
 use std::path::PathBuf;
@@ -32,15 +32,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_height: args.get(8).and_then(|s| s.parse().ok()),
         match_source: true,
         sound: capshot_record::SoundEdit::default(),
-        music: args.get(9).map(|path| capshot_record::Music {
-            path: PathBuf::from(path),
-            start: 0.5,
-            from: 0.0,
-            length: None,
-            volume: 1.0,
-            fade_in: 0.5,
-            fade_out: 0.5,
-        }),
+        music: args
+            .get(9)
+            .filter(|p| !p.is_empty())
+            .map(|path| capshot_record::Music {
+                path: PathBuf::from(path),
+                start: 0.5,
+                from: 0.0,
+                length: None,
+                volume: 1.0,
+                fade_in: 0.5,
+                fade_out: 0.5,
+            }),
+        clips: args.iter().skip(10).map(PathBuf::from).collect(),
     };
     let started = Instant::now();
     let stats = trim_video(&input, &output, &options, |_| true)?;

@@ -293,13 +293,15 @@ pub fn editor_export(
     output: Option<String>,
 ) -> Result<u64, String> {
     let path = editable(&app, &path)?;
-    // The music must be a file brought into the editor.
+    // Music and added videos must be files brought into the editor.
     let mut task = task;
-    if let Task::Mp4 {
-        music: Some(music), ..
-    } = &mut task
-    {
-        music.path = editable(&app, &music.path.to_string_lossy())?;
+    if let Task::Mp4 { music, clips, .. } = &mut task {
+        if let Some(music) = music {
+            music.path = editable(&app, &music.path.to_string_lossy())?;
+        }
+        for clip in clips {
+            *clip = editable(&app, &clip.to_string_lossy())?;
+        }
     }
     // Only a file the user picked in the save dialog.
     let output = match output.map(PathBuf::from) {

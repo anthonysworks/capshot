@@ -140,6 +140,9 @@ pub enum Task {
         /// Music mixed in.
         #[serde(default)]
         music: Option<Music>,
+        /// Videos added after this one, in order.
+        #[serde(default)]
+        clips: Vec<PathBuf>,
     },
 }
 
@@ -296,6 +299,7 @@ pub fn run_host() -> i32 {
             fade_in,
             fade_out,
             music,
+            clips,
         } => {
             let (input, composition, track) = request.sources(&edit.composition);
             trim_video(
@@ -317,6 +321,7 @@ pub fn run_host() -> i32 {
                         fade_out: *fade_out,
                     },
                     music: music.as_ref().map(Music::track),
+                    clips: clips.clone(),
                 },
                 &mut progress,
             )
