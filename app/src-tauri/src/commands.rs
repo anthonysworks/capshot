@@ -157,7 +157,7 @@ pub fn convert_to_gif(app: AppHandle, path: String) -> u64 {
 
 /// A path the web UI may access: only files opened in an editor.
 fn editable(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
-    let path = PathBuf::from(path);
+    let path = crate::editor::normalize(&PathBuf::from(path));
     if app.state::<EditorFiles>().is_allowed(&path) {
         Ok(path)
     } else {
@@ -182,6 +182,44 @@ fn raw_body<'a>(request: &'a Request<'_>) -> Result<&'a [u8], String> {
         InvokeBody::Raw(bytes) => Ok(bytes),
         InvokeBody::Json(_) => Err("expected raw image bytes".into()),
     }
+}
+
+/// Asks for a picture, a sound or a video to bring into the editor; returns
+/// its path (the editor may read it from then on), or nothing when the
+/// dialog is closed.
+#[tauri::command]
+pub async fn editor_pick_media(app: AppHandle, kind: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (title, name, extensions): (&str, &str, &[&str]) = match kind.as_str() {
+        "image" => (
+            "Add a picture",
+            "Pictures",
+            &["png", "jpg", "jpeg", "webp", "bmp", "gif"],
+        ),
+        "audio" => (
+            "Add music or a sound",
+            "Sounds",
+            &["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma"],
+        ),
+        "video" => (
+            "Add a video",
+            "Videos",
+            &["mp4", "mov", "mkv", "webm", "avi", "m4v"],
+        ),
+        _ => return Err("unknown kind of file".into()),
+    };
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title(title)
+        .add_filter(name, extensions)
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = file.into_path().map_err(|e| e.to_string())?;
+    let (path, _) = crate::editor::allow_media(&app, &path).ok_or("this file cannot be used")?;
+    Ok(Some(path.display().to_string()))
 }
 
 /// Reads a file opened in the editor, as raw bytes.

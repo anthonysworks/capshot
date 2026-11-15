@@ -122,6 +122,10 @@ export const showInFolder = (path: string) => invoke<void>("show_in_folder", { p
 /** Reads a file opened in the editor. */
 export const editorRead = (path: string) => invoke<ArrayBuffer>("editor_read", { path });
 
+/** Asks for a picture, a sound or a video to bring in; resolves to its path
+ * (readable by the editor from then on), or null if the dialog is closed. */
+export const editorPickMedia = (kind: "image" | "audio" | "video") => invoke<string | null>("editor_pick_media", { kind });
+
 /** Saves an edited image (PNG bytes) over the original file. */
 export const editorSave = (path: string, png: Uint8Array) =>
   invoke<void>("editor_save", png, { headers: { "x-path": encodeURIComponent(path) } });

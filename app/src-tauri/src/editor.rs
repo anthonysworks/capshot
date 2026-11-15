@@ -47,6 +47,45 @@ pub fn kind(path: &Path) -> Option<Kind> {
     }
 }
 
+/// What can be brought into an editor besides the file being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Media {
+    Image,
+    Audio,
+    Video,
+}
+
+const AUDIO: &[&str] = &["mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "opus", "wma"];
+
+pub fn media_kind(path: &Path) -> Option<Media> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if AUDIO.contains(&ext.as_str()) {
+        Some(Media::Audio)
+    } else {
+        kind(path).map(|k| match k {
+            Kind::Image => Media::Image,
+            Kind::Video => Media::Video,
+        })
+    }
+}
+
+/// Lets the editors read (and play) a file the user brought in, picked in a
+/// dialog or dropped on a window. Returns its normalised path.
+pub fn allow_media(app: &AppHandle, path: &Path) -> Option<(PathBuf, Media)> {
+    let media = media_kind(path)?;
+    if !path.is_file() {
+        return None;
+    }
+    let path = normalize(path);
+    app.state::<EditorFiles>().allow(&path);
+    if media != Media::Image
+        && let Err(err) = app.asset_protocol_scope().allow_file(&path)
+    {
+        tracing::warn!("cannot play {}: {err}", path.display());
+    }
+    Some((path, media))
+}
+
 /// Percent-encodes everything but unreserved URL characters.
 pub fn encode_component(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 3);
@@ -116,10 +155,15 @@ pub fn open(app: &AppHandle, path: &Path) {
             let _ = window.set_focus();
             // A draft is saved or deleted once its editor is gone.
             let app = app.clone();
-            window.on_window_event(move |event| {
-                if matches!(event, tauri::WindowEvent::Destroyed) {
-                    crate::saving::editor_closed(&app, &path);
+            window.on_window_event(move |event| match event {
+                tauri::WindowEvent::Destroyed => crate::saving::editor_closed(&app, &path),
+                // Files dropped on the editor can be read by it.
+                tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                    for dropped in paths {
+                        allow_media(&app, dropped);
+                    }
                 }
+                _ => {}
             });
         }
         Err(err) => {

@@ -1,7 +1,16 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
-  import { editorCopy, editorImageSaveAs, editorRead, editorSave, editorSaveTo, showInFolder } from "../lib/api";
+  import {
+    editorCopy,
+    editorImageSaveAs,
+    editorPickMedia,
+    editorRead,
+    editorSave,
+    editorSaveTo,
+    onFileDrop,
+    showInFolder,
+  } from "../lib/api";
   import CustomColor from "./CustomColor.svelte";
   import { VIVID } from "./colors";
   import Logo from "../lib/Logo.svelte";
@@ -30,6 +39,7 @@
     fontSize,
     hit,
     normalize,
+    addPicture,
     CUSTOM_WALL,
     paintBackground,
     paintCard,
@@ -177,6 +187,9 @@
         error = String(e);
       }
     })();
+    const unlistenDrop = onFileDrop((paths) => {
+      for (const dropped of paths ?? []) if (IMAGE_FILE.test(dropped)) void importPicture(dropped);
+    });
     const observer = new ResizeObserver(() => layout());
     observer.observe(stage);
     const unlisten = getCurrentWindow().onCloseRequested((event) => {
@@ -189,6 +202,7 @@
     return () => {
       observer.disconnect();
       unlisten.then((f) => f());
+      unlistenDrop.then((f) => f());
     };
   });
 
@@ -799,6 +813,55 @@
     selected = copyOf.id;
   }
 
+  // ── Pictures ───────────────────────────────────────────────────────────
+
+  const IMAGE_FILE = /.(png|jpe?g|webp|bmp|gif)$/i;
+
+  /** Puts a picture on the image, centred in what is shown, and selects it. */
+  async function placePicture(bitmap: ImageBitmap) {
+    if (!image) return;
+    const area = crop ?? { x: 0, y: 0, w: image.width, h: image.height };
+    // At most a third of the image, never enlarged.
+    const scale = Math.min(1, area.w / 3 / bitmap.width, area.h / 3 / bitmap.height);
+    const w = Math.max(8, bitmap.width * scale);
+    const h = Math.max(8, bitmap.height * scale);
+    const x = area.x + (area.w - w) / 2;
+    const y = area.y + (area.h - h) / 2;
+    const shape: Shape = {
+      ...make("image", { x, y }, { size: 0, picture: addPicture(bitmap) }),
+      x2: x + w,
+      y2: y + h,
+    };
+    add(shape);
+  }
+
+  async function importPicture(file: string | Blob) {
+    try {
+      const blob = typeof file === "string" ? new Blob([await editorRead(file)]) : file;
+      await placePicture(await createImageBitmap(blob));
+    } catch (e) {
+      notify(`Cannot use this picture: ${e}`);
+    }
+  }
+
+  /** Asks for a picture and adds it. */
+  async function addPictureFromFile() {
+    const picked = await editorPickMedia("image").catch((e) => {
+      notify(String(e));
+      return null;
+    });
+    if (picked) await importPicture(picked);
+  }
+
+  /** Pasting a picture from the clipboard adds it. */
+  function paste(e: ClipboardEvent) {
+    if (editing) return;
+    const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    e.preventDefault();
+    void importPicture(file);
+  }
+
   function removeSelected() {
     const id = selected;
     if (id === null) return;
@@ -870,6 +933,8 @@
       if (tool === "crop") tool = "select";
     } else if (e.key === "Enter" && tool === "crop") {
       tool = "select";
+    } else if (!ctrl && !e.altKey && key === "i") {
+      void addPictureFromFile();
     } else if (!ctrl && !e.altKey) {
       const found = TOOLS.find((t) => t.key.toLowerCase() === key);
       if (found) pick(found.tool);
@@ -927,7 +992,7 @@
   );
 </script>
 
-<svelte:window onkeydown={keyDown} onkeyup={keyUp} />
+<svelte:window onkeydown={keyDown} onkeyup={keyUp} onpaste={paste} />
 
 <div class="editor">
   {#if closing}
@@ -1008,6 +1073,14 @@
           </div>
         </div>
       {/each}
+      <div class="tool-group">
+        <div class="tool-grid">
+          <button type="button" class="tool" title="Add a picture (I), or drop or paste one" aria-label="Add a picture" onclick={addPictureFromFile}>
+            <Icon name="picture" />
+            <span class="key">I</span>
+          </button>
+        </div>
+      </div>
     </nav>
 
     <div class="stage" bind:this={stage}>
@@ -1046,10 +1119,26 @@
             {/each}
             <span class="ib-sep"></span>
           {/if}
-          {#each COLORS.slice(0, 6) as c (c)}
-            <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
-          {/each}
-          <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
+          {#if s.kind === "image"}
+            <label class="ib-range" title="Opacity">
+              <Icon name="picture" />
+              <input
+                type="range"
+                min="0.1"
+                max="1"
+                step="0.05"
+                value={s.opacity ?? 1}
+                onpointerdown={remember}
+                oninput={(e) => (s.opacity = Number(e.currentTarget.value))}
+                aria-label="Opacity"
+              />
+            </label>
+          {:else}
+            {#each COLORS.slice(0, 6) as c (c)}
+              <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
+            {/each}
+            <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
+          {/if}
           <span class="ib-sep"></span>
           <button type="button" class="ib" title="Duplicate (Ctrl+D)" aria-label="Duplicate" onclick={duplicate}><Icon name="duplicate" /></button>
           <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeSelected}><Icon name="trash" /></button>
@@ -1640,6 +1729,16 @@
     height: 20px;
     margin: 0 3px;
     background: var(--border);
+  }
+  .ib-range {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 6px;
+    color: var(--text-muted);
+  }
+  .ib-range input {
+    width: 90px;
   }
   .ib-swatch {
     width: 20px;

@@ -139,6 +139,7 @@ pub fn run() {
             commands::convert_to_gif,
             commands::show_in_folder,
             commands::editor_read,
+            commands::editor_pick_media,
             commands::editor_save,
             commands::editor_save_copy,
             commands::editor_image_save_as,

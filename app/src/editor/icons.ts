@@ -50,6 +50,9 @@ export const ICONS = {
   picker: "M12.5 4.5l3 3M14 3a2.1 2.1 0 013 3l-2 2-3-3zM12 6l-7.5 7.5L4 16l2.5-.5L14 8",
   edit: "M3.5 16.5l1-4L13 4a1.4 1.4 0 012 0l1 1a1.4 1.4 0 010 2l-8.5 8.5zM11.5 5.5l3 3",
   gif: "M2.5 4.5h15v11h-15zM8 8.5H6.5v3H8v-1.3M10.5 8.5v3M13 11.5v-3h1.8M13 10h1.4",
+  picture: "M3 4.5h14v11H3zM3 13l4-4 3 3 2.5-2.5L17 14M13 8.2a1.2 1.2 0 100-2.4 1.2 1.2 0 000 2.4z",
+  music: "M8 15.5V5l8-1.5V14M8 15.5a2 2 0 11-4 0 2 2 0 014 0zM16 14a2 2 0 11-4 0 2 2 0 014 0z",
+  film: "M3 4h14v12H3zM6.5 4v12M13.5 4v12M3 8h3.5M3 12h3.5M13.5 8H17M13.5 12H17",
 } as const;
 
 export type IconName = keyof typeof ICONS;

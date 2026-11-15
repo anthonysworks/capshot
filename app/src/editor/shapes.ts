@@ -13,7 +13,8 @@ export type ShapeKind =
   | "number"
   | "pixelate"
   | "blur"
-  | "spotlight";
+  | "spotlight"
+  | "image";
 
 /** Rectangles and ellipses: outline only, tinted, or solid (redaction).
  * Text: no background, or a background box. */
@@ -43,6 +44,10 @@ export interface Shape {
   /** Curved arrow: how far its middle sits from the straight line, as a
    * share of its length (negative: the other side). */
   bend?: number;
+  /** Picture (kind `image`): its key in `pictures`. */
+  picture?: number;
+  /** 0–1; pictures only. */
+  opacity?: number;
   /** Text style. */
   font?: TextFont;
   bold?: boolean;
@@ -73,7 +78,16 @@ export interface Rect {
 }
 
 /** Shapes defined by two corners, which can be resized from them. */
-export const BOXED: ShapeKind[] = ["rect", "ellipse", "pixelate", "blur", "spotlight"];
+export const BOXED: ShapeKind[] = ["rect", "ellipse", "pixelate", "blur", "spotlight", "image"];
+
+/** Pictures brought into an editor, by the id a picture shape refers to. */
+export const pictures = new Map<number, ImageBitmap>();
+let nextPicture = 1;
+export function addPicture(bitmap: ImageBitmap): number {
+  const id = nextPicture++;
+  pictures.set(id, bitmap);
+  return id;
+}
 /** Drawn freehand, as a list of points. */
 export const FREEHAND: ShapeKind[] = ["pen", "highlight"];
 /** Width of the highlighter stroke for a given size. */
@@ -403,6 +417,15 @@ export function renderAnnotations(ctx: CanvasRenderingContext2D, shapes: Shape[]
           ctx.globalAlpha = 1;
         }
         if (s.fill !== "solid") ctx.stroke();
+        break;
+      }
+      case "image": {
+        const bitmap = s.picture === undefined ? undefined : pictures.get(s.picture);
+        if (bitmap) {
+          ctx.globalAlpha = s.opacity ?? 1;
+          ctx.imageSmoothingQuality = "high";
+          ctx.drawImage(bitmap, r.x, r.y, r.w, r.h);
+        }
         break;
       }
       case "highlight":
