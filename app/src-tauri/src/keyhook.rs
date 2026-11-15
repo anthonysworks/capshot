@@ -97,6 +97,7 @@ fn action_now() -> Option<Action> {
 }
 
 fn trigger(action: Action) {
+    tracing::debug!(?action, "Print Screen pressed");
     // The hook must answer within a fraction of a second, or Windows drops it.
     if let Some(app) = APP.get().cloned() {
         std::thread::spawn(move || actions::trigger(&app, action));

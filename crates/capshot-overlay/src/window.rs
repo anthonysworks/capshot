@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use capshot_capture::{Capturer, Gpu, GpuKind, Snapshot};
 use capshot_core::{BgraImage, Point, RecordingFormat, Rect};
@@ -40,8 +40,9 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT,
-    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
+    GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    ReleaseCapture, SendInput, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT,
+    VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -210,6 +211,8 @@ impl SwapChain {
 
 /// A capture in progress.
 struct Session {
+    /// When the overlay was shown.
+    shown_at: Instant,
     snapshot: Snapshot,
     shot: Screenshot,
     selection: Selection,
@@ -430,28 +433,63 @@ fn cloak(hwnd: HWND, cloaked: bool) {
 /// Brings the overlay to the foreground so it receives the keyboard.
 ///
 /// Windows only lets the process that received the last input take the
-/// foreground. That is the case for hotkeys and tray clicks; for other
-/// triggers (command line, automation) the input queues are attached to the
-/// current foreground thread for the duration of the switch.
+/// foreground. A hotkey registered with Windows gives that right, but a
+/// keyboard hook swallows the key, and a command line or automation trigger
+/// never had it. Then the input queues are attached to the current foreground
+/// thread for the duration of the switch and, if that is not enough, a tap on
+/// Alt (which makes Windows treat this process as the one being typed in) is
+/// sent around the last attempt.
 fn take_focus(hwnd: HWND) {
     // SAFETY: plain window-management calls; the input queues are always
     // detached again.
     unsafe {
-        if SetForegroundWindow(hwnd).as_bool() {
+        if SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() == hwnd {
             let _ = SetFocus(Some(hwnd));
             return;
         }
         let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
         let current = GetCurrentThreadId();
-        if foreground != 0
+        let attached = foreground != 0
             && foreground != current
-            && AttachThreadInput(current, foreground, true).as_bool()
-        {
+            && AttachThreadInput(current, foreground, true).as_bool();
+        if attached {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
             let _ = SetFocus(Some(hwnd));
             let _ = AttachThreadInput(current, foreground, false);
         }
+        if GetForegroundWindow() != hwnd {
+            alt(false);
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            alt(true);
+        }
+        if GetForegroundWindow() != hwnd {
+            tracing::warn!("the capture overlay could not take the keyboard focus");
+        }
+    }
+}
+
+/// Presses (`up == false`) or releases the Alt key.
+fn alt(up: bool) {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_MENU,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS::default()
+                },
+                ..Default::default()
+            },
+        },
+    };
+    // SAFETY: one fully initialised input and its real size.
+    unsafe {
+        SendInput(&[input], size_of::<INPUT>() as i32);
     }
 }
 
@@ -602,7 +640,17 @@ impl State {
             WM_ACTIVATE => {
                 #[allow(clippy::cast_possible_truncation)]
                 if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
-                    self.finish(None);
+                    // Losing the focus right as the overlay opens means Windows
+                    // had not given it yet: ask again instead of closing.
+                    let just_opened = self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.shown_at.elapsed() < Duration::from_millis(400));
+                    if just_opened {
+                        take_focus(self.hwnd);
+                    } else {
+                        self.finish(None);
+                    }
                 }
                 return None;
             }
@@ -692,6 +740,7 @@ impl State {
         }
 
         self.session = Some(Session {
+            shown_at: Instant::now(),
             selection: Selection::new(purpose.sanitize(request.mode), cursor),
             snapshot,
             shot,
