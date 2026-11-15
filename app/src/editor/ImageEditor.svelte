@@ -2,6 +2,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import { editorCopy, editorImageSaveAs, editorRead, editorSave, editorSaveTo, showInFolder } from "../lib/api";
+  import CustomColor from "./CustomColor.svelte";
   import { VIVID } from "./colors";
   import Logo from "../lib/Logo.svelte";
   import Icon from "./Icon.svelte";
@@ -29,6 +30,7 @@
     fontSize,
     hit,
     normalize,
+    CUSTOM_WALL,
     paintBackground,
     paintCard,
     render,
@@ -114,6 +116,8 @@
   let curvePath: Point[] = [];
   let shapes = $state<Shape[]>([]);
   let crop = $state<Rect | null>(null);
+  /** The two colours of the background the user mixes. */
+  let customWall = $state<string[]>(["#4f7cff", "#ec4899"]);
   let frame = $state<Frame>({ enabled: false, background: 0, padding: 64, radius: 12, shadow: true });
   /** A device or window around the picture (part of the frame). */
   let device = $state<DeviceFrame>("none");
@@ -227,7 +231,7 @@
     const title = deviceTitle.trim() || baseName;
     const index = frame.background;
     return renderFrame({ w: box.w, h: box.h }, screen, { kind: device, title, dark: deviceDark }, frame.shadow ? 1 : 0, (ctx) =>
-      noWall ? undefined : paintBackground(ctx, { x: 0, y: 0, w: box.w, h: box.h }, index),
+      noWall ? undefined : paintBackground(ctx, { x: 0, y: 0, w: box.w, h: box.h }, index, customWall),
     );
   });
 
@@ -317,7 +321,7 @@
       ctx.drawImage(art.over, box.x, box.y);
     } else if (frame.enabled && !cropping) {
       const p = frame.padding;
-      paintBackground(ctx, { x: area.x - p, y: area.y - p, w: area.w + 2 * p, h: area.h + 2 * p }, frame.background);
+      paintBackground(ctx, { x: area.x - p, y: area.y - p, w: area.w + 2 * p, h: area.h + 2 * p }, frame.background, customWall);
       paintCard(ctx, () => render(ctx, img, shown, scratch), area, frame);
     } else if (crop && !cropping) {
       ctx.save();
@@ -738,7 +742,7 @@
       out.height = area.h + 2 * p;
       const ctx = out.getContext("2d");
       if (!ctx) throw new Error("no canvas");
-      paintBackground(ctx, { x: 0, y: 0, w: out.width, h: out.height }, frame.background);
+      paintBackground(ctx, { x: 0, y: 0, w: out.width, h: out.height }, frame.background, customWall);
       paintCard(ctx, () => ctx.drawImage(content, p, p), { x: p, y: p, w: area.w, h: area.h }, frame);
     }
     const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, "image/png"));
@@ -1045,6 +1049,7 @@
           {#each COLORS.slice(0, 6) as c (c)}
             <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
           {/each}
+          <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
           <span class="ib-sep"></span>
           <button type="button" class="ib" title="Duplicate (Ctrl+D)" aria-label="Duplicate" onclick={duplicate}><Icon name="duplicate" /></button>
           <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeSelected}><Icon name="trash" /></button>
@@ -1115,7 +1120,27 @@
                 }}
               ></button>
             {/each}
+            <button
+              type="button"
+              class="swatch wide"
+              class:active={frame.enabled && !noWall && frame.background === CUSTOM_WALL}
+              style="--swatch:linear-gradient(135deg,{customWall.join(',')})"
+              title="Your own colours"
+              aria-label="Your own colours"
+              onclick={() => {
+                noWall = false;
+                setFrame({ background: CUSTOM_WALL, enabled: true });
+              }}
+            ></button>
           </div>
+          {#if frame.enabled && !noWall && frame.background === CUSTOM_WALL}
+            <div class="wall-colours">
+              <span>From</span>
+              <CustomColor value={customWall[0] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [c, customWall[1] ?? c])} />
+              <span>to</span>
+              <CustomColor value={customWall[1] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [customWall[0] ?? c, c])} />
+            </div>
+          {/if}
           <h3 class="spaced">Device</h3>
           <div class="device-tiles" role="radiogroup" aria-label="Device">
             {#each DEVICE_FRAMES as d (d.value)}
@@ -1204,9 +1229,7 @@
                 onclick={() => setColor(c)}
               ></button>
             {/each}
-            <label class="custom" title="Any colour">
-              <input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} />
-            </label>
+            <CustomColor value={color} presets={COLORS} onpick={setColor} size={26} />
           </div>
         </section>
         <section>
@@ -1519,6 +1542,14 @@
     width: 14px;
     height: 14px;
   }
+  .wall-colours {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
   .swatch.wide {
     width: 44px;
     height: 44px;
@@ -1527,14 +1558,6 @@
   .swatch.active {
     outline: 2.5px solid var(--accent);
     outline-offset: 2px;
-  }
-  .custom input {
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: none;
-    background: none;
-    cursor: pointer;
   }
   .dot {
     width: var(--d);

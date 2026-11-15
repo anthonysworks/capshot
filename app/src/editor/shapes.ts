@@ -492,8 +492,15 @@ export const BACKGROUNDS: { name: string; stops: string[] }[] = [
   { name: "White", stops: ["#ffffff", "#f1f5f9"] },
 ];
 
-export function paintBackground(ctx: CanvasRenderingContext2D, r: Rect, index: number) {
-  const stops = BACKGROUNDS[index]?.stops ?? ["#444", "#222"];
+/** Index of the background the user mixes from two colours of their choice. */
+export const CUSTOM_WALL = BACKGROUNDS.length;
+
+/** Colours of background `index`; `custom` are the user's own. */
+export const wallStops = (index: number, custom: string[]): string[] =>
+  index === CUSTOM_WALL ? custom : (BACKGROUNDS[index]?.stops ?? ["#444", "#222"]);
+
+export function paintBackground(ctx: CanvasRenderingContext2D, r: Rect, index: number, custom: string[]) {
+  const stops = wallStops(index, custom);
   const g = ctx.createLinearGradient(r.x, r.y, r.x + r.w, r.y + r.h);
   stops.forEach((c, i) => g.addColorStop(i / Math.max(1, stops.length - 1), c));
   ctx.fillStyle = g;

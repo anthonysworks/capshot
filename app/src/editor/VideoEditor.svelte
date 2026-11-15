@@ -28,9 +28,12 @@
   import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, SMOOTHING, cursorAt, drawCursor, loadShapes, smoothTrack } from "./cursors";
   import { DEVICE_FRAMES, type DeviceFrame, frameLayout, hasLook, hasTitle, renderFrame } from "./frames";
   import { CAMERA_STIFFNESS, ZOOM_LENGTH, ZOOM_SCALES, autoZooms, zoomView } from "./zoom";
+  import CustomColor from "./CustomColor.svelte";
   import { VIVID } from "./colors";
   import {
     BACKGROUNDS,
+    CUSTOM_WALL,
+    wallStops,
     FREEHAND,
     LINEAR,
     type Point,
@@ -206,6 +209,8 @@
   /** With a ratio: crop to it (fill) or show all on a background (fit). */
   let fit = $state<"fill" | "fit">("fill");
   let background = $state(0);
+  /** The two colours of the background the user mixes. */
+  let customWall = $state<string[]>(["#4f7cff", "#ec4899"]);
   let margin = $state(0.08);
   /** Rounded corners (share of the shorter side) and shadow (0–1) of the
    * video on its background. */
@@ -316,7 +321,7 @@
   const frameArt = $derived.by(() => {
     if (!device || cropping || !framedLayout) return null;
     const { out, area } = framedLayout;
-    const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
+    const stops = wallStops(background, customWall);
     const title = frameTitle.trim() || baseName(path);
     return renderFrame(out, area, { kind: device, title, dark: frameDark }, shadow, (ctx) => {
       if (transparent) return;
@@ -583,7 +588,7 @@
     if (art) {
       ctx.drawImage(art.under, 0, 0, out.w, out.h);
     } else if (layout.background) {
-      const stops = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
+      const stops = wallStops(background, customWall);
       const gradient = ctx.createLinearGradient(0, 0, out.w, out.h);
       stops.forEach((stop, i) => gradient.addColorStop(i / Math.max(1, stops.length - 1), stop));
       ctx.fillStyle = gradient;
@@ -1562,7 +1567,7 @@
       const drawn = drawCursor(cursorStyle, cursorColor);
       image = { png: drawn.canvas.toDataURL("image/png"), hotspot: drawn.hotspot };
     }
-    const bg = BACKGROUNDS[background]?.stops ?? ["#222", "#111"];
+    const bg = wallStops(background, customWall);
     return {
       overlays: overlayImages(),
       cursor: customCursor
@@ -2004,7 +2009,24 @@
               onclick={() => chooseBackground(i)}
             ></button>
           {/each}
+          <button
+            type="button"
+            class="wall"
+            class:active={framed && !transparent && background === CUSTOM_WALL}
+            style="--wall:linear-gradient(135deg,{customWall.join(',')})"
+            title="Your own colours"
+            aria-label="Your own colours"
+            onclick={() => chooseBackground(CUSTOM_WALL)}
+          ></button>
         </div>
+        {#if framed && !transparent && background === CUSTOM_WALL}
+          <div class="wall-colours">
+            <span>From</span>
+            <CustomColor value={customWall[0] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [c, customWall[1] ?? c])} />
+            <span>to</span>
+            <CustomColor value={customWall[1] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [customWall[0] ?? c, c])} />
+          </div>
+        {/if}
         <div class="sec-head">
           <h3>Device</h3>
           <button type="button" class="link" disabled={deviceFrame === "none"} onclick={() => {
@@ -2124,6 +2146,7 @@
                     {#each VIVID.slice(0, 6) as c (c)}
                       <button type="button" class="swatch" class:active={cursorColor === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => (cursorColor = c)}></button>
                     {/each}
+                    <CustomColor value={cursorColor} presets={VIVID.slice(0, 6)} onpick={(c) => (cursorColor = c)} size={20} />
                   </div>
                 </div>
               {/if}
@@ -2371,7 +2394,7 @@
                 {#each COLORS as c (c)}
                   <button type="button" class="swatch" class:active={color === c} style="--swatch:{c}" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
                 {/each}
-                <label class="custom" title="Any colour"><input type="color" value={color} onchange={(e) => setColor(e.currentTarget.value)} /></label>
+                <CustomColor value={color} presets={COLORS} onpick={setColor} />
               </div>
               <div class="layer-row">
                 {#each LEVELS as l (l.level)}
@@ -2478,6 +2501,7 @@
             <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}
             ></button>
           {/each}
+          <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
           <span class="ib-sep"></span>
           <button type="button" class="ib" title="Duplicate" aria-label="Duplicate" onclick={duplicateOverlay}><Icon name="duplicate" /></button>
           <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeOverlay}><Icon name="trash" /></button>
@@ -3618,20 +3642,6 @@
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
-  .custom {
-    position: relative;
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    overflow: hidden;
-    background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
-  }
-  .custom input {
-    position: absolute;
-    inset: 0;
-    opacity: 0;
-    cursor: pointer;
-  }
   .thick {
     flex: 1;
     justify-content: center;
@@ -4116,6 +4126,14 @@
     stroke: currentColor;
     stroke-width: 2.4;
     stroke-linecap: round;
+  }
+  .wall-colours {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
   }
   .mini-swatches {
     display: flex;
