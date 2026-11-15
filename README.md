@@ -69,14 +69,14 @@ Press **Print Screen**, select an area, and choose what happens: copy, save, ope
 
 ## Edit
 
-Screenshots open in an editor with arrows, shapes, a highlighter, text, numbered steps, blur and crop.
+Screenshots open in an editor with arrows, shapes, a highlighter, text, numbered steps, blur, crop, turning and flipping. Add your own pictures (from a file, the clipboard or a drop) and emoji, pick any colour, and put the result on a background or a device frame.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/editor-dark.webp">
   <img src="docs/images/editor-light.webp" alt="The image editor" width="100%">
 </picture>
 
-Recordings open in a video editor with a timeline, trimming, a camera zoom, cursor and click effects, backgrounds and window frames. Export to MP4 or GIF.
+Recordings open in a video editor with a timeline, trimming, a camera zoom, cursor and click effects, backgrounds and window frames. Add pictures, music (with volume, start and fades) and other videos after the recording. Export to MP4 or GIF.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/video-dark.webp">
@@ -89,7 +89,7 @@ Recordings open in a video editor with a timeline, trimming, a camera zoom, curs
 - Recent captures in the tray menu
 - Updates download quietly in the background and install when you choose to restart
 - Settings kept in one readable `config.toml`
-- A first-run setup that deals with the Windows Print Screen conflict for you
+- Print Screen works right away: Capshot turns off the Windows option that gets in its way
 
 ## How it compares
 
