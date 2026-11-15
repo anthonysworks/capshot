@@ -53,6 +53,13 @@ export const ICONS = {
   picture: "M3 4.5h14v11H3zM3 13l4-4 3 3 2.5-2.5L17 14M13 8.2a1.2 1.2 0 100-2.4 1.2 1.2 0 000 2.4z",
   music: "M8 15.5V5l8-1.5V14M8 15.5a2 2 0 11-4 0 2 2 0 014 0zM16 14a2 2 0 11-4 0 2 2 0 014 0z",
   film: "M3 4h14v12H3zM6.5 4v12M13.5 4v12M3 8h3.5M3 12h3.5M13.5 8H17M13.5 12H17",
+  rotateLeft: "M5 8.5h7a4 4 0 010 8H8M5 8.5l3-3M5 8.5l3 3",
+  rotateRight: "M15 8.5H8a4 4 0 000 8h4M15 8.5l-3-3M15 8.5l-3 3",
+  flipH: "M10 3v14M7.5 6L3 15h4.5zM12.5 6L17 15h-4.5z",
+  flipV: "M3 10h14M6 7.5L15 3v4.5zM6 12.5L15 17v-4.5z",
+  front: "M7 7h9.5v9.5H7zM3.5 13V3.5H13",
+  back: "M3.5 3.5H13V13H3.5zM7 17h9.5V7",
+  emoji: "M10 3a7 7 0 100 14 7 7 0 000-14zM7.5 8.5v1M12.5 8.5v1M6.8 12a3.5 3.5 0 006.4 0",
 } as const;
 
 export type IconName = keyof typeof ICONS;

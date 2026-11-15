@@ -114,7 +114,11 @@
   /** Tools whose shapes use the fill setting. */
   const FILLABLE: ShapeKind[] = ["rect", "ellipse", "text"];
 
-  let image = $state<ImageBitmap | null>(null);
+  /** The picture as opened; `image` is it turned and flipped as asked. */
+  let source = $state<ImageBitmap | null>(null);
+  /** Quarter turns clockwise, applied after a horizontal flip when `flip`. */
+  let orient = $state<{ turns: number; flip: boolean }>({ turns: 0, flip: false });
+  const image = $derived<ImageBitmap | HTMLCanvasElement | null>(source ? oriented(source, orient) : null);
   let error = $state("");
   let tool = $state<Tool>("arrow");
   let color = $state<string>(VIVID[0]!);
@@ -176,12 +180,12 @@
     (async () => {
       try {
         const bytes = await editorRead(path);
-        image = await createImageBitmap(new Blob([bytes]));
+        source = await createImageBitmap(new Blob([bytes]));
         const n = bytes.byteLength;
         const weight = n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
         const name = path.split(/[\\/]/).pop() ?? path;
         getCurrentWindow()
-          .setTitle(`Capshot Editor · ${name} · ${image.width}×${image.height} · ${weight}`)
+          .setTitle(`Capshot Editor · ${name} · ${source.width}×${source.height} · ${weight}`)
           .catch(() => {});
       } catch (e) {
         error = String(e);
@@ -415,7 +419,12 @@
   // ── History ────────────────────────────────────────────────────────────
 
   const serialize = () =>
-    JSON.stringify({ shapes: $state.snapshot(shapes), crop: $state.snapshot(crop), frame: $state.snapshot(frame) });
+    JSON.stringify({
+      shapes: $state.snapshot(shapes),
+      crop: $state.snapshot(crop),
+      frame: $state.snapshot(frame),
+      orient: $state.snapshot(orient),
+    });
 
   function remember() {
     past.push(serialize());
@@ -437,6 +446,7 @@
     shapes = parsed.shapes;
     crop = parsed.crop;
     frame = parsed.frame;
+    orient = parsed.orient ?? { turns: 0, flip: false };
     selected = null;
     dirty = true;
   }
@@ -813,6 +823,123 @@
     selected = copyOf.id;
   }
 
+  // ── Turning and flipping ───────────────────────────────────────────────
+
+  /** `bitmap` flipped (horizontally) then turned clockwise by `turns` quarters. */
+  function oriented(bitmap: ImageBitmap, o: { turns: number; flip: boolean }): ImageBitmap | HTMLCanvasElement {
+    if (o.turns === 0 && !o.flip) return bitmap;
+    const sideways = o.turns % 2 === 1;
+    const out = document.createElement("canvas");
+    out.width = sideways ? bitmap.height : bitmap.width;
+    out.height = sideways ? bitmap.width : bitmap.height;
+    const ctx = out.getContext("2d");
+    if (!ctx) return bitmap;
+    ctx.translate(out.width / 2, out.height / 2);
+    ctx.rotate((o.turns * Math.PI) / 2);
+    if (o.flip) ctx.scale(-1, 1);
+    ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+    return out;
+  }
+
+  type Turn = "left" | "right" | "horizontal" | "vertical";
+
+  /** Where the point `p` of a `w` × `h` picture goes. */
+  function moved(p: Point, w: number, h: number, how: Turn): Point {
+    switch (how) {
+      case "right":
+        return { x: h - p.y, y: p.x };
+      case "left":
+        return { x: p.y, y: w - p.x };
+      case "horizontal":
+        return { x: w - p.x, y: p.y };
+      default:
+        return { x: p.x, y: h - p.y };
+    }
+  }
+
+  /** Turns or flips the picture, with the annotations and the crop on it. */
+  function turn(how: Turn) {
+    const current = image;
+    if (!current) return;
+    const { width: w, height: h } = current;
+    commit(() => {
+      const t = orient.turns;
+      if (how === "right") orient = { ...orient, turns: (t + 1) % 4 };
+      else if (how === "left") orient = { ...orient, turns: (t + 3) % 4 };
+      else if (how === "horizontal") orient = { turns: (4 - t) % 4, flip: !orient.flip };
+      else orient = { turns: (6 - t) % 4, flip: !orient.flip };
+      const measure = canvas.getContext("2d");
+      for (const sh of shapes) {
+        if (sh.kind === "text" && measure) {
+          // Texts stay upright: their box is moved by its middle.
+          const box = bounds(measure, sh);
+          const middle = moved({ x: box.x + box.w / 2, y: box.y + box.h / 2 }, w, h, how);
+          sh.x1 = middle.x - box.w / 2 + (sh.x1 - box.x);
+          sh.y1 = middle.y - box.h / 2 + (sh.y1 - box.y);
+          continue;
+        }
+        const a = moved({ x: sh.x1, y: sh.y1 }, w, h, how);
+        const b = moved({ x: sh.x2, y: sh.y2 }, w, h, how);
+        [sh.x1, sh.y1, sh.x2, sh.y2] = [a.x, a.y, b.x, b.y];
+        if (sh.points) sh.points = sh.points.map((q) => moved(q, w, h, how));
+        // A mirror turns a bend the other way.
+        if ((how === "horizontal" || how === "vertical") && sh.bend !== undefined) sh.bend = -sh.bend;
+      }
+      if (crop) {
+        const a = moved({ x: crop.x, y: crop.y }, w, h, how);
+        const b = moved({ x: crop.x + crop.w, y: crop.y + crop.h }, w, h, how);
+        crop = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+      }
+      selected = null;
+    });
+    fitMode = true;
+  }
+
+  // ── Arrange, emoji, eyedropper ─────────────────────────────────────────
+
+  /** Moves the selected item above or below all the others. */
+  function arrange(toFront: boolean) {
+    const id = selected;
+    if (id === null) return;
+    commit(() => {
+      const item = shapes.find((sh) => sh.id === id);
+      if (!item) return;
+      const others = shapes.filter((sh) => sh.id !== id);
+      shapes = toFront ? [...others, item] : [item, ...others];
+    });
+  }
+
+  const EMOJIS = [
+    "👍", "👎", "👉", "👆", "👀", "❓", "❗", "✅", "❌", "⚠️", "💡", "🔥",
+    "⭐", "❤️", "😀", "😂", "😍", "🤔", "😎", "🎉", "🚀", "🐞", "🔒", "📌",
+  ];
+  let emojiOpen = $state(false);
+
+  /** Puts an emoji, large, in the middle of what is shown. */
+  function addEmoji(emoji: string) {
+    emojiOpen = false;
+    const current = image;
+    if (!current) return;
+    const area = crop ?? { x: 0, y: 0, w: current.width, h: current.height };
+    const size = Math.max(2, Math.round(Math.min(area.w, area.h) / 6 / 6));
+    const shape = make("text", { x: area.x + area.w / 2 - size * 8, y: area.y + area.h / 2 - size * 8 }, { text: emoji, fill: "plain", size, bold: false });
+    add(shape);
+  }
+
+  /** Takes a colour from anywhere on the screen. */
+  async function pickFromScreen() {
+    const Dropper = (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper;
+    if (!Dropper) {
+      notify("The colour picker is not available here");
+      return;
+    }
+    try {
+      setColor((await new Dropper().open()).sRGBHex);
+    } catch {
+      // Cancelled.
+    }
+  }
+
   // ── Pictures ───────────────────────────────────────────────────────────
 
   const IMAGE_FILE = /.(png|jpe?g|webp|bmp|gif)$/i;
@@ -1079,9 +1206,20 @@
             <Icon name="picture" />
             <span class="key">I</span>
           </button>
+          <button type="button" class="tool" class:active={emojiOpen} title="Add an emoji" aria-label="Add an emoji" aria-expanded={emojiOpen} onclick={() => (emojiOpen = !emojiOpen)}>
+            <Icon name="emoji" />
+          </button>
         </div>
       </div>
     </nav>
+
+    {#if emojiOpen}
+      <div class="emoji-pop" role="dialog" aria-label="Emoji">
+        {#each EMOJIS as e (e)}
+          <button type="button" onclick={() => addEmoji(e)}>{e}</button>
+        {/each}
+      </div>
+    {/if}
 
     <div class="stage" bind:this={stage}>
       <canvas
@@ -1140,6 +1278,8 @@
             <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
           {/if}
           <span class="ib-sep"></span>
+          <button type="button" class="ib" title="Bring to the front" aria-label="Bring to the front" onclick={() => arrange(true)}><Icon name="front" /></button>
+          <button type="button" class="ib" title="Send to the back" aria-label="Send to the back" onclick={() => arrange(false)}><Icon name="back" /></button>
           <button type="button" class="ib" title="Duplicate (Ctrl+D)" aria-label="Duplicate" onclick={duplicate}><Icon name="duplicate" /></button>
           <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeSelected}><Icon name="trash" /></button>
         </div>
@@ -1304,6 +1444,15 @@
             <button type="button" onclick={() => commit(() => (crop = null))}>Reset crop</button>
           {/if}
         </section>
+        <section>
+          <h3>Turn and flip</h3>
+          <div class="row">
+            <button type="button" class="chip" title="Turn left" aria-label="Turn left" onclick={() => turn("left")}><Icon name="rotateLeft" /></button>
+            <button type="button" class="chip" title="Turn right" aria-label="Turn right" onclick={() => turn("right")}><Icon name="rotateRight" /></button>
+            <button type="button" class="chip" title="Flip horizontally" aria-label="Flip horizontally" onclick={() => turn("horizontal")}><Icon name="flipH" /></button>
+            <button type="button" class="chip" title="Flip vertically" aria-label="Flip vertically" onclick={() => turn("vertical")}><Icon name="flipV" /></button>
+          </div>
+        </section>
       {:else}
         <section>
           <h3>Colour</h3>
@@ -1319,6 +1468,7 @@
               ></button>
             {/each}
             <CustomColor value={color} presets={COLORS} onpick={setColor} size={26} />
+            <button type="button" class="swatch none" title="Pick a colour from the screen" aria-label="Pick a colour from the screen" onclick={pickFromScreen}><Icon name="picker" /></button>
           </div>
         </section>
         <section>
@@ -1729,6 +1879,30 @@
     height: 20px;
     margin: 0 3px;
     background: var(--border);
+  }
+  .emoji-pop {
+    position: absolute;
+    left: 76px;
+    bottom: 24px;
+    z-index: 20;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 2px;
+    padding: 8px;
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: 0 8px 30px rgb(0 0 0 / 0.35), 0 0 0 1px var(--border);
+  }
+  .emoji-pop button {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border-radius: 10px;
+    background: transparent;
+    font-size: 22px;
+  }
+  .emoji-pop button:hover {
+    background: var(--hover);
   }
   .ib-range {
     display: flex;
