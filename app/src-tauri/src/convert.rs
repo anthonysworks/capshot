@@ -75,6 +75,41 @@ impl Edit {
     }
 }
 
+/// Music mixed into an exported video. Times are in seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Music {
+    pub path: PathBuf,
+    /// Where it starts on the result.
+    #[serde(default)]
+    pub start: f64,
+    /// Where in the file it is played from.
+    #[serde(default)]
+    pub from: f64,
+    /// How long it plays at most; missing: to the end.
+    #[serde(default)]
+    pub length: Option<f64>,
+    #[serde(default = "unit_volume")]
+    pub volume: f32,
+    #[serde(default)]
+    pub fade_in: f64,
+    #[serde(default)]
+    pub fade_out: f64,
+}
+
+impl Music {
+    fn track(&self) -> capshot_record::Music {
+        capshot_record::Music {
+            path: self.path.clone(),
+            start: self.start.max(0.0),
+            from: self.from.max(0.0),
+            length: self.length.filter(|l| *l > 0.0),
+            volume: self.volume.clamp(0.0, 2.0),
+            fade_in: self.fade_in.max(0.0),
+            fade_out: self.fade_out.max(0.0),
+        }
+    }
+}
+
 /// What to do with the input video.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -102,6 +137,9 @@ pub enum Task {
         fade_in: f64,
         #[serde(default)]
         fade_out: f64,
+        /// Music mixed in.
+        #[serde(default)]
+        music: Option<Music>,
     },
 }
 
@@ -257,6 +295,7 @@ pub fn run_host() -> i32 {
             volume,
             fade_in,
             fade_out,
+            music,
         } => {
             let (input, composition, track) = request.sources(&edit.composition);
             trim_video(
@@ -277,6 +316,7 @@ pub fn run_host() -> i32 {
                         fade_in: *fade_in,
                         fade_out: *fade_out,
                     },
+                    music: music.as_ref().map(Music::track),
                 },
                 &mut progress,
             )

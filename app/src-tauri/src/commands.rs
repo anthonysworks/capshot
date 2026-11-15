@@ -293,6 +293,14 @@ pub fn editor_export(
     output: Option<String>,
 ) -> Result<u64, String> {
     let path = editable(&app, &path)?;
+    // The music must be a file brought into the editor.
+    let mut task = task;
+    if let Task::Mp4 {
+        music: Some(music), ..
+    } = &mut task
+    {
+        music.path = editable(&app, &music.path.to_string_lossy())?;
+    }
     // Only a file the user picked in the save dialog.
     let output = match output.map(PathBuf::from) {
         Some(output) if app.state::<Saving>().take_chosen(&output) => Some(output),

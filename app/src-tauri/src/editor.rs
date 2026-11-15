@@ -55,7 +55,9 @@ pub enum Media {
     Video,
 }
 
-const AUDIO: &[&str] = &["mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "opus", "wma"];
+const AUDIO: &[&str] = &[
+    "mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "opus", "wma",
+];
 
 pub fn media_kind(path: &Path) -> Option<Media> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();

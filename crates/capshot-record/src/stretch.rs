@@ -187,6 +187,111 @@ pub fn apply_gain(pcm: &mut [i16], channels: usize, rate: u32, gain: impl Fn(f64
     }
 }
 
+/// Converts interleaved PCM to another channel count and sample rate
+/// (linear interpolation: enough for a music bed under a recording).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+pub fn remix(
+    pcm: &[i16],
+    from_channels: usize,
+    from_rate: u32,
+    channels: usize,
+    rate: u32,
+) -> Vec<i16> {
+    let (from_channels, channels) = (from_channels.max(1), channels.max(1));
+    let frames = pcm.len() / from_channels;
+    if frames == 0 {
+        return Vec::new();
+    }
+    // One sample of output channel `c` for source frame `f`.
+    let channel = |f: usize, c: usize| -> f32 {
+        let frame = &pcm[f * from_channels..(f + 1) * from_channels];
+        if channels == 1 {
+            frame.iter().map(|&s| f32::from(s)).sum::<f32>() / from_channels as f32
+        } else {
+            f32::from(frame[c.min(from_channels - 1)])
+        }
+    };
+    let ratio = f64::from(from_rate.max(1)) / f64::from(rate.max(1));
+    let out_frames = if from_rate == rate {
+        frames
+    } else {
+        (frames as f64 / ratio) as usize
+    };
+    let mut out = Vec::with_capacity(out_frames * channels);
+    for o in 0..out_frames {
+        let position = o as f64 * ratio;
+        let a = (position as usize).min(frames - 1);
+        let b = (a + 1).min(frames - 1);
+        let t = (position - a as f64) as f32;
+        for c in 0..channels {
+            let v = channel(a, c) * (1.0 - t) + channel(b, c) * t;
+            out.push(v.round().clamp(-32768.0, 32767.0) as i16);
+        }
+    }
+    out
+}
+
+/// Where a music track sits on the result and how loud it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bed {
+    /// Output time the music starts at, in seconds.
+    pub start: f64,
+    /// How long it plays at most, in seconds.
+    pub length: f64,
+    pub volume: f32,
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+/// Mixes `music` (interleaved, same rate and channels as `pcm`, starting at
+/// the point of the file the music is played from) into `pcm`, which begins
+/// at output time `pcm_start` seconds.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+pub fn mix_bed(
+    pcm: &mut [i16],
+    channels: usize,
+    rate: u32,
+    pcm_start: f64,
+    music: &[i16],
+    bed: &Bed,
+) {
+    let channels = channels.max(1);
+    let music_frames = music.len() / channels;
+    let length = bed.length.min(music_frames as f64 / f64::from(rate.max(1)));
+    for (frame, samples) in pcm.chunks_mut(channels).enumerate() {
+        let rel = pcm_start + frame as f64 / f64::from(rate.max(1)) - bed.start;
+        if rel < 0.0 {
+            continue;
+        }
+        if rel >= length {
+            break;
+        }
+        let at = (rel * f64::from(rate)) as usize;
+        if at >= music_frames {
+            break;
+        }
+        let mut gain = f64::from(bed.volume);
+        if bed.fade_in > 0.0 {
+            gain *= (rel / bed.fade_in).clamp(0.0, 1.0);
+        }
+        if bed.fade_out > 0.0 {
+            gain *= ((length - rel) / bed.fade_out).clamp(0.0, 1.0);
+        }
+        for (c, s) in samples.iter_mut().enumerate() {
+            let mixed = f32::from(*s) + f32::from(music[at * channels + c]) * gain as f32;
+            *s = mixed.round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
+
 /// Mixes `sound` into interleaved PCM at each time of `times` (seconds).
 #[allow(
     clippy::cast_possible_truncation,
@@ -265,6 +370,42 @@ mod tests {
             let pitch = crossings(&out[4000..out.len() - 4000], rate) / 2.0;
             assert!((pitch - 440.0).abs() < 15.0, "tempo {tempo}: {pitch} Hz");
         }
+    }
+
+    #[test]
+    fn remix_changes_channels_and_rate() {
+        let mono: Vec<i16> = (0..480).map(|i| i * 10).collect();
+        let stereo = remix(&mono, 1, 48_000, 2, 48_000);
+        assert_eq!(stereo.len(), 960);
+        assert_eq!(stereo[10], stereo[11]);
+        let half = remix(&stereo, 2, 48_000, 2, 24_000);
+        assert_eq!(half.len(), 480);
+        let down = remix(&stereo, 2, 48_000, 1, 48_000);
+        assert_eq!(down.len(), 480);
+        assert_eq!(down[7], mono[7]);
+    }
+
+    #[test]
+    fn music_starts_ends_and_fades_where_asked() {
+        let rate = 1000;
+        let music = vec![1000i16; 4000 * 2];
+        let mut pcm = vec![0i16; 4000 * 2];
+        let bed = Bed {
+            start: 1.0,
+            length: 2.0,
+            volume: 1.0,
+            fade_in: 1.0,
+            fade_out: 0.0,
+        };
+        mix_bed(&mut pcm, 2, rate, 0.0, &music, &bed);
+        assert_eq!(pcm[2 * 500], 0, "silent before it starts");
+        assert!(
+            pcm[2 * 1500] > 400 && pcm[2 * 1500] < 600,
+            "{}",
+            pcm[2 * 1500]
+        );
+        assert_eq!(pcm[2 * 2500], 1000, "full level after the fade");
+        assert_eq!(pcm[2 * 3500], 0, "silent after its length");
     }
 
     #[test]

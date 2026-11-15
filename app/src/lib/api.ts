@@ -216,6 +216,16 @@ export type ExportTask =
       volume: number;
       fade_in: number;
       fade_out: number;
+      /** Music mixed in (times in seconds; `length`: how long it plays). */
+      music: {
+        path: string;
+        start: number;
+        from: number;
+        length: number;
+        volume: number;
+        fade_in: number;
+        fade_out: number;
+      } | null;
     }
   | { kind: "gif"; gif: Config["gif"]; edit: VideoEdit | null };
 

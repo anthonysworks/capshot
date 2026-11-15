@@ -12,7 +12,7 @@
 //! keeps cuts frame-accurate: a copy could only start on a key frame.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use capshot_capture::Gpu;
@@ -49,7 +49,7 @@ use crate::convert::{Blitter, Space, drawable_texture, render_texture};
 use crate::cursor::CursorTrack;
 use crate::encoder::{VideoSettings, set_input, video_type};
 use crate::paint::{Painter, Zoomer};
-use crate::stretch::{apply_gain, click_sound, click_volume, mix_at, stretch};
+use crate::stretch::{Bed, apply_gain, click_sound, click_volume, mix_at, mix_bed, remix, stretch};
 use crate::zoom::Zoom;
 use crate::{Part, RecordError, Result};
 
@@ -87,6 +87,24 @@ pub struct TrimOptions {
     pub match_source: bool,
     /// Volume and fades of the sound track.
     pub sound: SoundEdit,
+    /// Music played under (or instead of) the recorded sound.
+    pub music: Option<Music>,
+}
+
+/// A sound file mixed into the result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Music {
+    pub path: PathBuf,
+    /// Where it starts on the result, in seconds.
+    pub start: f64,
+    /// Where in the file it is played from, in seconds.
+    pub from: f64,
+    /// How long it plays at most; `None`: to the end of the file or the video.
+    pub length: Option<f64>,
+    /// 1 keeps the level of the file; up to 2.
+    pub volume: f32,
+    pub fade_in: f64,
+    pub fade_out: f64,
 }
 
 /// Changes to the recorded sound.
@@ -142,6 +160,7 @@ impl TrimOptions {
             max_height: None,
             match_source: true,
             sound: SoundEdit::default(),
+            music: None,
         }
     }
 
@@ -717,7 +736,7 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         // No sound in the source but click sounds wanted: generate a track.
         let mut synth_audio = false;
         let audio_out = match audio_out {
-            None if options.click_sound() => {
+            None if options.click_sound() || options.music.is_some() => {
                 let pcm = audio_type(&MFAudioFormat_PCM, 48_000, 2)?;
                 pcm.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4)?;
                 pcm.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 48_000 * 4)?;
@@ -853,6 +872,7 @@ unsafe fn run(
             && !p.synth_audio
             && (segments.iter().any(|s| (s.2 - 1.0).abs() > 1e-6)
                 || options.click_sound()
+                || options.music.is_some()
                 || !options.sound.is_plain());
         let copy_audio = p.audio_out.is_some() && !p.synth_audio && !rebuild_audio;
         let audio_reader = if rebuild_audio {
@@ -882,6 +902,27 @@ unsafe fn run(
             })
             .sum();
         let (rate, channels) = (p.audio_format.0, p.audio_format.1 as usize);
+        // The music, decoded once at the rate and channels of the result.
+        let bed = match &options.music {
+            Some(music) => {
+                let length = music
+                    .length
+                    .unwrap_or(f64::INFINITY)
+                    .min((output_seconds - music.start).max(0.0));
+                let pcm = decode_music(&music.path, music.from, length, rate, channels)?;
+                Some((
+                    pcm,
+                    Bed {
+                        start: music.start,
+                        length,
+                        volume: music.volume,
+                        fade_in: music.fade_in,
+                        fade_out: music.fade_out,
+                    },
+                ))
+            }
+            None => None,
+        };
         let mut frames = 0u64;
         // Output time where the current segment starts, and source time
         // already written (for progress).
@@ -927,6 +968,16 @@ unsafe fn run(
                     &click,
                     &here,
                     click_volume(voice),
+                );
+            }
+            if let (Some(pending), Some((music, bed))) = (&mut pending, &bed) {
+                mix_bed(
+                    &mut pending.pcm,
+                    channels,
+                    rate,
+                    offset as f64 / 1e7,
+                    music,
+                    bed,
                 );
             }
             // Lands on the key frame before `start`; earlier frames are
@@ -1101,6 +1152,74 @@ impl AudioReader {
         let length = ((end - start) as f64 / 1e7 * f64::from(rate)) as usize * channels;
         out.truncate(length);
         Ok(out)
+    }
+}
+
+/// Decodes a music file from `from` seconds on, for at most `seconds`, as
+/// 16-bit PCM with `channels` channels at `rate`.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn decode_music(
+    path: &Path,
+    from: f64,
+    seconds: f64,
+    rate: u32,
+    channels: usize,
+) -> Result<Vec<i16>> {
+    // SAFETY: Media Foundation calls with valid arguments.
+    unsafe {
+        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)?;
+        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        reader.SetStreamSelection(AUDIO, true)?;
+        let pcm = MFCreateMediaType()?;
+        pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        reader.SetCurrentMediaType(AUDIO, None, &pcm)?;
+        let current = reader.GetCurrentMediaType(AUDIO)?;
+        let source_rate = current.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?;
+        let source_channels = current.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)? as usize;
+        let start = (from.max(0.0) * 1e7) as i64;
+        if start > 0 {
+            reader.SetCurrentPosition(&GUID::zeroed(), &PROPVARIANT::from(start))?;
+        }
+        let wanted = if seconds.is_finite() {
+            (seconds * f64::from(source_rate)) as usize * source_channels
+        } else {
+            usize::MAX
+        };
+        let mut out: Vec<i16> = Vec::new();
+        while out.len() < wanted {
+            let (mut flags, mut time) = (0u32, 0i64);
+            let mut sample: Option<IMFSample> = None;
+            reader.ReadSample(
+                AUDIO,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut time),
+                Some(&mut sample),
+            )?;
+            if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 | MF_SOURCE_READERF_ERROR.0) as u32 != 0 {
+                break;
+            }
+            let Some(sample) = sample else {
+                continue;
+            };
+            let samples = read_pcm(&sample)?;
+            // Seeking lands before `start`: skip what precedes it.
+            let skip = if time < start {
+                ((start - time) as f64 / 1e7 * f64::from(source_rate)) as usize * source_channels
+            } else {
+                0
+            };
+            out.extend_from_slice(samples.get(skip..).unwrap_or_default());
+        }
+        out.truncate(wanted.min(out.len()));
+        Ok(remix(&out, source_channels, source_rate, channels, rate))
     }
 }
 

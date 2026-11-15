@@ -43,7 +43,7 @@ use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 pub use capshot_gif::{GifOptions, GifSummary};
 pub use decode::{Conversion, VideoDecoder, VideoEdit, video_to_gif};
 pub use encoder::VideoSettings;
-pub use trim::{SoundEdit, TrimOptions, TrimStats, trim_video};
+pub use trim::{Music, SoundEdit, TrimOptions, TrimStats, trim_video};
 
 /// A part of a video kept by an edit, played at its own speed.
 #[derive(Debug, Clone, Copy, PartialEq)]

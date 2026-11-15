@@ -188,6 +188,21 @@
   let volume = $state(1);
   let fadeIn = $state(0);
   let fadeOut = $state(0);
+  /** Music added to the video. Times are in seconds of the result, except
+   * `from` (where in the file it is played from). */
+  interface Music {
+    path: string;
+    name: string;
+    /** Length of the file. */
+    length: number;
+    start: number;
+    from: number;
+    volume: number;
+    fadeIn: number;
+    fadeOut: number;
+  }
+  let music = $state<Music | null>(null);
+  let musicPlayer: HTMLAudioElement | null = null;
   /** What is saved, and how. */
   let exportKind = $state<"mp4" | "gif">("mp4");
   let height = $state<number | null>(null);
@@ -270,7 +285,7 @@
   let draft = $state<Shape | null>(null);
   let zoom = $state(1);
   let viewWidth = $state(800);
-  let menu = $state<"speed" | "sound" | "style" | null>(null);
+  let menu = $state<"speed" | "sound" | "music" | "style" | null>(null);
   /** Section shown in the side panel. */
   let panel = $state<"background" | "cursor" | "zoom" | "format" | "export">("background");
   /** A new format is being framed: Cancel goes back to the one before. */
@@ -808,6 +823,91 @@
     return g;
   }
 
+  /** How long the music plays on the result. */
+  const musicSeconds = $derived(music ? Math.max(0, Math.min(music.length - music.from, output - music.start)) : 0);
+
+  /** Level of the music at `rel` seconds after it starts. */
+  function musicLevel(m: Music, rel: number) {
+    let g = m.volume;
+    if (m.fadeIn > 0) g *= Math.max(0, Math.min(1, rel / m.fadeIn));
+    if (m.fadeOut > 0) g *= Math.max(0, Math.min(1, (musicSeconds - rel) / m.fadeOut));
+    return g;
+  }
+
+  /** Plays the music where the playhead is (called every frame while playing). */
+  function playMusic() {
+    const m = music;
+    const player = musicPlayer;
+    if (!m || !player) return;
+    const rel = outputTime(time) - m.start;
+    if (rel < 0 || rel >= musicSeconds) {
+      player.pause();
+      return;
+    }
+    const wanted = m.from + rel;
+    // The preview cannot go above 100 %.
+    player.volume = Math.max(0, Math.min(1, musicLevel(m, rel)));
+    if (player.paused || Math.abs(player.currentTime - wanted) > 0.35) {
+      player.currentTime = wanted;
+      void player.play().catch(() => {});
+    }
+  }
+
+  /** Asks for a sound file and adds it as the music of the video. */
+  async function addMusic() {
+    const picked = await editorPickMedia("audio").catch((e) => {
+      notify(String(e));
+      return null;
+    });
+    if (!picked) return;
+    const player = new Audio(convertFileSrc(picked));
+    player.preload = "auto";
+    try {
+      await new Promise<void>((resolve, reject) => {
+        player.addEventListener("loadedmetadata", () => resolve(), { once: true });
+        player.addEventListener("error", () => reject(new Error("this sound cannot be read")), { once: true });
+      });
+    } catch (e) {
+      notify(String(e instanceof Error ? e.message : e));
+      return;
+    }
+    musicPlayer?.pause();
+    musicPlayer = player;
+    music = {
+      path: picked,
+      name: picked.split(/[\\/]/).pop() ?? picked,
+      length: Number.isFinite(player.duration) ? player.duration : 0,
+      start: 0,
+      from: 0,
+      volume: 1,
+      fadeIn: 0,
+      fadeOut: 0,
+    };
+    menu = "music";
+  }
+
+  function removeMusic() {
+    musicPlayer?.pause();
+    musicPlayer = null;
+    music = null;
+    menu = null;
+  }
+
+  /** What an export mixes in. */
+  function musicTask() {
+    const m = music;
+    if (!m || musicSeconds <= 0) return null;
+    return {
+      path: m.path,
+      start: m.start,
+      from: m.from,
+      length: musicSeconds,
+      volume: m.volume,
+      fade_in: m.fadeIn,
+      fade_out: m.fadeOut,
+    };
+  }
+
   /** The last moment kept in the export (where playback stops). */
   const lastFrame = () => Math.max(0, (kept.at(-1)?.end ?? trim.end) - 0.001);
 
@@ -816,8 +916,10 @@
     time = video.currentTime;
     if (!playing) {
       lastClickCheck = time;
+      musicPlayer?.pause();
       return;
     }
+    playMusic();
     const next = nextKept(kept, time);
     if (next === null) {
       video.pause();
@@ -1710,7 +1812,18 @@
       const job = await editorExport(
         path,
         kind === "mp4"
-          ? { kind, edit: edit(), audio, quality: crf, fps, height, volume, fade_in: fadeIn, fade_out: fadeOut }
+          ? {
+              kind,
+              edit: edit(),
+              audio,
+              quality: crf,
+              fps,
+              height,
+              volume,
+              fade_in: fadeIn,
+              fade_out: fadeOut,
+              music: musicTask(),
+            }
           : {
               kind,
               gif: {
@@ -1793,7 +1906,7 @@
     const rate = Math.min(fps ?? sourceFps, sourceFps);
     const bpp = 0.08 * 2 ** ((23 - crf) / 6);
     const bits = Math.min(2e8, Math.max(1e6, exportSize.w * exportSize.h * rate * bpp));
-    return (bits / 8 + (audio ? 24_000 : 0)) * output;
+    return (bits / 8 + (audio || music ? 24_000 : 0)) * output;
   });
 
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2695,6 +2808,59 @@
                       >
                     {/each}
                   </div>
+                </div>
+              </div>
+            {/if}
+          </div>
+          <div class="anchor">
+            <button
+              type="button"
+              class="pill-btn opens-menu"
+              class:on={!!music}
+              disabled={!duration}
+              aria-expanded={menu === "music"}
+              title={music ? "Music" : "Add music to the video"}
+              onclick={() => (music ? (menu = menu === "music" ? null : "music") : addMusic())}
+              ><Icon name="music" /> {music ? "Music" : "Add music"} {#if music}<Icon name="chevron" />{/if}</button
+            >
+            {#if menu === "music" && music}
+              {@const m = music}
+              <div class="popover sound align-right" role="dialog" aria-label="Music">
+                <div class="music-file" title={m.path}><Icon name="music" /> <span>{m.name}</span></div>
+                <label class="field"
+                  >Volume <input type="range" min="0" max="2" step="0.05" bind:value={m.volume} />
+                  <span class="value">{Math.round(m.volume * 100)}%</span></label
+                >
+                <div class="field">
+                  <span>Starts at {format(m.start)}</span>
+                  <div class="segmented tiny">
+                    <button type="button" onclick={() => (m.start = 0)}>At the start</button>
+                    <button type="button" onclick={() => (m.start = Math.max(0, Math.min(output, outputTime(time))))}>At the playhead</button>
+                  </div>
+                </div>
+                <label class="field"
+                  >Plays from <input type="range" min="0" max={Math.max(0, m.length - 1)} step="0.5" bind:value={m.from} />
+                  <span class="value">{format(m.from)}</span></label
+                >
+                <div class="field">
+                  <span>Fade in</span>
+                  <div class="segmented tiny" role="radiogroup" aria-label="Music fade in">
+                    {#each FADES as f (f)}
+                      <button type="button" role="radio" aria-checked={m.fadeIn === f} class:active={m.fadeIn === f} onclick={() => (m.fadeIn = f)}>{f ? `${f}s` : "Off"}</button>
+                    {/each}
+                  </div>
+                </div>
+                <div class="field">
+                  <span>Fade out</span>
+                  <div class="segmented tiny" role="radiogroup" aria-label="Music fade out">
+                    {#each FADES as f (f)}
+                      <button type="button" role="radio" aria-checked={m.fadeOut === f} class:active={m.fadeOut === f} onclick={() => (m.fadeOut = f)}>{f ? `${f}s` : "Off"}</button>
+                    {/each}
+                  </div>
+                </div>
+                <div class="field">
+                  <button type="button" class="link" onclick={addMusic}>Change the music…</button>
+                  <button type="button" class="link danger" onclick={removeMusic}>Remove</button>
                 </div>
               </div>
             {/if}
@@ -4220,6 +4386,18 @@
   }
   .ib-range input {
     width: 90px;
+  }
+  .music-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 260px;
+    font-weight: 600;
+  }
+  .music-file span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .mini-swatches {
     display: flex;
