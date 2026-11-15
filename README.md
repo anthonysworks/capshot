@@ -12,7 +12,7 @@ Small, fast, open source. An alternative to ShareX with a built-in editor.
 
 <br>
 
-<a href="https://github.com/anthonysworks/capshot/releases/latest/download/Capshot-Setup.exe">
+<a href="https://github.com/anthonysworks/capshot/releases/latest/download/capshot-windows-x64.exe">
   <img src="docs/images/download.svg" alt="Download for Windows" width="420">
 </a>
 

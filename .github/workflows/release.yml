@@ -1,7 +1,7 @@
 name: Release
 
 # Push a tag such as v1.2.0 (matching the version in Cargo.toml) to publish a
-# release: one installer, Capshot-Setup.exe, plus latest.json, which installed
+# release: one installer, capshot-windows-x64.exe, plus latest.json, which installed
 # copies of Capshot read to find updates.
 #
 # The installer is signed by SignPath once the project is set up there (see
@@ -57,7 +57,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist-release | Out-Null
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          Copy-Item $setup.FullName dist-release/Capshot-Setup.exe
+          Copy-Item $setup.FullName dist-release/capshot-windows-x64.exe
 
       - name: Upload the unsigned installer
         if: env.SIGNPATH == 'true'
@@ -65,7 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-unsigned
-          path: dist-release/Capshot-Setup.exe
+          path: dist-release/capshot-windows-x64.exe
 
       - name: Sign the installer with SignPath
         if: env.SIGNPATH == 'true'
@@ -82,7 +82,7 @@ jobs:
       - name: Use the signed installer
         if: env.SIGNPATH == 'true'
         shell: pwsh
-        run: Copy-Item signed/Capshot-Setup.exe dist-release/Capshot-Setup.exe -Force
+        run: Copy-Item signed/capshot-windows-x64.exe dist-release/capshot-windows-x64.exe -Force
 
       # The update signature covers the installer's bytes, so it is made last,
       # after code signing changed them.
@@ -90,8 +90,8 @@ jobs:
         shell: pwsh
         working-directory: app
         run: |
-          npm exec -- tauri signer sign --password "" ../dist-release/Capshot-Setup.exe
-          $signature = (Get-Content ../dist-release/Capshot-Setup.exe.sig -Raw).Trim()
+          npm exec -- tauri signer sign --password "" ../dist-release/capshot-windows-x64.exe
+          $signature = (Get-Content ../dist-release/capshot-windows-x64.exe.sig -Raw).Trim()
           $version = "${{ github.ref_name }}".TrimStart("v")
           $latest = [ordered]@{
             version  = $version
@@ -100,13 +100,13 @@ jobs:
             platforms = @{
               "windows-x86_64" = [ordered]@{
                 signature = $signature
-                url       = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Capshot-Setup.exe"
+                url       = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/capshot-windows-x64.exe"
               }
             }
           }
           $latest | ConvertTo-Json -Depth 5 | Set-Content ../dist-release/latest.json -Encoding utf8
-          Remove-Item ../dist-release/Capshot-Setup.exe.sig
+          Remove-Item ../dist-release/capshot-windows-x64.exe.sig
 
       - name: Publish the release
         shell: pwsh
-        run: gh release create "${{ github.ref_name }}" dist-release/Capshot-Setup.exe dist-release/latest.json --title "Capshot ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist-release/capshot-windows-x64.exe dist-release/latest.json --title "Capshot ${{ github.ref_name }}" --generate-notes
