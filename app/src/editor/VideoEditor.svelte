@@ -15,9 +15,12 @@
     editorCopyFile,
     editorDiscard,
     editorExport,
+    editorPickMedia,
+    editorRead,
     editorSaveAs,
     editorVideoSources,
     getConfig,
+    onFileDrop,
     onJobProgress,
   } from "../lib/api";
   import Logo from "../lib/Logo.svelte";
@@ -31,6 +34,7 @@
   import CustomColor from "./CustomColor.svelte";
   import { VIVID } from "./colors";
   import {
+    addPicture,
     BACKGROUNDS,
     CUSTOM_WALL,
     wallStops,
@@ -402,6 +406,9 @@
         sourceBytes = s.bytes;
       })
       .catch(() => {});
+    const unlistenDrop = onFileDrop((paths) => {
+      for (const dropped of paths ?? []) importMedia(dropped);
+    });
     const unlisten = onJobProgress((p) => {
       const i = jobs.findIndex((j) => j.job === p.job);
       const old = jobs[i];
@@ -439,6 +446,7 @@
       observer.disconnect();
       window.removeEventListener("pointerdown", closeMenu);
       unlisten.then((f) => f());
+      unlistenDrop.then((f) => f());
       audioContext?.close();
     };
   });
@@ -1501,6 +1509,53 @@
     commit(() => Object.assign(o.shape, patch));
   }
 
+  // ── Pictures ───────────────────────────────────────────────────────────
+
+  const IMAGE_FILE = /.(png|jpe?g|webp|bmp|gif)$/i;
+
+  /** Puts a picture on the video from the playhead, centred in what is shown. */
+  async function placePicture(blob: Blob) {
+    const bitmap = await createImageBitmap(blob);
+    const area = crop ?? full;
+    // At most a third of the video, never enlarged.
+    const scale = Math.min(1, area.w / 3 / bitmap.width, area.h / 3 / bitmap.height);
+    const w = Math.max(8, bitmap.width * scale);
+    const h = Math.max(8, bitmap.height * scale);
+    const x = area.x + (area.w - w) / 2;
+    const y = area.y + (area.h - h) / 2;
+    addOverlay({
+      ...make("image", { x, y }, { size: 0, picture: addPicture(bitmap) }),
+      x2: x + w,
+      y2: y + h,
+    });
+  }
+
+  /** Brings a file into the video: a picture so far. */
+  function importMedia(file: string) {
+    if (IMAGE_FILE.test(file)) {
+      editorRead(file)
+        .then((bytes) => placePicture(new Blob([bytes])))
+        .catch((e) => notify(`Cannot use this picture: ${e}`));
+    }
+  }
+
+  async function addPictureFromFile() {
+    const picked = await editorPickMedia("image").catch((e) => {
+      notify(String(e));
+      return null;
+    });
+    if (picked) importMedia(picked);
+  }
+
+  /** Pasting a picture from the clipboard adds it. */
+  function paste(e: ClipboardEvent) {
+    if (editing) return;
+    const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    e.preventDefault();
+    placePicture(file).catch((err) => notify(`Cannot use this picture: ${err}`));
+  }
+
   function duplicateOverlay() {
     const o = selectedItem;
     if (!o) return;
@@ -1904,7 +1959,7 @@
   );
 </script>
 
-<svelte:window onkeydown={keyDown} />
+<svelte:window onkeydown={keyDown} onpaste={paste} />
 
 <div class="editor">
   {#if closing}
@@ -2378,6 +2433,8 @@
           {#if t.tool === "select"}<span class="vsep"></span>{/if}
         {/each}
         <span class="vsep"></span>
+        <button type="button" class="tool-btn" title="Add a picture, or drop or paste one" aria-label="Add a picture" onclick={addPictureFromFile}><Icon name="picture" /></button>
+        <span class="vsep"></span>
         <div class="anchor">
           <button
             type="button"
@@ -2497,11 +2554,30 @@
             {/each}
             <span class="ib-sep"></span>
           {/if}
-          {#each COLORS.slice(0, 6) as c (c)}
-            <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}
-            ></button>
-          {/each}
-          <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
+          {#if s.kind === "image"}
+            <label class="ib-range" title="Opacity">
+              <Icon name="picture" />
+              <input
+                type="range"
+                min="0.1"
+                max="1"
+                step="0.05"
+                value={s.opacity ?? 1}
+                onpointerdown={() => {
+                  past.push(snapshot());
+                  future = [];
+                }}
+                oninput={(e) => (s.opacity = Number(e.currentTarget.value))}
+                aria-label="Opacity"
+              />
+            </label>
+          {:else}
+            {#each COLORS.slice(0, 6) as c (c)}
+              <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}
+              ></button>
+            {/each}
+            <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
+          {/if}
           <span class="ib-sep"></span>
           <button type="button" class="ib" title="Duplicate" aria-label="Duplicate" onclick={duplicateOverlay}><Icon name="duplicate" /></button>
           <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeOverlay}><Icon name="trash" /></button>
@@ -4134,6 +4210,16 @@
     margin-top: 8px;
     font-size: 12px;
     color: var(--text-muted);
+  }
+  .ib-range {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 6px;
+    color: var(--text-muted);
+  }
+  .ib-range input {
+    width: 90px;
   }
   .mini-swatches {
     display: flex;
