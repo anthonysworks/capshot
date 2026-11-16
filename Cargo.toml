@@ -30,7 +30,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 windows = "0.62.2"
 rqrr = "0.11.0"
 
-tauri = { version = "2.12.5", features = ["tray-icon", "protocol-asset"] }
+# No asset compression: the embedded brotli decoder fails on the small index.html
+# in release builds (the window then opens on "asset not found").
+tauri = { version = "2.12.5", default-features = false, features = ["wry", "common-controls-v6", "dynamic-acl", "tray-icon", "protocol-asset"] }
 tauri-build = { version = "2.7.4", features = [] }
 tauri-plugin-global-shortcut = "2.4.1"
 tauri-plugin-single-instance = "2.5.5"

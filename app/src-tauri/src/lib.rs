@@ -192,3 +192,23 @@ pub fn run() {
         _ => {}
     });
 }
+
+#[cfg(test)]
+mod tests {
+    /// Every file of the web UI must be readable from the executable. With
+    /// compressed assets, the small `index.html` could not be decoded in
+    /// release builds and every window opened on "asset not found".
+    /// `cargo test --release` is the one that matters.
+    #[test]
+    fn embedded_assets_are_readable() {
+        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let assets = context.assets();
+        assert!(assets.get(&"index.html".into()).is_some(), "index.html");
+        for (key, _) in assets.iter() {
+            assert!(
+                assets.get(&key.to_string().as_str().into()).is_some(),
+                "{key}"
+            );
+        }
+    }
+}
