@@ -1,7 +1,7 @@
 //! Trims a video and prints the time taken.
 //!
 //! ```text
-//! cargo run --release -p capshot-record --example trim -- <in.mp4> <out.mp4> <start-s> <end-s> [mute|sound] [speed] [fps] [height] [music-file] [layer-video]
+//! cargo run --release -p capshot-record --example trim -- <in.mp4> <out.mp4> <start-s> <end-s> [mute|sound] [speed] [fps] [height] [music-file] [layer-video] [clip...]
 //! ```
 
 use std::path::PathBuf;
@@ -44,11 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fade_in: 0.5,
                 fade_out: 0.5,
             }),
-        clips: Vec::new(),
+        clips: args.iter().skip(11).map(PathBuf::from).collect(),
     };
     let mut options = options;
     // trim <in> <out> <start> <end> <mute|sound> <speed> <fps> <height> <music|-> <layer.mp4>
-    if let Some(layer) = args.get(10) {
+    if let Some(layer) = args.get(10).filter(|l| !l.is_empty()) {
         options
             .composition
             .layers
