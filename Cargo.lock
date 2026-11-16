@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "capshot"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "capshot-core",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "capshot-capture"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "capshot-core",
  "thiserror 2.0.21",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "capshot-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "directories",
  "serde",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "capshot-encode"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "capshot-core",
  "chrono",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "capshot-gif"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "capshot-core",
  "gif",
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "capshot-overlay"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "capshot-capture",
  "capshot-core",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "capshot-record"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "capshot-capture",
  "capshot-core",
