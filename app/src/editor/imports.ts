@@ -35,8 +35,7 @@ export function mediaKind(path: string): "image" | "audio" | "video" | null {
   return null;
 }
 
-/** The last part of a path. */
-export const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
+export { fileName } from "../lib/format";
 
 /** Where a picture or a video sits in the frame. */
 export type Corner = "top-left" | "top-right" | "center" | "bottom-left" | "bottom-right";

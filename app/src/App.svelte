@@ -25,6 +25,7 @@
     openSetup,
     saveConfig,
   } from "./lib/api";
+  import { fileName, fileSize } from "./lib/format";
   import HotkeyInput from "./lib/HotkeyInput.svelte";
   import Logo from "./lib/Logo.svelte";
   import Notches from "./lib/Notches.svelte";
@@ -170,9 +171,7 @@
     }
   }
 
-  const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
-  const size = (bytes: number) =>
-    bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+  const size = fileSize;
 </script>
 
 

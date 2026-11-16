@@ -32,6 +32,11 @@
   import { DEVICE_FRAMES, type DeviceFrame, frameLayout, hasLook, hasTitle, renderFrame } from "./frames";
   import { ZOOM_LENGTH, ZOOM_SCALES, autoZooms, cameraTrack, zoomView } from "./zoom";
   import CustomColor from "./CustomColor.svelte";
+  import RangeChip from "./RangeChip.svelte";
+  import WallColors from "./WallColors.svelte";
+  import { sharedTool } from "./tools";
+  import { createToast } from "../lib/toast.svelte";
+  import { fileSize } from "../lib/format";
   import ImportPanel from "./ImportPanel.svelte";
   import { VIVID } from "./colors";
   import { type Clip, type Corner, type Music, cornerOrigin, fileName, mediaKind } from "./imports";
@@ -99,15 +104,15 @@
   type Tool = "select" | "text" | "arrow" | "curve" | "line" | "rect" | "ellipse" | "highlight" | "pen" | "number" | "pixelate";
   const TOOLS: { tool: Tool; icon: IconName; label: string; key: string }[] = [
     { tool: "select", icon: "select", label: "Select, move, resize — click the video to play", key: "V" },
-    { tool: "text", icon: "text", label: "Text", key: "T" },
-    { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
-    { tool: "curve", icon: "curve", label: "Curved arrow (drag its middle to bend it)", key: "Q" },
-    { tool: "line", icon: "line", label: "Line", key: "L" },
-    { tool: "rect", icon: "rect", label: "Rectangle", key: "R" },
-    { tool: "ellipse", icon: "ellipse", label: "Ellipse", key: "E" },
+    sharedTool("text"),
+    sharedTool("arrow"),
+    sharedTool("curve"),
+    sharedTool("line"),
+    sharedTool("rect"),
+    sharedTool("ellipse"),
     { tool: "pen", icon: "pen", label: "Pencil", key: "P" },
-    { tool: "highlight", icon: "highlight", label: "Highlighter", key: "H" },
-    { tool: "number", icon: "number", label: "Numbered step", key: "N" },
+    sharedTool("highlight"),
+    sharedTool("number"),
     { tool: "pixelate", icon: "pixelate", label: "Pixelate: hides what is under it", key: "B" },
   ];
   const COLORS = VIVID;
@@ -264,7 +269,7 @@
   /** Filmstrip frames, evenly spread over the video; empty until made. */
   let frames = $state<(ImageBitmap | null)[]>([]);
   let error = $state("");
-  let toast = $state("");
+  const toaster = createToast();
   let config = $state<Config | null>(null);
   let gifFps = $state(15);
   let gifWidth = $state(0);
@@ -2095,12 +2100,7 @@
     return (bits / 8 + (audio || music ? 24_000 : 0)) * (output + clipsSeconds);
   });
 
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  function notify(text: string) {
-    toast = text;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (toast = ""), 3000);
-  }
+  const notify = toaster.show;
 
   function listen(voice: ClickSound) {
     clickVoice = voice;
@@ -2217,8 +2217,7 @@
   }
 
   const percent = (t: number) => (duration ? (t / duration) * 100 : 0);
-  const size = (bytes: number) =>
-    bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+  const size = fileSize;
   const name = fileName;
   /** File name without its extension. */
   const baseName = (p: string) => name(p).replace(/\.[^.]+$/, "");
@@ -2374,12 +2373,7 @@
           ></button>
         </div>
         {#if framed && !transparent && background === CUSTOM_WALL}
-          <div class="wall-colours">
-            <span>From</span>
-            <CustomColor value={customWall[0] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [c, customWall[1] ?? c])} />
-            <span>to</span>
-            <CustomColor value={customWall[1] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [customWall[0] ?? c, c])} />
-          </div>
+          <WallColors bind:colors={customWall} />
         {/if}
         <div class="sec-head">
           <h3>Device</h3>
@@ -2845,7 +2839,7 @@
         </div>
       {/if}
       {#if error}<p class="error">{error}</p>{/if}
-      {#if toast}<div class="toast" role="status">{toast}</div>{/if}
+      {#if toaster.text}<div class="toast" role="status">{toaster.text}</div>{/if}
       {#if hint}<div class="hint">{hint}</div>{/if}
       {#if itemBar && selectedItem}
         {@const s = selectedItem.shape}
@@ -2878,36 +2872,9 @@
             <span class="ib-sep"></span>
           {/if}
           {#if s.kind === "image" || s.kind === "video"}
-            <label class="ib-range" title="Opacity">
-              <Icon name="picture" />
-              <input
-                type="range"
-                min="0.1"
-                max="1"
-                step="0.05"
-                value={s.opacity ?? 1}
-                onpointerdown={() => {
-                  past.push(snapshot());
-                  future = [];
-                }}
-                oninput={(e) => (s.opacity = Number(e.currentTarget.value))}
-                aria-label="Opacity"
-              />
-            </label>
+            <RangeChip icon="picture" title="Opacity" min={0.1} value={s.opacity ?? 1} onstart={saveStep} onchange={(v) => (s.opacity = v)} />
             {#if s.kind === "video"}
-              <label class="ib-range" title="Sound of this video">
-                <Icon name="volume" />
-                <input
-                  type="range"
-                  min="0"
-                  max="2"
-                  step="0.05"
-                  value={s.volume ?? 1}
-                  onpointerdown={saveStep}
-                  oninput={(e) => (s.volume = Number(e.currentTarget.value))}
-                  aria-label="Sound of this video"
-                />
-              </label>
+              <RangeChip icon="volume" title="Sound of this video" max={2} value={s.volume ?? 1} onstart={saveStep} onchange={(v) => (s.volume = v)} />
             {/if}
           {:else}
             {#each COLORS.slice(0, 6) as c (c)}
@@ -4542,24 +4509,6 @@
     stroke: currentColor;
     stroke-width: 2.4;
     stroke-linecap: round;
-  }
-  .wall-colours {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 8px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .ib-range {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 6px;
-    color: var(--text-muted);
-  }
-  .ib-range input {
-    width: 90px;
   }
   .mini-swatches {
     display: flex;

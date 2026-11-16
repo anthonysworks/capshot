@@ -12,6 +12,11 @@
     showInFolder,
   } from "../lib/api";
   import CustomColor from "./CustomColor.svelte";
+  import RangeChip from "./RangeChip.svelte";
+  import WallColors from "./WallColors.svelte";
+  import { sharedTool } from "./tools";
+  import { createToast } from "../lib/toast.svelte";
+  import { fileName, fileSize } from "../lib/format";
   import { VIVID } from "./colors";
   import { IMAGE_FILE } from "./imports";
   import Logo from "../lib/Logo.svelte";
@@ -57,25 +62,25 @@
     {
       title: "Shapes",
       tools: [
-        { tool: "arrow", icon: "arrow", label: "Arrow", key: "A" },
-        { tool: "curve", icon: "curve", label: "Curved arrow (drag its middle to bend it)", key: "Q" },
-        { tool: "line", icon: "line", label: "Line", key: "L" },
-        { tool: "rect", icon: "rect", label: "Rectangle", key: "R" },
-        { tool: "ellipse", icon: "ellipse", label: "Ellipse", key: "E" },
+        sharedTool("arrow"),
+        sharedTool("curve"),
+        sharedTool("line"),
+        sharedTool("rect"),
+        sharedTool("ellipse"),
       ],
     },
     {
       title: "Draw",
       tools: [
         { tool: "pen", icon: "pen", label: "Pencil (freehand)", key: "P" },
-        { tool: "highlight", icon: "highlight", label: "Highlighter", key: "H" },
+        sharedTool("highlight"),
       ],
     },
     {
       title: "Text",
       tools: [
-        { tool: "text", icon: "text", label: "Text", key: "T" },
-        { tool: "number", icon: "number", label: "Numbered step", key: "N" },
+        sharedTool("text"),
+        sharedTool("number"),
       ],
     },
     {
@@ -150,7 +155,7 @@
   let dirty = $state(false);
   /** Asking whether to close with unsaved changes. */
   let closing = $state(false);
-  let toast = $state("");
+  const toaster = createToast();
   let editing = $state<{ x: number; y: number; text: string; id: number | null } | null>(null);
   /** Physical pixels per image pixel, and where the image starts. */
   let view = $state({ s: 1, ox: 0, oy: 0, dpr: 1 });
@@ -182,9 +187,8 @@
       try {
         const bytes = await editorRead(path);
         source = await createImageBitmap(new Blob([bytes]));
-        const n = bytes.byteLength;
-        const weight = n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
-        const name = path.split(/[\\/]/).pop() ?? path;
+        const weight = fileSize(bytes.byteLength);
+        const name = fileName(path);
         getCurrentWindow()
           .setTitle(`Capshot Editor · ${name} · ${source.width}×${source.height} · ${weight}`)
           .catch(() => {});
@@ -775,12 +779,7 @@
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  function notify(text: string) {
-    toast = text;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (toast = ""), 3000);
-  }
+  const notify = toaster.show;
 
   async function copy() {
     try {
@@ -1252,19 +1251,7 @@
             <span class="ib-sep"></span>
           {/if}
           {#if s.kind === "image"}
-            <label class="ib-range" title="Opacity">
-              <Icon name="picture" />
-              <input
-                type="range"
-                min="0.1"
-                max="1"
-                step="0.05"
-                value={s.opacity ?? 1}
-                onpointerdown={remember}
-                oninput={(e) => (s.opacity = Number(e.currentTarget.value))}
-                aria-label="Opacity"
-              />
-            </label>
+            <RangeChip icon="picture" title="Opacity" min={0.1} value={s.opacity ?? 1} onstart={remember} onchange={(v) => (s.opacity = v)} />
           {:else}
             {#each COLORS.slice(0, 6) as c (c)}
               <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}></button>
@@ -1295,10 +1282,10 @@
       {:else if !image}
         <p class="message">Loading…</p>
       {/if}
-      {#if toast}
+      {#if toaster.text}
         <div class="toast" role="status">
-          {toast}
-          {#if copyPath && toast.startsWith("Saved as")}
+          {toaster.text}
+          {#if copyPath && toaster.text.startsWith("Saved as")}
             <button type="button" class="link" onclick={() => copyPath && showInFolder(copyPath)}>Show</button>
           {/if}
         </div>
@@ -1357,12 +1344,7 @@
             ></button>
           </div>
           {#if frame.enabled && !noWall && frame.background === CUSTOM_WALL}
-            <div class="wall-colours">
-              <span>From</span>
-              <CustomColor value={customWall[0] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [c, customWall[1] ?? c])} />
-              <span>to</span>
-              <CustomColor value={customWall[1] ?? "#000000"} presets={[]} onpick={(c) => (customWall = [customWall[0] ?? c, c])} />
-            </div>
+            <WallColors bind:colors={customWall} />
           {/if}
           <h3 class="spaced">Device</h3>
           <div class="device-tiles" role="radiogroup" aria-label="Device">
@@ -1775,14 +1757,6 @@
     width: 14px;
     height: 14px;
   }
-  .wall-colours {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 10px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
   .swatch.wide {
     width: 44px;
     height: 44px;
@@ -1897,16 +1871,6 @@
   }
   .emoji-pop button:hover {
     background: var(--hover);
-  }
-  .ib-range {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 6px;
-    color: var(--text-muted);
-  }
-  .ib-range input {
-    width: 90px;
   }
   .ib-swatch {
     width: 20px;
