@@ -11,7 +11,6 @@
 //! than real time. Re-encoding (rather than copying compressed samples)
 //! keeps cuts frame-accurate: a copy could only start on a key frame.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,38 +24,35 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMF2DBuffer2, IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType,
-    IMFSample, IMFSinkWriter, IMFSourceReader, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
-    MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-    MF_MT_YUV_MATRIX, MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_SINK_WRITER_D3D_MANAGER, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ANY_STREAM,
-    MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
-    MF_VERSION, MF2DBuffer_LockFlags_Read, MFAudioFormat_AAC, MFAudioFormat_PCM,
-    MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL,
-    MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoArea,
-    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoTransferMatrix_BT601, eAVEncH264VProfile_High,
+    IMF2DBuffer, IMFAttributes, IMFDXGIDeviceManager, IMFMediaType, IMFSample, IMFSinkWriter,
+    IMFSourceReader, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
+    MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
+    MF_MT_AVG_BITRATE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
+    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_D3D_MANAGER,
+    MF_SOURCE_READER_ANY_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+    MF_VERSION, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
+    MFCreateSinkWriterFromURL, MFMediaType_Audio, MFSTARTUP_FULL, MFShutdown, MFStartup,
+    MFVideoFormat_H264, eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::core::{GUID, HSTRING, Interface};
 
+use crate::clips::{Writing, append_clip};
 use crate::compose::{Composer, Composition};
 use crate::convert::{Blitter, Space, drawable_texture, render_texture};
 use crate::cursor::CursorTrack;
 use crate::encoder::{VideoSettings, set_input, video_type};
+use crate::layers::LayerPlayer;
+use crate::media::{AUDIO, Decoded, Layout, VIDEO, VideoFile};
 use crate::paint::{Painter, Zoomer};
-use crate::stretch::{Bed, apply_gain, click_sound, click_volume, mix_at, mix_bed, remix, stretch};
+use crate::sound::{AudioReader, PendingPcm, decode_music};
+use crate::stretch::{
+    Bed, apply_gain, click_sound, click_volume, mix_at, mix_bed, mix_chunk, stretch,
+};
 use crate::zoom::Zoom;
 use crate::{Part, RecordError, Result};
 
-#[allow(clippy::cast_sign_loss)]
-const VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-#[allow(clippy::cast_sign_loss)]
-const AUDIO: u32 = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
 /// AAC at 192 kbit/s.
 const AAC_BYTES_PER_SECOND: u32 = 24_000;
 /// Encoder quality-vs-speed for exports: measured on an RTX 3080, 33 keeps
@@ -203,50 +199,6 @@ fn ticks(d: Duration) -> i64 {
     i64::try_from(d.as_nanos() / 100).unwrap_or(i64::MAX)
 }
 
-/// Decoded NV12 frame layout.
-#[derive(Debug, Clone, Copy)]
-struct Layout {
-    coded: (u32, u32),
-    visible: Rect,
-}
-
-fn layout(media_type: &IMFMediaType) -> Result<Layout> {
-    // SAFETY: plain attribute reads; the blob matches the structure size.
-    unsafe {
-        let packed = media_type.GetUINT64(&MF_MT_FRAME_SIZE)?;
-        #[allow(clippy::cast_possible_truncation)]
-        let coded = ((packed >> 32) as u32, packed as u32);
-        #[allow(clippy::cast_possible_wrap)]
-        let mut visible = Rect::new(0, 0, coded.0 as i32, coded.1 as i32);
-        let mut area = MFVideoArea::default();
-        let bytes =
-            std::slice::from_raw_parts_mut((&raw mut area).cast::<u8>(), size_of::<MFVideoArea>());
-        if media_type
-            .GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, bytes, None)
-            .is_ok()
-        {
-            let a = Rect::from_size(
-                i32::from(area.OffsetX.value),
-                i32::from(area.OffsetY.value),
-                area.Area.cx,
-                area.Area.cy,
-            );
-            if !a.is_empty() {
-                visible = a.intersect(visible);
-            }
-        }
-        // NV12 needs even dimensions and offsets.
-        let even = |v: i32| v & !1;
-        visible = Rect::new(
-            even(visible.left),
-            even(visible.top),
-            even(visible.left) + even(visible.width()),
-            even(visible.top) + even(visible.height()),
-        );
-        Ok(Layout { coded, visible })
-    }
-}
-
 fn audio_type(subtype: &GUID, rate: u32, channels: u32) -> windows::core::Result<IMFMediaType> {
     // SAFETY: attribute setters on a fresh media type.
     unsafe {
@@ -271,6 +223,8 @@ struct Composed {
     frame: ID3D11Texture2D,
     background: Option<ID3D11Texture2D>,
     painter: Painter,
+    /// Videos drawn over this one.
+    layers: Vec<LayerPlayer>,
     zoom: Option<ZoomStage>,
     /// BGRA frame → NV12 for the encoder.
     encode: Blitter,
@@ -290,24 +244,24 @@ struct ZoomStage {
 }
 
 /// Turns decoded frames into encoder input, on the GPU.
-struct Frames {
+pub(crate) struct Frames {
     gpu: Gpu,
     /// Source area kept, in decoded pixels.
     crop: Rect,
     /// Output size (even).
-    size: (u32, u32),
+    pub(crate) size: (u32, u32),
     /// Plain cuts: decoded NV12 → cropped NV12.
     direct: Option<Blitter>,
     composed: Option<Composed>,
-    /// Holds frames from decoders that only work in system memory.
-    upload: RefCell<Option<ID3D11Texture2D>>,
-    layout: Layout,
+    decoded: Decoded,
 }
 
 #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 impl Frames {
+    #[allow(clippy::too_many_lines)]
     fn new(
         gpu: &Gpu,
+        manager: &IMFDXGIDeviceManager,
         layout: Layout,
         space: Space,
         fps: u32,
@@ -315,6 +269,13 @@ impl Frames {
     ) -> Result<Self> {
         let visible = layout.visible;
         let crop = apply_crop(visible, options.crop);
+        // Videos drawn over this one, each decoded in step with it.
+        let mut layers = Vec::new();
+        for layer in &options.composition.layers {
+            // SAFETY: Media Foundation is started by the caller.
+            layers.push(unsafe { LayerPlayer::open(gpu, manager, layer)? });
+        }
+        let surfaces: Vec<_> = layers.iter().map(LayerPlayer::surface).collect();
         let crop_size = (crop.width() as u32, crop.height() as u32);
         let canvas = options
             .composition
@@ -359,6 +320,7 @@ impl Frames {
                     source_crop,
                     area,
                     &corners,
+                    &surfaces,
                 )?;
                 (decode, view, area, painter, None)
             } else {
@@ -374,6 +336,7 @@ impl Frames {
                     source_crop,
                     whole,
                     &[],
+                    &surfaces,
                 )?;
                 #[allow(clippy::cast_precision_loss)]
                 let stage = ZoomStage {
@@ -398,6 +361,7 @@ impl Frames {
                 frame,
                 background,
                 painter,
+                layers,
                 zoom,
                 encode,
                 frame_input,
@@ -411,51 +375,17 @@ impl Frames {
             size,
             direct,
             composed,
-            upload: RefCell::new(None),
-            layout,
+            decoded: Decoded::new(gpu, layout.coded),
         })
     }
 
-    /// The decoded texture of `sample` (uploaded first if the decoder
-    /// works in system memory).
-    fn source(&self, sample: &IMFSample) -> Result<(ID3D11Texture2D, u32)> {
-        // SAFETY: COM calls on a live sample.
-        unsafe {
-            let buffer = sample.GetBufferByIndex(0)?;
-            if let Ok(dxgi) = buffer.cast::<IMFDXGIBuffer>() {
-                let mut texture = std::ptr::null_mut();
-                dxgi.GetResource(&ID3D11Texture2D::IID, &mut texture)?;
-                let texture = ID3D11Texture2D::from_raw(texture);
-                return Ok((texture, dxgi.GetSubresourceIndex()?));
-            }
-        }
-        let mut upload = self.upload.borrow_mut();
-        if upload.is_none() {
-            *upload = Some(render_texture(
-                &self.gpu,
-                self.layout.coded,
-                DXGI_FORMAT_NV12,
-            )?);
-        }
-        let texture = upload.clone().ok_or(RecordError::ThreadLost)?;
-        let nv12 = packed_nv12(sample, self.layout.coded)?;
-        // SAFETY: `nv12` holds the whole frame at a pitch of the width.
-        unsafe {
-            self.gpu.context().UpdateSubresource(
-                &texture,
-                0,
-                None,
-                nv12.as_ptr().cast(),
-                self.layout.coded.0,
-                0,
-            );
-        }
-        Ok((texture, 0))
+    pub(crate) fn gpu(&self) -> &Gpu {
+        &self.gpu
     }
 
     /// Renders one frame (source time `t` in seconds) for the encoder.
     fn render(&self, sample: &IMFSample, t: f64) -> Result<ID3D11Texture2D> {
-        let (texture, slice) = self.source(sample)?;
+        let (texture, slice) = self.decoded.texture(sample)?;
         let output = render_texture(&self.gpu, self.size, DXGI_FORMAT_NV12)?;
         let full = Rect::new(0, 0, self.size.0 as i32, self.size.1 as i32);
         if let Some(blit) = &self.direct {
@@ -469,6 +399,9 @@ impl Frames {
             let input = c.decode.input(&texture, slice)?;
             c.decode
                 .blit(&input, self.crop, &c.decode_view, c.decode_to)?;
+            for layer in &c.layers {
+                layer.update(t)?;
+            }
             c.painter.paint(t)?;
             if let Some(z) = &c.zoom {
                 let [vx, vy, vw, vh] = z.zoom.view(z.crop, t);
@@ -532,70 +465,20 @@ fn upload_bgra(gpu: &Gpu, image: &BgraImage) -> Result<ID3D11Texture2D> {
     Ok(texture.ok_or_else(windows::core::Error::empty)?)
 }
 
-/// A decoded NV12 sample in system memory, as a packed frame of the coded
-/// size (luma rows then chroma rows, `width` bytes each).
-fn packed_nv12(sample: &IMFSample, (w, h): (u32, u32)) -> Result<Vec<u8>> {
-    let (w, h) = (w as usize, h as usize);
-    let mut out = vec![0u8; w * h * 3 / 2];
-    // SAFETY: rows are read within the locked buffer.
-    unsafe {
-        let src = sample.ConvertToContiguousBuffer()?;
-        let mut copy = |scan0: *const u8, pitch: usize, length: usize| {
-            // Decoders may pad the luma plane: the chroma plane starts
-            // after `rows` rows, which may exceed the frame height.
-            let rows = (length / pitch.max(1)) * 2 / 3;
-            let rows = if rows >= h {
-                rows
-            } else {
-                h.next_multiple_of(16)
-            };
-            let width = w.min(pitch);
-            for row in 0..h {
-                let from = std::slice::from_raw_parts(scan0.add(row * pitch), width);
-                out[row * w..row * w + width].copy_from_slice(from);
-            }
-            for row in 0..h / 2 {
-                let from = std::slice::from_raw_parts(scan0.add((rows + row) * pitch), width);
-                let at = w * h + row * w;
-                out[at..at + width].copy_from_slice(from);
-            }
-        };
-        if let Ok(buffer2d) = src.cast::<IMF2DBuffer2>() {
-            let (mut scan0, mut pitch) = (std::ptr::null_mut(), 0i32);
-            let (mut start, mut length) = (std::ptr::null_mut(), 0u32);
-            buffer2d.Lock2DSize(
-                MF2DBuffer_LockFlags_Read,
-                &mut scan0,
-                &mut pitch,
-                &mut start,
-                &mut length,
-            )?;
-            copy(scan0, pitch.unsigned_abs() as usize, length as usize);
-            buffer2d.Unlock2D()?;
-        } else {
-            let (mut data, mut length) = (std::ptr::null_mut(), 0u32);
-            src.Lock(&mut data, None, Some(&mut length))?;
-            copy(data, w, length as usize);
-            src.Unlock()?;
-        }
-    }
-    Ok(out)
-}
-
-struct Pipeline {
+pub(crate) struct Pipeline {
     reader: IMFSourceReader,
-    writer: IMFSinkWriter,
-    frames: Frames,
-    video_out: u32,
+    pub(crate) writer: IMFSinkWriter,
+    pub(crate) frames: Frames,
+    pub(crate) video_out: u32,
     /// Writer stream for the sound, if kept.
-    audio_out: Option<u32>,
+    pub(crate) audio_out: Option<u32>,
     /// Sample rate and channels of the sound written.
     audio_format: (u32, u32),
     /// The source has no sound: the track is generated (click sounds).
     synth_audio: bool,
     duration: Duration,
     fps: u32,
-    manager: IMFDXGIDeviceManager,
+    pub(crate) manager: IMFDXGIDeviceManager,
 }
 
 /// Bitrate that keeps what the source has: re-encoding below the source's
@@ -626,48 +509,16 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         let manager = manager.ok_or(RecordError::ThreadLost)?;
         manager.ResetDevice(gpu.device(), token)?;
 
-        let mut attributes: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attributes, 3)?;
-        let attributes = attributes.ok_or(RecordError::ThreadLost)?;
-        attributes.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &manager)?;
-        attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
-        attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
-        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(input.as_os_str()), &attributes)?;
-        #[allow(clippy::cast_sign_loss)]
-        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
-        reader.SetStreamSelection(VIDEO, true)?;
-
-        let wanted = MFCreateMediaType()?;
-        wanted.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-        wanted.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-        reader.SetCurrentMediaType(VIDEO, None, &wanted)?;
-        let decoded = reader.GetCurrentMediaType(VIDEO)?;
-        let layout = layout(&decoded)?;
-        #[allow(clippy::cast_possible_wrap)]
-        let space = match decoded.GetUINT32(&MF_MT_YUV_MATRIX) {
-            Ok(m) if m == MFVideoTransferMatrix_BT601.0 as u32 => Space::Bt601,
-            _ => Space::Bt709,
-        };
-        let fps = decoded
-            .GetUINT64(&MF_MT_FRAME_RATE)
-            .ok()
-            .map(|r| {
-                #[allow(clippy::cast_possible_truncation)]
-                let (num, den) = ((r >> 32) as u32, (r as u32).max(1));
-                (num + den / 2) / den
-            })
-            .filter(|&f| f > 0)
-            .unwrap_or(30);
-        let frames = Frames::new(&gpu, layout, space, fps, options)?;
+        let VideoFile {
+            reader,
+            layout,
+            space,
+            fps,
+            duration,
+        } = VideoFile::open(input, &manager)?;
+        let frames = Frames::new(&gpu, &manager, layout, space, fps, options)?;
         // A lower frame rate asked for drops frames; never a higher one.
         let out_fps = options.fps.map_or(fps, |f| f.clamp(1, fps));
-
-        #[allow(clippy::cast_sign_loss)]
-        let duration = reader
-            .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
-            .ok()
-            .and_then(|v| u64::try_from(&v).ok())
-            .map_or(Duration::ZERO, |t| Duration::from_nanos(t * 100));
 
         let mut writer_attributes: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut writer_attributes, 2)?;
@@ -741,7 +592,7 @@ unsafe fn open(input: &Path, output: &Path, options: &TrimOptions) -> Result<Pip
         let audio_out = match audio_out {
             None if options.click_sound()
                 || options.music.is_some()
-                || (options.audio && !options.clips.is_empty()) =>
+                || (options.audio && (!options.clips.is_empty() || has_layer_sound(options))) =>
             {
                 let pcm = audio_type(&MFAudioFormat_PCM, 48_000, 2)?;
                 pcm.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4)?;
@@ -816,7 +667,7 @@ fn clip_segments(parts: &[Part], duration: Duration) -> Vec<(i64, i64, f64)> {
 }
 
 /// Writes an NV12 texture to the encoder.
-fn write_texture(
+pub(crate) fn write_texture(
     writer: &IMFSinkWriter,
     stream: u32,
     texture: &ID3D11Texture2D,
@@ -874,11 +725,34 @@ unsafe fn run(
         // than copied when the speed changes or clicks are heard. It is
         // prepared per segment from a second reader, then written as the
         // video progresses: the writer holds back a stream that runs ahead.
+        // The sound of the videos drawn over this one, decoded once.
+        let layers_audio: Vec<(Vec<i16>, &crate::compose::VideoLayer)> = if options.audio {
+            options
+                .composition
+                .layers
+                .iter()
+                .filter(|l| l.volume > 0.0)
+                .filter_map(|l| {
+                    let pcm = decode_music(
+                        &l.path,
+                        l.from,
+                        l.end - l.start,
+                        p.audio_format.0,
+                        p.audio_format.1 as usize,
+                    )
+                    .ok()?;
+                    (!pcm.is_empty()).then_some((pcm, l))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let rebuild_audio = p.audio_out.is_some()
             && !p.synth_audio
             && (segments.iter().any(|s| (s.2 - 1.0).abs() > 1e-6)
                 || options.click_sound()
                 || options.music.is_some()
+                || !layers_audio.is_empty()
                 || !options.sound.is_plain());
         let copy_audio = p.audio_out.is_some() && !p.synth_audio && !rebuild_audio;
         let audio_reader = if rebuild_audio {
@@ -979,6 +853,11 @@ unsafe fn run(
                     click_volume(voice),
                 );
             }
+            if let Some(pending) = &mut pending {
+                for (pcm, layer) in &layers_audio {
+                    mix_layer(pending, pcm, layer, (start, end, speed), (rate, channels));
+                }
+            }
             if let (Some(pending), Some((music, bed))) = (&mut pending, &bed) {
                 mix_bed(
                     &mut pending.pcm,
@@ -1059,16 +938,15 @@ unsafe fn run(
             offset = offset.max(segment_end);
         }
         // Videos added after the edited one.
+        let writing = Writing {
+            frame_ticks,
+            min_gap,
+            rate,
+            channels,
+            music: bed.as_ref(),
+        };
         for clip in &options.clips {
-            let (end, written) = append_clip(
-                &p,
-                clip,
-                offset,
-                (frame_ticks, min_gap),
-                (rate, channels),
-                bed.as_ref(),
-                progress,
-            )?;
+            let (end, written) = append_clip(&p, clip, offset, &writing, progress)?;
             offset = end;
             frames += written;
         }
@@ -1088,366 +966,46 @@ unsafe fn run(
 }
 
 /// Interleaved 16-bit samples of a decoded PCM sample.
-fn read_pcm(sample: &IMFSample) -> Result<Vec<i16>> {
-    // SAFETY: the buffer is locked while read.
-    unsafe {
-        let buffer = sample.ConvertToContiguousBuffer()?;
-        let (mut data, mut len) = (std::ptr::null_mut(), 0u32);
-        buffer.Lock(&mut data, None, Some(&mut len))?;
-        let bytes = std::slice::from_raw_parts(data, len as usize);
-        let pcm = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| i16::from_le_bytes(*b))
-            .collect();
-        buffer.Unlock()?;
-        Ok(pcm)
-    }
+/// Whether a video drawn over the edited one has sound to mix in.
+fn has_layer_sound(options: &TrimOptions) -> bool {
+    options.composition.layers.iter().any(|l| l.volume > 0.0)
 }
 
-/// Reads the sound of the source as 16-bit PCM, for rebuilding it.
-struct AudioReader {
-    reader: IMFSourceReader,
-}
-
-impl AudioReader {
-    fn open(input: &Path) -> Result<Self> {
-        // SAFETY: Media Foundation calls with valid arguments.
-        unsafe {
-            let reader = MFCreateSourceReaderFromURL(&HSTRING::from(input.as_os_str()), None)?;
-            #[allow(clippy::cast_sign_loss)]
-            reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
-            reader.SetStreamSelection(AUDIO, true)?;
-            let pcm = MFCreateMediaType()?;
-            pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-            pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
-            pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
-            reader.SetCurrentMediaType(AUDIO, None, &pcm)?;
-            Ok(Self { reader })
-        }
-    }
-
-    /// Interleaved samples from `start` to `end` (100 ns units).
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    fn read(&self, start: i64, end: i64, rate: u32, channels: usize) -> Result<Vec<i16>> {
-        let mut out = Vec::new();
-        // SAFETY: Media Foundation calls with valid arguments.
-        unsafe {
-            self.reader
-                .SetCurrentPosition(&GUID::zeroed(), &PROPVARIANT::from(start))?;
-            loop {
-                let (mut flags, mut time) = (0u32, 0i64);
-                let mut sample: Option<IMFSample> = None;
-                self.reader.ReadSample(
-                    AUDIO,
-                    0,
-                    None,
-                    Some(&mut flags),
-                    Some(&mut time),
-                    Some(&mut sample),
-                )?;
-                #[allow(clippy::cast_sign_loss)]
-                let stop = flags
-                    & (MF_SOURCE_READERF_ENDOFSTREAM.0 | MF_SOURCE_READERF_ERROR.0) as u32
-                    != 0;
-                if stop || time >= end {
-                    break;
-                }
-                let Some(sample) = sample else {
-                    continue;
-                };
-                let pcm = read_pcm(&sample)?;
-                // Seeking lands before `start`: skip what precedes it.
-                let skip = if time < start {
-                    ((start - time) as f64 / 1e7 * f64::from(rate)) as usize * channels
-                } else {
-                    0
-                };
-                out.extend_from_slice(pcm.get(skip..).unwrap_or_default());
-            }
-        }
-        // Nothing past `end`.
-        let length = ((end - start) as f64 / 1e7 * f64::from(rate)) as usize * channels;
-        out.truncate(length);
-        Ok(out)
-    }
-}
-
-/// Writes `clip` after the result written so far (`offset`, 100 ns units):
-/// scaled to fit the frame of the result, with black bars, its sound at the
-/// rate and channels of the result. Returns where it ends and how many
-/// frames were written.
-///
-/// SAFETY: Media Foundation must be started; `p` is the open pipeline.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    clippy::too_many_lines
-)]
-unsafe fn append_clip(
-    p: &Pipeline,
-    clip: &Path,
-    offset: i64,
-    (frame_ticks, min_gap): (i64, i64),
-    (rate, channels): (u32, usize),
-    bed: Option<&(Vec<i16>, Bed)>,
-    progress: &mut impl FnMut(f32) -> bool,
-) -> Result<(i64, u64)> {
-    // SAFETY: Media Foundation and Direct3D calls with valid arguments.
-    unsafe {
-        let gpu = &p.frames.gpu;
-        let mut attributes: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attributes, 3)?;
-        let attributes = attributes.ok_or(RecordError::ThreadLost)?;
-        attributes.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &p.manager)?;
-        attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
-        attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
-        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(clip.as_os_str()), &attributes)?;
-        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
-        reader.SetStreamSelection(VIDEO, true)?;
-        let wanted = MFCreateMediaType()?;
-        wanted.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-        wanted.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-        reader.SetCurrentMediaType(VIDEO, None, &wanted)?;
-        let decoded = reader.GetCurrentMediaType(VIDEO)?;
-        let layout = layout(&decoded)?;
-        let space = match decoded.GetUINT32(&MF_MT_YUV_MATRIX) {
-            Ok(m) if m == MFVideoTransferMatrix_BT601.0 as u32 => Space::Bt601,
-            _ => Space::Bt709,
-        };
-        let fps = decoded
-            .GetUINT64(&MF_MT_FRAME_RATE)
-            .ok()
-            .map(|r| {
-                let (num, den) = ((r >> 32) as u32, (r as u32).max(1));
-                (num + den / 2) / den
-            })
-            .filter(|&f| f > 0)
-            .unwrap_or(30);
-        let duration = reader
-            .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
-            .ok()
-            .and_then(|v| u64::try_from(&v).ok())
-            .map_or(0, |t| t as i64);
-
-        // The clip as decoded, then scaled into the frame of the result.
-        let frames = Frames::new(gpu, layout, space, fps, &TrimOptions::whole(false, 0))?;
-        let (cw, ch) = frames.size;
-        let (ow, oh) = p.frames.size;
-        let scale = (f64::from(ow) / f64::from(cw)).min(f64::from(oh) / f64::from(ch));
-        let dw = ((f64::from(cw) * scale) as u32 & !1).clamp(2, ow);
-        let dh = ((f64::from(ch) * scale) as u32 & !1).clamp(2, oh);
-        let (dx, dy) = (((ow - dw) / 2) & !1, ((oh - dh) / 2) & !1);
-        let dest = Rect::new(dx as i32, dy as i32, (dx + dw) as i32, (dy + dh) as i32);
-        let clip_full = Rect::new(0, 0, cw as i32, ch as i32);
-        let scaler = Blitter::new(gpu, (cw, ch), (ow, oh), fps, (Space::Bt709, Space::Bt709))?;
-
-        // A black frame (NV12: luma 16, chroma 128) to start each one from.
-        let black = render_texture(gpu, (ow, oh), DXGI_FORMAT_NV12)?;
-        let pixels = ow as usize * oh as usize;
-        let mut nv12 = vec![16u8; pixels];
-        nv12.resize(pixels + pixels / 2, 128);
-        gpu.context()
-            .UpdateSubresource(&black, 0, None, nv12.as_ptr().cast(), ow, 0);
-
-        // Its sound; silent when it has none (or when the result has none).
-        let mut pending = match p.audio_out {
-            Some(stream) => {
-                let mut pcm =
-                    decode_music(clip, 0.0, f64::INFINITY, rate, channels).unwrap_or_default();
-                let wanted = (duration as f64 / 1e7 * f64::from(rate)) as usize * channels;
-                pcm.resize(pcm.len().max(wanted), 0);
-                if let Some((music, bed)) = bed {
-                    mix_bed(&mut pcm, channels, rate, offset as f64 / 1e7, music, bed);
-                }
-                Some(PendingPcm::new(pcm, stream, offset))
-            }
-            None => None,
-        };
-
-        let (mut first, mut last_written, mut end, mut written) = (None, i64::MIN, offset, 0u64);
-        loop {
-            let (mut flags, mut time) = (0u32, 0i64);
-            let mut sample: Option<IMFSample> = None;
-            reader.ReadSample(
-                VIDEO,
-                0,
-                None,
-                Some(&mut flags),
-                Some(&mut time),
-                Some(&mut sample),
-            )?;
-            if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 | MF_SOURCE_READERF_ERROR.0) as u32 != 0 {
-                break;
-            }
-            let Some(sample) = sample else {
-                continue;
-            };
-            let first = *first.get_or_insert(time);
-            let at = offset + (time - first).max(0);
-            let length = sample.GetSampleDuration().unwrap_or(frame_ticks);
-            end = end.max(at + length);
-            if last_written == i64::MIN || at - last_written >= min_gap {
-                let texture = frames.render(&sample, time as f64 / 1e7)?;
-                drop(sample);
-                let output = render_texture(gpu, (ow, oh), DXGI_FORMAT_NV12)?;
-                gpu.context().CopyResource(&output, &black);
-                scaler.blit(
-                    &scaler.input(&texture, 0)?,
-                    clip_full,
-                    &scaler.output(&output)?,
-                    dest,
-                )?;
-                if let Some(pending) = &mut pending {
-                    pending.write_until(&p.writer, at + 5_000_000, channels, rate)?;
-                }
-                write_texture(&p.writer, p.video_out, &output, at, length)?;
-                last_written = at;
-                written += 1;
-            }
-            // Stays below 100 % until everything is written.
-            if !progress(0.99) {
-                return Err(RecordError::Cancelled);
-            }
-        }
-        if let Some(pending) = &mut pending {
-            pending.write_until(&p.writer, i64::MAX, channels, rate)?;
-        }
-        Ok((end, written))
-    }
-}
-
-/// Decodes a music file from `from` seconds on, for at most `seconds`, as
-/// 16-bit PCM with `channels` channels at `rate`.
+/// Mixes into `pending` (the sound of the segment `start..end` in 100 ns
+/// units, played at `speed`) the part of the sound of `layer` that falls
+/// in it.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-fn decode_music(
-    path: &Path,
-    from: f64,
-    seconds: f64,
-    rate: u32,
-    channels: usize,
-) -> Result<Vec<i16>> {
-    // SAFETY: Media Foundation calls with valid arguments.
-    unsafe {
-        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)?;
-        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
-        reader.SetStreamSelection(AUDIO, true)?;
-        let pcm = MFCreateMediaType()?;
-        pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-        pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
-        pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
-        reader.SetCurrentMediaType(AUDIO, None, &pcm)?;
-        let current = reader.GetCurrentMediaType(AUDIO)?;
-        let source_rate = current.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?;
-        let source_channels = current.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)? as usize;
-        let start = (from.max(0.0) * 1e7) as i64;
-        if start > 0 {
-            reader.SetCurrentPosition(&GUID::zeroed(), &PROPVARIANT::from(start))?;
-        }
-        let wanted = if seconds.is_finite() {
-            (seconds * f64::from(source_rate)) as usize * source_channels
-        } else {
-            usize::MAX
-        };
-        let mut out: Vec<i16> = Vec::new();
-        while out.len() < wanted {
-            let (mut flags, mut time) = (0u32, 0i64);
-            let mut sample: Option<IMFSample> = None;
-            reader.ReadSample(
-                AUDIO,
-                0,
-                None,
-                Some(&mut flags),
-                Some(&mut time),
-                Some(&mut sample),
-            )?;
-            if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 | MF_SOURCE_READERF_ERROR.0) as u32 != 0 {
-                break;
-            }
-            let Some(sample) = sample else {
-                continue;
-            };
-            let samples = read_pcm(&sample)?;
-            // Seeking lands before `start`: skip what precedes it.
-            let skip = if time < start {
-                ((start - time) as f64 / 1e7 * f64::from(source_rate)) as usize * source_channels
-            } else {
-                0
-            };
-            out.extend_from_slice(samples.get(skip..).unwrap_or_default());
-        }
-        out.truncate(wanted.min(out.len()));
-        Ok(remix(&out, source_channels, source_rate, channels, rate))
+fn mix_layer(
+    pending: &mut PendingPcm,
+    pcm: &[i16],
+    layer: &crate::compose::VideoLayer,
+    (start, end, speed): (i64, i64, f64),
+    (rate, channels): (u32, usize),
+) {
+    let (seg_a, seg_b) = (start as f64 / 1e7, end as f64 / 1e7);
+    let (a, b) = (seg_a.max(layer.start), seg_b.min(layer.end));
+    if b <= a {
+        return;
     }
-}
-
-/// Sound prepared for a segment, written in step with the video.
-struct PendingPcm {
-    pcm: Vec<i16>,
-    stream: u32,
-    /// Output time of the first sample (100 ns units).
-    start: i64,
-    /// Samples (per channel) already written.
-    written: usize,
-}
-
-impl PendingPcm {
-    fn new(pcm: Vec<i16>, stream: u32, start: i64) -> Self {
-        Self {
-            pcm,
-            stream,
-            start,
-            written: 0,
-        }
-    }
-
-    /// Writes the samples that start before output time `until`, in
-    /// chunks the encoder takes comfortably.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    fn write_until(
-        &mut self,
-        writer: &IMFSinkWriter,
-        until: i64,
-        channels: usize,
-        rate: u32,
-    ) -> Result<()> {
-        const CHUNK: usize = 4096;
-        let channels = channels.max(1);
-        let total = self.pcm.len() / channels;
-        let time_of = |frame: usize| self.start + frame as i64 * 10_000_000 / i64::from(rate);
-        while self.written < total && time_of(self.written) < until {
-            let frames = CHUNK.min(total - self.written);
-            let chunk = &self.pcm[self.written * channels..(self.written + frames) * channels];
-            let bytes = std::mem::size_of_val(chunk);
-            // SAFETY: the buffer is locked while `bytes` bytes are copied in.
-            unsafe {
-                let buffer = MFCreateMemoryBuffer(bytes as u32)?;
-                let mut data = std::ptr::null_mut();
-                buffer.Lock(&mut data, None, None)?;
-                std::ptr::copy_nonoverlapping(chunk.as_ptr().cast::<u8>(), data, bytes);
-                buffer.Unlock()?;
-                buffer.SetCurrentLength(bytes as u32)?;
-                let sample = MFCreateSample()?;
-                sample.AddBuffer(&buffer)?;
-                sample.SetSampleTime(time_of(self.written))?;
-                sample.SetSampleDuration(frames as i64 * 10_000_000 / i64::from(rate))?;
-                writer.WriteSample(self.stream, &sample)?;
-            }
-            self.written += frames;
-        }
-        Ok(())
-    }
+    // The part of the layer's sound that plays here, in the segment's speed.
+    let from = ((a - layer.start) * f64::from(rate)) as usize * channels;
+    let to = (((b - layer.start) * f64::from(rate)) as usize * channels).min(pcm.len());
+    let Some(chunk) = pcm.get(from..to).filter(|c| !c.is_empty()) else {
+        return;
+    };
+    let chunk = stretch(chunk, channels, rate, speed);
+    mix_chunk(
+        &mut pending.pcm,
+        channels,
+        rate,
+        &chunk,
+        (a - seg_a) / speed,
+        layer.volume.clamp(0.0, 2.0),
+    );
 }
 
 /// Whether reader stream `index` is the sound track.

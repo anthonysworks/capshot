@@ -6,6 +6,8 @@
 //! system memory anyway); MP4 exports draw the same things on the GPU, see
 //! [`crate::paint`].
 
+use std::path::PathBuf;
+
 use capshot_core::{BgraImage, Point, Rect};
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +135,33 @@ impl PixelArea {
     }
 }
 
+/// A video drawn over the edited one between two times (seconds of the
+/// source), in an area of the frame (pixels of the source): picture in
+/// picture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoLayer {
+    pub path: PathBuf,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub start: f64,
+    pub end: f64,
+    /// Where in its file it plays from, in seconds.
+    #[serde(default)]
+    pub from: f64,
+    /// 0 (invisible) to 1.
+    #[serde(default = "full")]
+    pub opacity: f32,
+    /// Level of its sound; 0 mutes it.
+    #[serde(default = "full")]
+    pub volume: f32,
+}
+
+const fn full() -> f32 {
+    1.0
+}
+
 /// Everything drawn on the frames. Empty means "leave frames untouched".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Composition {
@@ -151,6 +180,9 @@ pub struct Composition {
     /// Camera zooms.
     #[serde(default)]
     pub zoom: Vec<ZoomRegion>,
+    /// Videos drawn over this one (MP4 exports only).
+    #[serde(default)]
+    pub layers: Vec<VideoLayer>,
 }
 
 impl Composition {
@@ -162,6 +194,7 @@ impl Composition {
             && self.canvas.is_none()
             && self.pixelate.is_empty()
             && self.zoom.is_empty()
+            && self.layers.is_empty()
     }
 
     /// Whether the cursor track (and the video without cursor) is needed.

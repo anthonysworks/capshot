@@ -292,6 +292,25 @@ pub fn mix_bed(
     }
 }
 
+/// Mixes `chunk` (interleaved, same rate and channels as `pcm`) into `pcm`
+/// starting `at` seconds from its beginning, scaled by `volume`.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+pub fn mix_chunk(pcm: &mut [i16], channels: usize, rate: u32, chunk: &[i16], at: f64, volume: f32) {
+    let channels = channels.max(1);
+    let first = (at.max(0.0) * f64::from(rate)) as usize * channels;
+    for (i, s) in chunk.iter().enumerate() {
+        let Some(out) = pcm.get_mut(first + i) else {
+            break;
+        };
+        let mixed = f32::from(*out) + f32::from(*s) * volume;
+        *out = mixed.round().clamp(-32768.0, 32767.0) as i16;
+    }
+}
+
 /// Mixes `sound` into interleaved PCM at each time of `times` (seconds).
 #[allow(
     clippy::cast_possible_truncation,

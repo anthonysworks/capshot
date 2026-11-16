@@ -13,14 +13,18 @@
 //! the screen changed, and stream it to [`capshot_gif::GifWriter`].
 
 mod audio;
+mod clips;
 mod clock;
 pub mod compose;
 mod convert;
 pub mod cursor;
 mod decode;
 mod encoder;
+mod layers;
+mod media;
 mod pacer;
 mod paint;
+mod sound;
 mod source;
 pub mod stretch;
 mod trim;

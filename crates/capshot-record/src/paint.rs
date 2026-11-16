@@ -83,6 +83,26 @@ struct Overlay {
     end: f64,
 }
 
+/// A video playing over the main one: its decoded frames land in `texture`
+/// (see [`crate::layers`]).
+pub struct LayerSurface {
+    pub texture: ID3D11Texture2D,
+    /// Where it is drawn, in source pixels.
+    pub rect: Rect,
+    pub start: f64,
+    pub end: f64,
+    pub opacity: f32,
+}
+
+struct Layer {
+    bitmap: ID2D1Bitmap1,
+    to: D2D_RECT_F,
+    start: f64,
+    end: f64,
+    opacity: f32,
+    _texture: ID3D11Texture2D,
+}
+
 /// A pixelated area, see [`Painter::new`].
 struct Pixelated {
     blit: Blitter,
@@ -101,6 +121,7 @@ struct Pixelated {
 
 pub struct Painter {
     pixels: Vec<Pixelated>,
+    layers: Vec<Layer>,
     dc: ID2D1DeviceContext,
     brush: ID2D1SolidColorBrush,
     overlays: Vec<Overlay>,
@@ -127,7 +148,7 @@ pub struct Painter {
 impl Painter {
     /// Draws into `target` (a BGRA render texture), where the `crop` area of
     /// the source is shown at `area`.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn new(
         gpu: &Gpu,
         target: &ID3D11Texture2D,
@@ -136,6 +157,7 @@ impl Painter {
         crop: Rect,
         area: Rect,
         corners: &[(BgraImage, Point)],
+        layers: &[LayerSurface],
     ) -> Result<Self> {
         let track = composition.drawn_track(track);
         // SAFETY: COM calls on live interfaces with valid descriptions.
@@ -270,12 +292,29 @@ impl Painter {
                     _texture: texture,
                 });
             }
+            let layers = layers
+                .iter()
+                .map(|l| {
+                    Ok(Layer {
+                        bitmap: dc.CreateBitmapFromDxgiSurface(
+                            &l.texture.cast::<IDXGISurface>()?,
+                            Some(&props(D2D1_BITMAP_OPTIONS_NONE, true)),
+                        )?,
+                        to: rect_f(l.rect),
+                        start: l.start,
+                        end: l.end,
+                        opacity: l.opacity,
+                        _texture: l.texture.clone(),
+                    })
+                })
+                .collect::<Result<_>>()?;
             let corners = corners
                 .iter()
                 .map(|(image, at)| Ok((sprite(image)?, at.x as f32, at.y as f32)))
                 .collect::<Result<_>>()?;
             Ok(Self {
                 pixels,
+                layers,
                 dc,
                 brush,
                 overlays,
@@ -354,6 +393,19 @@ impl Painter {
                     Some(&p.to),
                     1.0,
                     D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                    None,
+                    None,
+                );
+            }
+        }
+        for l in self.layers.iter().filter(|l| t >= l.start && t < l.end) {
+            // SAFETY: inside BeginDraw/EndDraw with live resources.
+            unsafe {
+                self.dc.DrawBitmap(
+                    &l.bitmap,
+                    Some(&l.to),
+                    l.opacity,
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                     None,
                     None,
                 );

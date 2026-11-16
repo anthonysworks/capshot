@@ -295,6 +295,16 @@ pub fn editor_export(
     let path = editable(&app, &path)?;
     // Music and added videos must be files brought into the editor.
     let mut task = task;
+    // Videos drawn over the edited one are files brought into the editor too.
+    let edit = match &mut task {
+        Task::Mp4 { edit, .. } => Some(edit),
+        Task::Gif { edit, .. } => edit.as_mut(),
+    };
+    if let Some(edit) = edit {
+        for layer in &mut edit.composition.layers {
+            layer.path = editable(&app, &layer.path.to_string_lossy())?;
+        }
+    }
     if let Task::Mp4 { music, clips, .. } = &mut task {
         if let Some(music) = music {
             music.path = editable(&app, &music.path.to_string_lossy())?;
