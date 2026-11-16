@@ -6,8 +6,9 @@
 //! covers the screen. A low-level hook sees the key before Windows does and
 //! swallows it, so Capshot gets Print Screen whatever the Windows option says.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::Modifiers;
@@ -30,6 +31,15 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 static ACTIVE: OnceLock<bool> = OnceLock::new();
 /// The key went down and was swallowed; its release is swallowed too.
 static DOWN: AtomicBool = AtomicBool::new(false);
+/// When the last Print Screen event came, in milliseconds since `EPOCH`.
+static LAST_EVENT: AtomicU64 = AtomicU64::new(0);
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+/// A key held this long without a repeat is not held: its release was lost.
+const STALE_DOWN: Duration = Duration::from_millis(1500);
+
+fn now_ms() -> u64 {
+    u64::try_from(EPOCH.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Sets what Print Screen triggers. Returns `false` when the hook cannot run,
 /// in which case the caller registers the shortcuts the usual way.
@@ -104,32 +114,50 @@ fn trigger(action: Action) {
     }
 }
 
-/// Whether Capshot takes this event (and Windows must not see it).
+/// The key went down. Returns whether Capshot takes it (and Windows must
+/// not see it).
+fn on_down() -> bool {
+    let Some(action) = action_now() else {
+        tracing::info!(mods = ?modifiers(), "Print Screen passed on: no shortcut for these modifiers");
+        return false;
+    };
+    // Holding the key repeats it: act once. A "down" that nothing has
+    // repeated for a while is a lost release, not a hold.
+    let since = now_ms().saturating_sub(LAST_EVENT.load(Ordering::SeqCst));
+    let stale = since > u64::try_from(STALE_DOWN.as_millis()).unwrap_or(u64::MAX);
+    let was_down = DOWN.swap(true, Ordering::SeqCst);
+    if !was_down || stale {
+        if was_down {
+            tracing::warn!(
+                since,
+                "Print Screen was still counted as held: pressed again"
+            );
+        }
+        trigger(action);
+    } else {
+        tracing::info!("Print Screen repeat ignored");
+    }
+    true
+}
+
+/// The key came up.
+fn on_up() -> bool {
+    if DOWN.swap(false, Ordering::SeqCst) {
+        tracing::info!("Print Screen released");
+        return true;
+    }
+    // Some keyboards only report the release of this key.
+    let Some(action) = action_now() else {
+        return false;
+    };
+    trigger(action);
+    true
+}
+
 fn handle(message: u32) -> bool {
     match message {
-        WM_KEYDOWN | WM_SYSKEYDOWN => match action_now() {
-            Some(action) => {
-                // Holding the key repeats it: act once.
-                if !DOWN.swap(true, Ordering::SeqCst) {
-                    trigger(action);
-                }
-                true
-            }
-            None => false,
-        },
-        WM_KEYUP | WM_SYSKEYUP => {
-            if DOWN.swap(false, Ordering::SeqCst) {
-                return true;
-            }
-            // Some keyboards only report the release of this key.
-            match action_now() {
-                Some(action) => {
-                    trigger(action);
-                    true
-                }
-                None => false,
-            }
-        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => on_down(),
+        WM_KEYUP | WM_SYSKEYUP => on_up(),
         _ => false,
     }
 }
@@ -141,11 +169,13 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
         let injected = event.flags.0 & LLKHF_INJECTED.0 != 0;
         // `VK_SNAPSHOT` is 0x2C; our own and other programs' synthetic
         // key presses are left alone.
-        if event.vkCode == u32::from(VK_SNAPSHOT.0)
-            && !injected
-            && handle(u32::try_from(wparam.0).unwrap_or_default())
-        {
-            return LRESULT(1);
+        if event.vkCode == u32::from(VK_SNAPSHOT.0) && !injected {
+            let message = u32::try_from(wparam.0).unwrap_or_default();
+            let taken = handle(message);
+            LAST_EVENT.store(now_ms(), Ordering::SeqCst);
+            if taken {
+                return LRESULT(1);
+            }
         }
     }
     // SAFETY: passes the event on unchanged.

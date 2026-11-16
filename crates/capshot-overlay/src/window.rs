@@ -645,7 +645,8 @@ impl State {
             }
             // Right click cancels. The window is never destroyed by the user:
             // it is reused for every capture.
-            WM_CLOSE | WM_RBUTTONUP => self.finish(None),
+            WM_CLOSE => self.cancel("the window was asked to close"),
+            WM_RBUTTONUP => self.cancel("right click"),
             // The window deliberately spans monitors with different DPIs.
             WM_DPICHANGED => {}
             WM_DISPLAYCHANGE => {
@@ -692,8 +693,7 @@ impl State {
                         tracing::info!("capture overlay lost the focus as it opened: asking again");
                         take_focus(self.hwnd);
                     } else {
-                        tracing::info!("capture overlay closed: it lost the focus");
-                        self.finish(None);
+                        self.cancel("it lost the focus");
                     }
                 }
                 return None;
@@ -818,6 +818,9 @@ impl State {
         let t_rendered = t0.elapsed();
         cloak(hwnd, false);
         take_focus(hwnd);
+        // SAFETY: plain query.
+        let foreground = unsafe { GetForegroundWindow() } == hwnd;
+        tracing::info!(foreground, "capture overlay focus");
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
         tracing::debug!(
             capture_ms = ms(t_capture),
@@ -933,7 +936,7 @@ impl State {
                 Some(Button::Countdown) => session.step_countdown(!shift_down()),
                 Some(Button::SystemAudio) => session.system_audio = !session.system_audio,
                 Some(Button::Microphone) => session.microphone = !session.microphone,
-                Some(Button::Close) => return self.finish(None),
+                Some(Button::Close) => return self.cancel("close button"),
                 None => {}
             }
             self.invalidate();
@@ -979,7 +982,7 @@ impl State {
             return;
         };
         if action == Action::Close {
-            self.finish(None);
+            self.cancel("closed from the action bar");
         } else {
             self.finish_with(Some(pending.outcome), Some(action));
         }
@@ -1015,7 +1018,7 @@ impl State {
                     let _ = unsafe { ReleaseCapture() };
                     self.invalidate();
                 } else {
-                    self.finish(None);
+                    self.cancel("Esc");
                 }
             }
             k if k == VK_RETURN.0 => {
@@ -1147,6 +1150,19 @@ impl State {
 
     fn finish(&mut self, outcome: Option<Outcome>) {
         self.finish_with(outcome, None);
+    }
+
+    /// Ends the capture without a result, and says why (a capture that
+    /// closes by itself is hard to explain otherwise).
+    fn cancel(&mut self, why: &str) {
+        if let Some(session) = &self.session {
+            tracing::info!(
+                why,
+                open_ms = session.shown_at.elapsed().as_millis(),
+                "capture overlay closed"
+            );
+        }
+        self.finish(None);
     }
 
     /// Ends the capture; `action` was chosen on the bar under the selection.
