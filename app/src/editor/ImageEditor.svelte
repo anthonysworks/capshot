@@ -13,6 +13,7 @@
   } from "../lib/api";
   import CustomColor from "./CustomColor.svelte";
   import { VIVID } from "./colors";
+  import { IMAGE_FILE } from "./imports";
   import Logo from "../lib/Logo.svelte";
   import Icon from "./Icon.svelte";
   import Kbd from "./Kbd.svelte";
@@ -941,8 +942,6 @@
   }
 
   // ── Pictures ───────────────────────────────────────────────────────────
-
-  const IMAGE_FILE = /.(png|jpe?g|webp|bmp|gif)$/i;
 
   /** Puts a picture on the image, centred in what is shown, and selects it. */
   async function placePicture(bitmap: ImageBitmap) {

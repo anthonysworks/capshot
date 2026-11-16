@@ -14,7 +14,8 @@ export type ShapeKind =
   | "pixelate"
   | "blur"
   | "spotlight"
-  | "image";
+  | "image"
+  | "video";
 
 /** Rectangles and ellipses: outline only, tinted, or solid (redaction).
  * Text: no background, or a background box. */
@@ -46,8 +47,13 @@ export interface Shape {
   bend?: number;
   /** Picture (kind `image`): its key in `pictures`. */
   picture?: number;
-  /** 0–1; pictures only. */
+  /** 0–1; pictures and videos. */
   opacity?: number;
+  /** Videos: the file, where in it the video plays from (seconds) and the
+   * level of its sound. */
+  video?: string;
+  from?: number;
+  volume?: number;
   /** Text style. */
   font?: TextFont;
   bold?: boolean;
@@ -78,14 +84,21 @@ export interface Rect {
 }
 
 /** Shapes defined by two corners, which can be resized from them. */
-export const BOXED: ShapeKind[] = ["rect", "ellipse", "pixelate", "blur", "spotlight", "image"];
+export const BOXED: ShapeKind[] = ["rect", "ellipse", "pixelate", "blur", "spotlight", "image", "video"];
 
 /** Pictures brought into an editor, by the id a picture shape refers to. */
 export const pictures = new Map<number, ImageBitmap>();
+/** The players of video layers, by the same ids. */
+export const players = new Map<number, HTMLVideoElement>();
 let nextPicture = 1;
 export function addPicture(bitmap: ImageBitmap): number {
   const id = nextPicture++;
   pictures.set(id, bitmap);
+  return id;
+}
+export function addPlayer(player: HTMLVideoElement): number {
+  const id = nextPicture++;
+  players.set(id, player);
   return id;
 }
 /** Drawn freehand, as a list of points. */
@@ -425,6 +438,19 @@ export function renderAnnotations(ctx: CanvasRenderingContext2D, shapes: Shape[]
           ctx.globalAlpha = s.opacity ?? 1;
           ctx.imageSmoothingQuality = "high";
           ctx.drawImage(bitmap, r.x, r.y, r.w, r.h);
+        }
+        break;
+      }
+      case "video": {
+        const player = s.picture === undefined ? undefined : players.get(s.picture);
+        if (player && player.readyState >= 2) {
+          ctx.globalAlpha = s.opacity ?? 1;
+          ctx.imageSmoothingQuality = "high";
+          ctx.drawImage(player, r.x, r.y, r.w, r.h);
+        } else {
+          // Not loaded yet: a dark box in its place.
+          ctx.fillStyle = "rgba(0,0,0,0.5)";
+          ctx.fillRect(r.x, r.y, r.w, r.h);
         }
         break;
       }

@@ -32,9 +32,12 @@
   import { DEVICE_FRAMES, type DeviceFrame, frameLayout, hasLook, hasTitle, renderFrame } from "./frames";
   import { CAMERA_STIFFNESS, ZOOM_LENGTH, ZOOM_SCALES, autoZooms, zoomView } from "./zoom";
   import CustomColor from "./CustomColor.svelte";
+  import ImportPanel from "./ImportPanel.svelte";
   import { VIVID } from "./colors";
+  import { type Clip, type Corner, type Music, cornerOrigin, fileName, mediaKind } from "./imports";
   import {
-    addPicture,
+    addPicture as registerPicture,
+    addPlayer,
     BACKGROUNDS,
     CUSTOM_WALL,
     wallStops,
@@ -52,6 +55,7 @@
     TEXT_FONTS,
     textFont,
     type TextFont,
+    players,
     renderAnnotations,
   } from "./shapes";
   import {
@@ -124,8 +128,9 @@
     { value: "solid", label: "On a solid box" },
   ];
   /** Sections of the side panel, from the rail on the left. */
-  const PANELS: { id: "background" | "cursor" | "zoom" | "format" | "export"; icon: IconName; label: string }[] = [
+  const PANELS: { id: "background" | "import" | "cursor" | "zoom" | "format" | "export"; icon: IconName; label: string }[] = [
     { id: "background", icon: "device", label: "Background and frame" },
+    { id: "import", icon: "import", label: "Import" },
     { id: "cursor", icon: "cursor", label: "Cursor and clicks" },
     { id: "zoom", icon: "zoom", label: "Camera zoom" },
     { id: "format", icon: "crop", label: "Format and crop" },
@@ -188,29 +193,8 @@
   let volume = $state(1);
   let fadeIn = $state(0);
   let fadeOut = $state(0);
-  /** Music added to the video. Times are in seconds of the result, except
-   * `from` (where in the file it is played from). */
-  interface Music {
-    path: string;
-    name: string;
-    /** Length of the file. */
-    length: number;
-    start: number;
-    from: number;
-    volume: number;
-    fadeIn: number;
-    fadeOut: number;
-  }
   let music = $state<Music | null>(null);
   let musicPlayer: HTMLAudioElement | null = null;
-  /** Videos added after this one: scaled to fit and written one after the other. */
-  interface Clip {
-    id: number;
-    path: string;
-    name: string;
-    /** Length in seconds. */
-    length: number;
-  }
   let clips = $state<Clip[]>([]);
   const clipsSeconds = $derived(clips.reduce((sum, c) => sum + c.length, 0));
   /** What is saved, and how. */
@@ -295,9 +279,9 @@
   let draft = $state<Shape | null>(null);
   let zoom = $state(1);
   let viewWidth = $state(800);
-  let menu = $state<"speed" | "sound" | "music" | "clips" | "style" | null>(null);
+  let menu = $state<"speed" | "sound" | "style" | null>(null);
   /** Section shown in the side panel. */
-  let panel = $state<"background" | "cursor" | "zoom" | "format" | "export">("background");
+  let panel = $state<"background" | "import" | "cursor" | "zoom" | "format" | "export">("background");
   /** A new format is being framed: Cancel goes back to the one before. */
   let formatPending = false;
   /** Playback errors in a row (the player reloads on the first ones). */
@@ -603,6 +587,35 @@
 
   /** The picture as it will be exported: crop, ratio, background, then
    * overlays, cursor and click marks drawn in source pixels. */
+  /** Keeps the players of the video layers where the playhead is (called
+   * for every frame drawn). */
+  function syncLayers(t: number) {
+    const speed = partAt(kept, t)?.speed ?? 1;
+    for (const o of overlays) {
+      if (o.shape.kind !== "video" || o.shape.picture === undefined) continue;
+      const player = players.get(o.shape.picture);
+      if (!player) continue;
+      if (t < o.start || t >= o.end) {
+        if (!player.paused) player.pause();
+        continue;
+      }
+      const wanted = (o.shape.from ?? 0) + (t - o.start);
+      // The preview cannot go above 100 %; silent while not playing.
+      player.volume = Math.max(0, Math.min(1, o.shape.volume ?? 1));
+      player.muted = !playing;
+      player.playbackRate = speed;
+      if (playing) {
+        if (player.paused || Math.abs(player.currentTime - wanted) > 0.3) {
+          player.currentTime = wanted;
+          void player.play().catch(() => {});
+        }
+      } else {
+        if (!player.paused) player.pause();
+        if (Math.abs(player.currentTime - wanted) > 0.03) player.currentTime = wanted;
+      }
+    }
+  }
+
   function paint() {
     if (!stage || !video) return;
     const dpr = window.devicePixelRatio || 1;
@@ -659,6 +672,7 @@
     /** One CSS pixel, in source pixels. */
     const px = 1 / (k * s);
 
+    syncLayers(t);
     const shown = overlays.filter((o) => t >= o.start && t < o.end && o.id !== editing?.id).map((o) => o.shape);
     const all = draft ? [...shown, draft] : shown;
     // Pixelated areas hide the video, under everything else.
@@ -888,7 +902,7 @@
     musicPlayer = player;
     music = {
       path: picked,
-      name: picked.split(/[\\/]/).pop() ?? picked,
+      name: fileName(picked),
       length: Number.isFinite(player.duration) ? player.duration : 0,
       start: 0,
       from: 0,
@@ -896,14 +910,12 @@
       fadeIn: 0,
       fadeOut: 0,
     };
-    menu = "music";
   }
 
   function removeMusic() {
     musicPlayer?.pause();
     musicPlayer = null;
     music = null;
-    menu = null;
   }
 
   /** What an export mixes in. */
@@ -1373,9 +1385,9 @@
     };
   }
 
-  function addOverlay(shape: Shape) {
+  function addOverlay(shape: Shape, length = OVERLAY_LENGTH) {
     const start = Math.min(time, Math.max(0, duration - 0.1));
-    const overlay = { id: shape.id, shape, start, end: Math.min(duration, start + OVERLAY_LENGTH) };
+    const overlay = { id: shape.id, shape, start, end: Math.min(duration, start + length) };
     commit(() => overlays.push(overlay));
     // Selected as if it had been clicked.
     selectedOverlay = overlay.id;
@@ -1626,8 +1638,6 @@
 
   // ── Pictures ───────────────────────────────────────────────────────────
 
-  const IMAGE_FILE = /.(png|jpe?g|webp|bmp|gif)$/i;
-
   /** Puts a picture on the video from the playhead, centred in what is shown. */
   async function placePicture(blob: Blob) {
     const bitmap = await createImageBitmap(blob);
@@ -1639,26 +1649,75 @@
     const x = area.x + (area.w - w) / 2;
     const y = area.y + (area.h - h) / 2;
     addOverlay({
-      ...make("image", { x, y }, { size: 0, picture: addPicture(bitmap) }),
+      ...make("image", { x, y }, { size: 0, picture: registerPicture(bitmap) }),
       x2: x + w,
       y2: y + h,
     });
   }
 
-  const AUDIO_FILE = /\.(mp3|wav|m4a|aac|flac|ogg|oga|opus|wma)$/i;
-  const VIDEO_FILE = /\.(mp4|mov|m4v|mkv|webm|avi|wmv)$/i;
-
   /** Brings a file into the video: a picture, music or another video. */
   function importMedia(file: string) {
-    if (IMAGE_FILE.test(file)) {
-      editorRead(file)
-        .then((bytes) => placePicture(new Blob([bytes])))
-        .catch((e) => notify(`Cannot use this picture: ${e}`));
-    } else if (AUDIO_FILE.test(file)) {
-      void useMusic(file);
-    } else if (VIDEO_FILE.test(file)) {
-      void useClip(file);
+    switch (mediaKind(file)) {
+      case "image":
+        editorRead(file)
+          .then((bytes) => placePicture(new Blob([bytes])))
+          .catch((e) => notify(`Cannot use this picture: ${e}`));
+        break;
+      case "audio":
+        void useMusic(file);
+        break;
+      // A dropped video goes over this one, like a layer in other editors.
+      case "video":
+        void useLayer(file);
+        break;
+      default:
     }
+  }
+
+  /** Asks for a video and plays it over this one. */
+  async function addLayer() {
+    const picked = await editorPickMedia("video").catch((e) => {
+      notify(String(e));
+      return null;
+    });
+    if (picked) await useLayer(picked);
+  }
+
+  /** A video file ready to play, with its size and length. */
+  async function loadVideo(path: string): Promise<HTMLVideoElement> {
+    const player = document.createElement("video");
+    player.preload = "auto";
+    player.playsInline = true;
+    player.src = convertFileSrc(path);
+    await new Promise<void>((resolve, reject) => {
+      player.addEventListener("loadeddata", () => resolve(), { once: true });
+      player.addEventListener("error", () => reject(new Error("this video cannot be read")), { once: true });
+    });
+    return player;
+  }
+
+  /** Plays `path` over the video from the playhead, small, in a corner. */
+  async function useLayer(path: string) {
+    let player: HTMLVideoElement;
+    try {
+      player = await loadVideo(path);
+    } catch (e) {
+      notify(String(e instanceof Error ? e.message : e));
+      return;
+    }
+    const length = Number.isFinite(player.duration) ? player.duration : OVERLAY_LENGTH;
+    const area = crop ?? full;
+    // A third of the width, in the bottom right corner.
+    const w = Math.max(16, Math.round(area.w / 3));
+    const h = Math.max(16, Math.round((w * player.videoHeight) / Math.max(1, player.videoWidth)));
+    const at = cornerOrigin("bottom-right", area, { w, h }, 24 * unit);
+    const shape: Shape = {
+      ...make("video", { x: area.x + at.x, y: area.y + at.y }, { size: 0, picture: addPlayer(player), video: path, from: 0, volume: 1 }),
+      x2: area.x + at.x + w,
+      y2: area.y + at.y + h,
+    };
+    addOverlay(shape, length);
+    panel = "import";
   }
 
   /** Asks for a video and adds it after this one. */
@@ -1685,8 +1744,7 @@
     }
     const length = Number.isFinite(probe.duration) ? probe.duration : 0;
     probe.removeAttribute("src");
-    clips.push({ id: nextId++, path: picked, name: picked.split(/[\\/]/).pop() ?? picked, length });
-    menu = "clips";
+    clips.push({ id: nextId++, path: picked, name: fileName(picked), length });
   }
 
   function moveClip(i: number, by: number) {
@@ -1711,6 +1769,55 @@
     if (!file) return;
     e.preventDefault();
     placePicture(file).catch((err) => notify(`Cannot use this picture: ${err}`));
+  }
+
+  // ── The Import panel ───────────────────────────────────────────────────
+
+  /** The pictures and videos on the video. */
+  const imported = $derived(overlays.filter((o) => o.shape.kind === "image" || o.shape.kind === "video"));
+
+  /** Saves an undo step before a slider changes something. */
+  function saveStep() {
+    past.push(snapshot());
+    future = [];
+  }
+
+  function selectImported(id: number) {
+    const o = overlays.find((x) => x.id === id);
+    if (!o) return;
+    selectedOverlay = id;
+    selectedSegment = null;
+    selectedZoom = null;
+    tool = "select";
+    seek(o.start);
+  }
+
+  function removeImported(id: number) {
+    commit(() => (overlays = overlays.filter((o) => o.id !== id)));
+    if (selectedOverlay === id) selectedOverlay = null;
+  }
+
+  /** Moves a picture or a video to a corner of the frame, keeping its size. */
+  function placeImported(id: number, corner: Corner) {
+    const o = overlays.find((x) => x.id === id);
+    if (!o) return;
+    const s = o.shape;
+    const box = { w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1) };
+    const area = crop ?? full;
+    const at = cornerOrigin(corner, area, box, 24 * unit);
+    commit(() => {
+      [s.x1, s.y1] = [area.x + at.x, area.y + at.y];
+      [s.x2, s.y2] = [s.x1 + box.w, s.y1 + box.h];
+    });
+  }
+
+  /** Starts or ends a picture or video at the playhead. */
+  function retime(id: number, edge: "start" | "end") {
+    const o = overlays.find((x) => x.id === id);
+    if (!o) return;
+    const at = Math.max(0, Math.min(duration, time));
+    if (edge === "start" && at < o.end - 0.1) commit(() => (o.start = at));
+    else if (edge === "end" && at > o.start + 0.1) commit(() => (o.end = at));
   }
 
   function duplicateOverlay() {
@@ -1754,7 +1861,7 @@
     const sctx = scratch.getContext("2d");
     if (!sctx) return out;
     for (const o of overlays) {
-      if (o.shape.kind === "pixelate") continue;
+      if (o.shape.kind === "pixelate" || o.shape.kind === "video") continue;
       const b = bounds(sctx, o.shape);
       const pad = 8 + o.shape.size * 3;
       const x = Math.floor(b.x - pad);
@@ -1771,6 +1878,28 @@
     return out;
   }
 
+  /** The videos played over this one, for the export. */
+  function videoLayers(): Composition["layers"] {
+    return overlays.flatMap((o) =>
+      o.shape.kind === "video" && o.shape.video
+        ? [
+            {
+              path: o.shape.video,
+              x: Math.round(Math.min(o.shape.x1, o.shape.x2)),
+              y: Math.round(Math.min(o.shape.y1, o.shape.y2)),
+              w: Math.round(Math.abs(o.shape.x2 - o.shape.x1)),
+              h: Math.round(Math.abs(o.shape.y2 - o.shape.y1)),
+              start: o.start,
+              end: o.end,
+              from: o.shape.from ?? 0,
+              opacity: o.shape.opacity ?? 1,
+              volume: o.shape.volume ?? 1,
+            },
+          ]
+        : [],
+    );
+  }
+
   function composition(): Composition {
     const customCursor =
       cursorEditable && (cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible || halo || smoothing > 0);
@@ -1782,6 +1911,7 @@
     const bg = wallStops(background, customWall);
     return {
       overlays: overlayImages(),
+      layers: videoLayers(),
       cursor: customCursor
         ? { visible: cursorVisible, scale: cursorScale, image, halo: halo ? [...hexRgb(haloColor), 90] : null, smooth: smoothing }
         : null,
@@ -2089,7 +2219,7 @@
   const percent = (t: number) => (duration ? (t / duration) * 100 : 0);
   const size = (bytes: number) =>
     bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
-  const name = (p: string) => p.split(/[\\/]/).pop() ?? p;
+  const name = fileName;
   /** File name without its extension. */
   const baseName = (p: string) => name(p).replace(/\.[^.]+$/, "");
   const stageCursor = $derived(
@@ -2205,7 +2335,7 @@
           onclick={() => (panel = p.id)}
         >
           <Icon name={p.icon} />
-          {#if (p.id === "background" && framed) || (p.id === "format" && (ratio || crop)) || (p.id === "cursor" && (clickRing || clickSound || halo || smoothing > 0 || cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible)) || (p.id === "zoom" && zooms.length > 0)}
+          {#if (p.id === "background" && framed) || (p.id === "import" && (music || clips.length || imported.length)) || (p.id === "format" && (ratio || crop)) || (p.id === "cursor" && (clickRing || clickSound || halo || smoothing > 0 || cursorStyle !== "original" || cursorScale !== 1 || !cursorVisible)) || (p.id === "zoom" && zooms.length > 0)}
             <span class="badge-dot"></span>
           {/if}
         </button>
@@ -2320,6 +2450,30 @@
         {#if !framed}
           <p class="note">Pick a background to set the video on it: padding, shadow and corners apply there.</p>
         {/if}
+      {:else if panel === "import"}
+        <ImportPanel
+          items={imported}
+          selected={selectedOverlay}
+          bind:music
+          {clips}
+          fades={FADES}
+          {output}
+          playhead={outputTime(time)}
+          {format}
+          onAddPicture={addPictureFromFile}
+          onAddLayer={addLayer}
+          onAddClip={addClip}
+          onAddMusic={addMusic}
+          onSelect={selectImported}
+          onRemove={removeImported}
+          onCorner={placeImported}
+          onStartHere={(id) => retime(id, "start")}
+          onEndHere={(id) => retime(id, "end")}
+          onEdit={saveStep}
+          onRemoveMusic={removeMusic}
+          onMoveClip={moveClip}
+          onRemoveClip={(id) => (clips = clips.filter((c) => c.id !== id))}
+        />
       {:else if panel === "cursor"}
         <div class="sec-head"><h3>Cursor and clicks</h3></div>
         <div class="stack">
@@ -2723,7 +2877,7 @@
             {/each}
             <span class="ib-sep"></span>
           {/if}
-          {#if s.kind === "image"}
+          {#if s.kind === "image" || s.kind === "video"}
             <label class="ib-range" title="Opacity">
               <Icon name="picture" />
               <input
@@ -2740,6 +2894,21 @@
                 aria-label="Opacity"
               />
             </label>
+            {#if s.kind === "video"}
+              <label class="ib-range" title="Sound of this video">
+                <Icon name="volume" />
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  value={s.volume ?? 1}
+                  onpointerdown={saveStep}
+                  oninput={(e) => (s.volume = Number(e.currentTarget.value))}
+                  aria-label="Sound of this video"
+                />
+              </label>
+            {/if}
           {:else}
             {#each COLORS.slice(0, 6) as c (c)}
               <button type="button" class="ib-swatch" class:active={s.color === c} style="--c:{c}" title="Colour" aria-label="Colour {c}" onclick={() => setColor(c)}
@@ -2748,7 +2917,9 @@
             <CustomColor value={s.color} presets={COLORS.slice(0, 6)} onpick={setColor} size={20} />
           {/if}
           <span class="ib-sep"></span>
-          <button type="button" class="ib" title="Duplicate" aria-label="Duplicate" onclick={duplicateOverlay}><Icon name="duplicate" /></button>
+          {#if s.kind !== "video"}
+            <button type="button" class="ib" title="Duplicate" aria-label="Duplicate" onclick={duplicateOverlay}><Icon name="duplicate" /></button>
+          {/if}
           <button type="button" class="ib danger" title="Delete (Del)" aria-label="Delete" onclick={removeOverlay}><Icon name="trash" /></button>
         </div>
       {/if}
@@ -2865,86 +3036,6 @@
                     {/each}
                   </div>
                 </div>
-              </div>
-            {/if}
-          </div>
-          <div class="anchor">
-            <button
-              type="button"
-              class="pill-btn opens-menu"
-              class:on={!!music}
-              disabled={!duration}
-              aria-expanded={menu === "music"}
-              title={music ? "Music" : "Add music to the video"}
-              onclick={() => (music ? (menu = menu === "music" ? null : "music") : addMusic())}
-              ><Icon name="music" /> {music ? "Music" : "Add music"} {#if music}<Icon name="chevron" />{/if}</button
-            >
-            {#if menu === "music" && music}
-              {@const m = music}
-              <div class="popover sound align-right" role="dialog" aria-label="Music">
-                <div class="music-file" title={m.path}><Icon name="music" /> <span>{m.name}</span></div>
-                <label class="field"
-                  >Volume <input type="range" min="0" max="2" step="0.05" bind:value={m.volume} />
-                  <span class="value">{Math.round(m.volume * 100)}%</span></label
-                >
-                <div class="field">
-                  <span>Starts at {format(m.start)}</span>
-                  <div class="segmented tiny">
-                    <button type="button" onclick={() => (m.start = 0)}>At the start</button>
-                    <button type="button" onclick={() => (m.start = Math.max(0, Math.min(output, outputTime(time))))}>At the playhead</button>
-                  </div>
-                </div>
-                <label class="field"
-                  >Plays from <input type="range" min="0" max={Math.max(0, m.length - 1)} step="0.5" bind:value={m.from} />
-                  <span class="value">{format(m.from)}</span></label
-                >
-                <div class="field">
-                  <span>Fade in</span>
-                  <div class="segmented tiny" role="radiogroup" aria-label="Music fade in">
-                    {#each FADES as f (f)}
-                      <button type="button" role="radio" aria-checked={m.fadeIn === f} class:active={m.fadeIn === f} onclick={() => (m.fadeIn = f)}>{f ? `${f}s` : "Off"}</button>
-                    {/each}
-                  </div>
-                </div>
-                <div class="field">
-                  <span>Fade out</span>
-                  <div class="segmented tiny" role="radiogroup" aria-label="Music fade out">
-                    {#each FADES as f (f)}
-                      <button type="button" role="radio" aria-checked={m.fadeOut === f} class:active={m.fadeOut === f} onclick={() => (m.fadeOut = f)}>{f ? `${f}s` : "Off"}</button>
-                    {/each}
-                  </div>
-                </div>
-                <div class="field">
-                  <button type="button" class="link" onclick={addMusic}>Change the music…</button>
-                  <button type="button" class="link danger" onclick={removeMusic}>Remove</button>
-                </div>
-              </div>
-            {/if}
-          </div>
-          <div class="anchor">
-            <button
-              type="button"
-              class="pill-btn opens-menu"
-              class:on={clips.length > 0}
-              disabled={!duration}
-              aria-expanded={menu === "clips"}
-              title={clips.length ? "Videos added after this one" : "Add a video after this one"}
-              onclick={() => (clips.length ? (menu = menu === "clips" ? null : "clips") : addClip())}
-              ><Icon name="film" /> {clips.length ? `Videos (${clips.length})` : "Add video"} {#if clips.length}<Icon name="chevron" />{/if}</button
-            >
-            {#if menu === "clips" && clips.length}
-              <div class="popover sound align-right" role="dialog" aria-label="Added videos">
-                <p class="hint">Played after this video, in this order, scaled to fit. MP4 exports only.</p>
-                {#each clips as c, i (c.id)}
-                  <div class="clip-row">
-                    <span class="clip-name" title={c.path}>{c.name}</span>
-                    <span class="value">{format(c.length)}</span>
-                    <button type="button" class="ib" title="Move earlier" aria-label="Move earlier" disabled={i === 0} onclick={() => moveClip(i, -1)}>↑</button>
-                    <button type="button" class="ib" title="Move later" aria-label="Move later" disabled={i === clips.length - 1} onclick={() => moveClip(i, 1)}>↓</button>
-                    <button type="button" class="ib danger" title="Remove" aria-label="Remove" onclick={() => (clips = clips.filter((x) => x.id !== c.id))}><Icon name="trash" /></button>
-                  </div>
-                {/each}
-                <div class="field"><button type="button" class="link" onclick={addClip}>Add another video…</button></div>
               </div>
             {/if}
           </div>
@@ -4469,36 +4560,6 @@
   }
   .ib-range input {
     width: 90px;
-  }
-  .clip-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 280px;
-  }
-  .clip-name {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 600;
-  }
-  .hint {
-    margin: 0 0 6px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .music-file {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    max-width: 260px;
-    font-weight: 600;
-  }
-  .music-file span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .mini-swatches {
     display: flex;

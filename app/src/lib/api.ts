@@ -147,8 +147,23 @@ export interface OverlayImage {
 }
 
 /** What is drawn on the frames of an edited video. */
+/** A video drawn over the edited one (pixels and seconds of the source). */
+export interface VideoLayer {
+  path: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  start: number;
+  end: number;
+  from: number;
+  opacity: number;
+  volume: number;
+}
+
 export interface Composition {
   overlays: OverlayImage[];
+  layers: VideoLayer[];
   cursor: {
     visible: boolean;
     scale: number;

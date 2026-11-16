@@ -146,7 +146,7 @@ export function resizeShape(
     else s.size = Math.max(0.2, (badgeRadius(original.size) * f - 11) / 2);
   } else {
     // A picture keeps its proportions.
-    const [gx, gy] = s.kind === "image" ? [Math.max(fx, fy), Math.max(fx, fy)] : [fx, fy];
+    const [gx, gy] = (s.kind === "image" || s.kind === "video") ? [Math.max(fx, fy), Math.max(fx, fy)] : [fx, fy];
     const map = (p: Point) => ({ x: anchor.x + (p.x - anchor.x) * gx, y: anchor.y + (p.y - anchor.y) * gy });
     const a = map({ x: s.x1, y: s.y1 });
     const c = map({ x: s.x2, y: s.y2 });

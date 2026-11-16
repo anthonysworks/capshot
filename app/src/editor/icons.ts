@@ -60,6 +60,7 @@ export const ICONS = {
   front: "M7 7h9.5v9.5H7zM3.5 13V3.5H13",
   back: "M3.5 3.5H13V13H3.5zM7 17h9.5V7",
   emoji: "M10 3a7 7 0 100 14 7 7 0 000-14zM7.5 8.5v1M12.5 8.5v1M6.8 12a3.5 3.5 0 006.4 0",
+  import: "M10 3v9M6.5 8.5L10 12l3.5-3.5M4 14v3h12v-3",
 } as const;
 
 export type IconName = keyof typeof ICONS;
