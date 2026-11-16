@@ -162,7 +162,9 @@
           <span class="value">{Math.round((shape.volume ?? 1) * 100)}%</span>
         </label>
       {/if}
-      <p class="hint">Drag it on the video to move it; drag a corner to resize it.</p>
+      <p class="hint">
+        Drag it on the video to move it; drag a corner to resize it.{shape.kind === "video" ? " Videos are in MP4 exports only." : ""}
+      </p>
     </div>
   {/if}
 {/if}

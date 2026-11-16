@@ -30,7 +30,7 @@
   import Notches from "../lib/Notches.svelte";
   import { CLICK_MARK, CURSOR_STYLES, type CursorStyle, SMOOTHING, cursorAt, drawCursor, loadShapes, smoothTrack } from "./cursors";
   import { DEVICE_FRAMES, type DeviceFrame, frameLayout, hasLook, hasTitle, renderFrame } from "./frames";
-  import { CAMERA_STIFFNESS, ZOOM_LENGTH, ZOOM_SCALES, autoZooms, zoomView } from "./zoom";
+  import { ZOOM_LENGTH, ZOOM_SCALES, autoZooms, cameraTrack, zoomView } from "./zoom";
   import CustomColor from "./CustomColor.svelte";
   import ImportPanel from "./ImportPanel.svelte";
   import { VIVID } from "./colors";
@@ -391,7 +391,7 @@
   const drawnTrack = $derived(cursorTrack && smoothing > 0 && cursorEditable ? smoothTrack(cursorTrack, smoothing) : cursorTrack);
   /** The cursor slowed down, for zooms that follow it. */
   const follows = $derived(zooms.some((z) => z.focus === null));
-  const camera = $derived(follows && cursorTrack ? smoothTrack(cursorTrack, CAMERA_STIFFNESS) : null);
+  const camera = $derived(follows ? cameraTrack(zooms, cursorTrack) : null);
   const selectedZoomItem = $derived(zooms.find((z) => z.id === selectedZoom) ?? null);
   /** Paused on a removed part (or outside the trim): left out of the export. */
   const inCut = $derived(!playing && duration > 0 && !partAt(kept, time));

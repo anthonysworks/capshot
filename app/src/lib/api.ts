@@ -71,11 +71,6 @@ export const checkForUpdates = () => invoke<UpdateStatus>("check_for_updates");
 export const installUpdate = () => invoke<void>("install_update");
 export const openFolder = (folder: Folder) => invoke<void>("open_folder", { folder });
 
-/** Whether Windows keeps the Print Screen key for its own screen capture. */
-export const printScreenTaken = () => invoke<boolean>("print_screen_taken");
-/** Turns Windows' own Print Screen capture off, for this user. */
-export const releasePrintScreen = () => invoke<void>("release_print_screen");
-export const openKeyboardSettings = () => invoke<void>("open_keyboard_settings");
 /** Asks for a folder; null when the dialog is closed. */
 export const pickFolder = (title: string, start: string) => invoke<string | null>("pick_folder", { title, start });
 /** Opens the first-run setup. */
@@ -129,10 +124,6 @@ export const editorPickMedia = (kind: "image" | "audio" | "video") => invoke<str
 /** Saves an edited image (PNG bytes) over the original file. */
 export const editorSave = (path: string, png: Uint8Array) =>
   invoke<void>("editor_save", png, { headers: { "x-path": encodeURIComponent(path) } });
-
-/** Saves an edited image as a new file next to the original; resolves to its path. */
-export const editorSaveCopy = (path: string, png: Uint8Array) =>
-  invoke<string>("editor_save_copy", png, { headers: { "x-path": encodeURIComponent(path) } });
 
 /** Copies an edited image (PNG bytes) to the clipboard. */
 export const editorCopy = (png: Uint8Array) => invoke<void>("editor_copy", png);

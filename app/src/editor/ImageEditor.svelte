@@ -1028,10 +1028,7 @@
       else save();
     } else if (ctrl && key === "d" && selectedShape) {
       e.preventDefault();
-      const duplicate: Shape = { ...$state.snapshot(selectedShape), id: nextId++ };
-      nudge(duplicate, 12 * unit, 12 * unit);
-      commit(() => shapes.push(duplicate));
-      selected = duplicate.id;
+      duplicate();
     } else if (ctrl && key === "0") {
       e.preventDefault();
       fit();
@@ -1042,9 +1039,7 @@
       e.preventDefault();
       zoomTo(view.s * (key === "-" ? 1 / 1.25 : 1.25));
     } else if ((e.key === "Delete" || e.key === "Backspace") && selected !== null) {
-      const id = selected;
-      selected = null;
-      commit(() => (shapes = shapes.filter((sh) => sh.id !== id)));
+      removeSelected();
     } else if (e.key.startsWith("Arrow") && selectedShape) {
       e.preventDefault();
       const step = (e.shiftKey ? 10 : 1) * unit;

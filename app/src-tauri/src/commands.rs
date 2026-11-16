@@ -67,29 +67,6 @@ pub fn save_config(
     Ok(())
 }
 
-/// Whether Windows keeps the Print Screen key for its own screen capture.
-#[tauri::command]
-pub fn print_screen_taken() -> bool {
-    crate::system::print_screen_taken()
-}
-
-/// Turns Windows' own Print Screen capture off, for this user.
-#[tauri::command]
-pub fn release_print_screen() -> Result<(), String> {
-    crate::system::release_print_screen()
-}
-
-/// Opens the Windows page where the Print Screen key can be freed.
-#[tauri::command]
-pub fn open_keyboard_settings() {
-    if let Err(err) = std::process::Command::new("explorer")
-        .arg("ms-settings:easeofaccess-keyboard")
-        .spawn()
-    {
-        tracing::warn!("cannot open the keyboard settings: {err}");
-    }
-}
-
 /// Asks for a folder; returns it, or nothing when the dialog is closed.
 #[tauri::command]
 pub async fn pick_folder(app: AppHandle, title: String, start: String) -> Option<String> {
@@ -245,30 +222,6 @@ pub fn editor_save(app: AppHandle, request: Request<'_>) -> Result<(), String> {
         .map_err(|e| format!("cannot save {}: {e}", path.display()))?;
     tracing::info!(path = %path.display(), "edited image saved");
     Ok(())
-}
-
-/// Saves an edited image (PNG body) as a new file next to the original,
-/// `<name> (edited).<ext>`; returns its path. The copy joins the history
-/// and can itself be edited.
-#[tauri::command]
-pub fn editor_save_copy(app: AppHandle, request: Request<'_>) -> Result<String, String> {
-    let original = header_path(&app, &request)?;
-    let image = capshot_encode::decode(raw_body(&request)?).map_err(|e| e.to_string())?;
-    let format = capshot_encode::format_of(&original).ok_or("unsupported image format")?;
-    let bytes = capshot_encode::encode(&image, format).map_err(|e| e.to_string())?;
-    let dir = original.parent().ok_or("no folder")?;
-    let stem = original
-        .file_stem()
-        .map_or_else(|| "capture".into(), |s| s.to_string_lossy().into_owned());
-    let extension = original
-        .extension()
-        .map_or_else(|| "png".into(), |e| e.to_string_lossy().into_owned());
-    let path = capshot_encode::unique_path(dir, &format!("{stem} (edited)"), &extension);
-    std::fs::write(&path, bytes).map_err(|e| format!("cannot save {}: {e}", path.display()))?;
-    tracing::info!(path = %path.display(), "edited copy saved");
-    app.state::<EditorFiles>().allow(&path);
-    crate::capture::remember(&app, &path, image.width(), image.height());
-    Ok(path.display().to_string())
 }
 
 /// Copies an edited image (PNG body) to the clipboard.
