@@ -191,7 +191,7 @@ fn on_result(app: &AppHandle, result: CaptureResult) {
         CaptureResult::DiscardRecording => recording::discard(app),
         CaptureResult::TogglePause => recording::toggle_pause(app),
         CaptureResult::ColorCopied(hex) => tracing::info!(%hex, "colour copied"),
-        CaptureResult::Cancelled => tracing::debug!("capture cancelled"),
+        CaptureResult::Cancelled => tracing::info!("capture cancelled"),
         CaptureResult::Failed(err) => tracing::error!("capture failed: {err}"),
     }
 }

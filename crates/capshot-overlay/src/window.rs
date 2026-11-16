@@ -47,12 +47,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HCURSOR, HTCLIENT,
-    HWND_TOPMOST, IDC_ARROW, IDC_CROSS, LoadCursorW, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SetCursor, SetCursorPos,
-    SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
-    WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IsIconic, IsWindow, LoadCursorW, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_SETFOREGROUNDLOCKTIMEOUT,
+    SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetCursorPos,
+    SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP,
+    WM_SETCURSOR, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 use windows::core::{BOOL, Interface, w};
 
@@ -211,6 +213,8 @@ impl SwapChain {
 
 /// A capture in progress.
 struct Session {
+    /// The window that had the foreground before the overlay: it gets it back.
+    previous: HWND,
     /// When the overlay was shown.
     shown_at: Instant,
     snapshot: Snapshot,
@@ -447,6 +451,15 @@ fn take_focus(hwnd: HWND) {
             let _ = SetFocus(Some(hwnd));
             return;
         }
+        // Refused: lift the foreground lock for this one switch.
+        without_foreground_lock(|| {
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+        });
+        if GetForegroundWindow() == hwnd {
+            let _ = SetFocus(Some(hwnd));
+            return;
+        }
         let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
         let current = GetCurrentThreadId();
         let attached = foreground != 0
@@ -468,6 +481,35 @@ fn take_focus(hwnd: HWND) {
         if GetForegroundWindow() != hwnd {
             tracing::warn!("the capture overlay could not take the keyboard focus");
         }
+    }
+}
+
+/// Runs `f` with the foreground lock timeout at zero, so that Windows lets a
+/// program that did not receive the last input take the foreground. The
+/// previous value is put back right after (the change is never saved).
+fn without_foreground_lock<T>(f: impl FnOnce() -> T) -> T {
+    let none = SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0);
+    let mut previous = 0u32;
+    // SAFETY: `previous` outlives the call; the timeout is a value, not a pointer.
+    unsafe {
+        let read = SystemParametersInfoW(
+            SPI_GETFOREGROUNDLOCKTIMEOUT,
+            0,
+            Some((&raw mut previous).cast()),
+            none,
+        )
+        .is_ok();
+        let _ = SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, None, none);
+        let out = f();
+        if read {
+            let _ = SystemParametersInfoW(
+                SPI_SETFOREGROUNDLOCKTIMEOUT,
+                0,
+                Some(std::ptr::without_provenance_mut(previous as usize)),
+                none,
+            );
+        }
+        out
     }
 }
 
@@ -647,8 +689,10 @@ impl State {
                         .as_ref()
                         .is_some_and(|s| s.shown_at.elapsed() < Duration::from_millis(400));
                     if just_opened {
+                        tracing::info!("capture overlay lost the focus as it opened: asking again");
                         take_focus(self.hwnd);
                     } else {
+                        tracing::info!("capture overlay closed: it lost the focus");
                         self.finish(None);
                     }
                 }
@@ -739,7 +783,14 @@ impl State {
             None => engine.swap = Some(SwapChain::new(engine.capturer.gpu(), hwnd, size)?),
         }
 
+        // SAFETY: plain query.
+        let previous = unsafe { GetForegroundWindow() };
         self.session = Some(Session {
+            previous: if previous == hwnd {
+                HWND::default()
+            } else {
+                previous
+            },
             shown_at: Instant::now(),
             selection: Selection::new(purpose.sanitize(request.mode), cursor),
             snapshot,
@@ -1070,7 +1121,19 @@ impl State {
         // SAFETY: our own window, on its thread.
         unsafe {
             let _ = ReleaseCapture();
+            let was_foreground = GetForegroundWindow() == self.hwnd;
             let _ = ShowWindow(self.hwnd, SW_HIDE);
+            // Hiding the overlay lets Windows pick any window to activate (a
+            // folder window, say, in front of a game): give the foreground
+            // back to the window that had it.
+            let previous = session.previous;
+            if was_foreground
+                && !previous.is_invalid()
+                && IsWindow(Some(previous)).as_bool()
+                && !IsIconic(previous).as_bool()
+            {
+                let _ = SetForegroundWindow(previous);
+            }
         }
         // Release the big back buffers while idle; recreating the swap chain
         // costs about a millisecond.
